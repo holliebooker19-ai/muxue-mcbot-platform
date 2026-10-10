@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { fightGrace, type FightGrace } from './fight-grace.js';
-import { BodyError, sameControl, type Body, type Observation, type Operation, type ActionName, type ActionArguments, type Container, type ItemStack, type NearbyBlocks } from './body.js';
+import { BodyError, type Body, type Observation, type Operation, type ActionName, type ActionArguments, type Container, type ItemStack, type NearbyBlocks } from './body.js';
 
 type Context = Pick<Observation, 'instanceId' | 'sessionId' | 'worldId' | 'dimension' | 'controlGeneration'>;
 type Target = { context: Context; expires: number; block: NearbyBlocks['candidates'][number] };
@@ -53,8 +53,7 @@ export class ContainerTasks {
   private target(ref: string, context: Context): Target {
     const target = this.targets.get(ref);
     if (!target || target.expires <= this.now()) throw new BodyError('STALE_REFERENCE', '容器引用已过期；重新发现目标');
-    // A follow stepping aside for this very call moved the generation on (step-aside stop): the reference still holds.
-    if (!sameControl(this.body, target.context, context)) throw new BodyError('WORLD_CHANGED', '容器引用不属于当前身体会话');
+    if (!isDeepStrictEqual(context, target.context)) throw new BodyError('WORLD_CHANGED', '容器引用不属于当前身体会话');
     return target;
   }
   async approachContainer(ref: string, timeoutMs?: number): Promise<Operation> {

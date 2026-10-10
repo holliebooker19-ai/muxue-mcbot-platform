@@ -7,6 +7,7 @@ import { CompanionMode } from '../dist/companion-mode.js';
 import { GatherTasks } from '../dist/gather-tasks.js';
 import { SurvivalTasks } from '../dist/survival-tasks.js';
 import { EventJournal } from '../dist/events.js';
+import { postureFor } from './mock-posture.mjs';
 
 const clone = value => structuredClone(value), delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -22,7 +23,8 @@ function fixture(t, { block = 'minecraft:coal_ore', yieldCount = 1, automatic = 
     groundItems: [], groundItemsTruncated: false, pickupCursor: 0, pickupOldestCursor: 0, pickupReceipts: [] };
   state.inventory[0] = { slot: 0, id: 'minecraft:iron_pickaxe', count: 1, components: {}, maxStackSize: 1 };
   const candidates = [], item = block.includes('copper') ? 'minecraft:raw_copper' : block.includes('iron') ? 'minecraft:raw_iron' : 'minecraft:coal';
-  const f = { state, calls, candidates, operations, playerId, item, stopFailure: false, followState: 'waiting', automatic,
+  const posture = postureFor(state);
+  const f = { state, calls, candidates, operations, playerId, item, stopFailure: false, automatic, posture, postures: () => posture.requests.filter(request => request.action === 'follow'),
     advance(ms) { clock += ms; },
     addBlock(x = 3, id = block) { const value = { position: { x, y: 64, z: 0 }, id, ...resourceOf(id), properties: {}, targetToken: randomUUID(), distance: x, visible: true, requiresCorrectTool: true, suitableToolSlots: [0], recommendedToolSlot: 0 }; candidates.push(value); return value; },
     addDrop(count = yieldCount, id = item, x = 3.5) { const value = { entityId: randomUUID(), position: { x, y: 64, z: 0.5 }, onGround: true, visibility: 'visible', stack: { id, count, components: {}, maxStackSize: 64 } }; state.groundItems.push(value); return value; },
@@ -34,9 +36,9 @@ function fixture(t, { block = 'minecraft:coal_ore', yieldCount = 1, automatic = 
     },
   };
   const body = {
-    hello: { ...identity, protocol: 2, backend: 'server', capabilities: ['follow-companion', 'companion-mining', 'companion-pickup', 'nearby-resources', 'approach-resource', 'dig-block', 'pickup-item', 'select-slot', 'assess-tool', 'survival-state', 'swap-inventory', 'eat-item', 'send-chat'] },
+    hello: { ...identity, protocol: 2, backend: 'server', capabilities: ['server-posture', 'companion-mining', 'companion-pickup', 'nearby-resources', 'approach-resource', 'dig-block', 'pickup-item', 'select-slot', 'assess-tool', 'survival-state', 'swap-inventory', 'eat-item', 'send-chat'] },
     acquireTask(token) { if (owner) throw new BodyError('BUSY', 'shared owner'); owner = token; }, releaseTask(token) { calls.push({ name: 'release', token }); if (owner === token) owner = undefined; },
-    pendingOperations: () => [], close: async () => {},
+    pendingOperations: () => [], close: async () => {}, setPosture: request => posture.setPosture(request),
     observe: async () => { clock += 50; const value = clone(state); await f.afterObserve?.(value); return value; },
     nearbyResources: async args => {
       calls.push({ name: 'scan', args: clone(args), generation: state.controlGeneration });
@@ -46,8 +48,8 @@ function fixture(t, { block = 'minecraft:coal_ore', yieldCount = 1, automatic = 
     },
     assessTool: async args => ({ ...identity, controlGeneration: state.controlGeneration, position: args, blockId: args.expectedBlock, properties: {}, requiresCorrectTool: true, notes: [], candidates: [{ ...clone(state.inventory[0]), eligible: !f.wrongTool, componentsComplete: true, silkTouch: 0, fortune: 0, dropEffectsKnown: true }], recommendedSlot: 0 }),
     survivalState: async () => ({ ...clone(state), maxHealth: 20, saturation: 0, serverTick: 1, observedAt: clock, foods: [] }),
-    stop: async () => {
-      calls.push({ name: 'stop' }); if (f.stopFailure) throw new BodyError('STOP_UNCONFIRMED', 'injected failed stop');
+    stop: async options => {
+      calls.push({ name: 'stop', options }); posture.stopped(options); if (f.stopFailure) throw new BodyError('STOP_UNCONFIRMED', 'injected failed stop');
       state.controlGeneration++; for (const [id, op] of operations) if (op.status === 'running') operations.set(id, { ...op, status: 'cancelled' });
       await f.afterStop?.(); return { stopped: true };
     },
@@ -55,8 +57,7 @@ function fixture(t, { block = 'minecraft:coal_ore', yieldCount = 1, automatic = 
     act: async (name, args, token) => {
       if (name !== 'send-chat' && owner !== token) throw new BodyError('BUSY', 'shared owner');
       calls.push({ name, args: clone(args), token }); await f.beforeAct?.(name, args);
-      let status = name === 'follow-companion' ? 'running' : 'succeeded', result = {};
-      if (name === 'follow-companion') result = { ...args, state: f.followState };
+      let status = 'succeeded', result = {};
       if (name === 'select-slot') state.selectedSlot = args.slot;
       if (name === 'approach-resource' && f.rangeFailure) { status = 'failed'; result = { code: 'COMPANION_OUT_OF_RANGE' }; }
       if (name === 'dig-block') {
@@ -81,7 +82,7 @@ function fixture(t, { block = 'minecraft:coal_ore', yieldCount = 1, automatic = 
     async spin(accept) { await until(async () => { await f.tick(); return accept(); }); },
     native: name => calls.filter(call => call.name === name),
   });
-  t.after(async () => { f.stopFailure = false; await mode.stop(); });
+  t.after(async () => { f.stopFailure = false; await mode.stop(undefined, { clearGuard: true, clearPosture: true }); });
   return f;
 }
 
@@ -92,10 +93,12 @@ test('one guarded ore uses the outer token and old ground coal never replaces th
   assert.equal(mining.attemptedBlocks, 1); assert.equal(mining.remainingBlocks, 1); assert.equal(mining.dropAttribution, 'unconfirmed');
   assert.deepEqual(mining.newPickedByItem.map(({ item, count }) => ({ item, count })), [{ item: 'minecraft:coal', count: 1 }]);
   assert(f.state.groundItems.some(item => item.entityId === old.entityId)); assert.equal(f.native('dig-block').length, 1);
-  assert.equal(new Set(f.calls.filter(call => ['follow-companion', 'dig-block', 'select-slot'].includes(call.name)).map(call => call.token)).size, 1);
-  assert(f.calls.filter(call => call.name === 'follow-companion').every(call => call.args.wander === false), 'mining never strolls away from the ore radius');
-  assert(f.native('scan')[0].generation > 0, 'scan uses confirmed internal-stop generation');
-  assert.equal(f.events.since(0, ['task']).length, 0); assert.throws(() => f.body.acquireTask('intruder'), { code: 'BUSY' });
+  assert.equal(new Set(f.calls.filter(call => ['dig-block', 'select-slot'].includes(call.name)).map(call => call.token)).size, 1);
+  assert(f.postures().every(request => request.wander === false), 'mining never strolls away from the ore radius');
+  assert.equal(f.postures().length, 1, 'the child jobs never restart the follow: one posture request only');
+  assert.equal(f.native('stop').filter(call => call.options?.clearPosture).length, 0, 'and nothing ended the posture');
+  assert.equal(f.events.since(0, ['task']).length, 0);
+  f.body.acquireTask('free-again'); f.body.releaseTask('free-again'); // the task lock is the child job's only: it is free again between children
 });
 
 test('new visible copper drops are picked by receipt without predicting yield or claiming block attribution', async t => {
@@ -142,18 +145,35 @@ for (const phase of ['scan', 'dig', 'pickup']) test(`late ${phase} cannot resume
   if (phase === 'scan') f.afterScan = async () => { entered.resolve(); await gate.promise; };
   else f.afterAct = async name => { if (name === (phase === 'dig' ? 'dig-block' : 'pickup-item')) { entered.resolve(); await gate.promise; } };
   await f.follow(); await f.tick(); await entered.promise;
-  await f.mode.stop(); await f.mode.request({ action: 'wait' }); const snapshot = f.mode.snapshot(), revision = f.mode.observationEpoch();
+  assert.throws(() => f.body.acquireTask('intruder'), { code: 'BUSY' }); // the child still holds the lock until the stop is confirmed
+  await f.mode.stop(undefined, { clearGuard: true, clearPosture: true }); await f.mode.request({ action: 'wait' });
+  f.body.acquireTask('new-owner'); // a new owner takes the freed lock; the late finally of the old child must not release it
+  const snapshot = f.mode.snapshot(), revision = f.mode.observationEpoch();
   gate.resolve(); await delay(120);
-  assert.deepEqual(f.mode.snapshot(), snapshot); assert.equal(f.mode.observationEpoch(), revision); assert.equal(f.native('follow-companion').length, 1);
-  assert.throws(() => f.body.acquireTask('old-finally-cannot-release'), { code: 'BUSY' });
+  assert.throws(() => f.body.acquireTask('intruder'), { code: 'BUSY' }); f.body.releaseTask('new-owner');
+  assert.deepEqual(f.mode.snapshot(), snapshot); assert.equal(f.mode.observationEpoch(), revision); assert.equal(f.postures().length, 1);
+  assert.equal(f.native('release').length >= 1, true, 'the stop freed the child\'s lock');
   if (phase === 'scan') assert.equal(f.native('dig-block').length, 0);
 });
 
-test('failed stop retains the outer lock and only later explicit confirmation permits a new task', async t => {
-  const f = fixture(t); await f.follow(); f.stopFailure = true;
-  await assert.rejects(f.mode.stop(), { code: 'STOP_UNCONFIRMED' });
+test('failed stop retains the child\'s task lock and only later explicit confirmation permits a new task', async t => {
+  const f = fixture(t), gate = deferred(), entered = deferred(); f.addBlock();
+  f.afterAct = async name => { if (name === 'dig-block') { entered.resolve(); await gate.promise; } };
+  await f.follow(); await f.tick(); await entered.promise;
+  const end = () => f.mode.stop(undefined, { clearGuard: true, clearPosture: true });
+  f.stopFailure = true;
+  await assert.rejects(end(), { code: 'STOP_UNCONFIRMED' });
   assert.throws(() => f.body.acquireTask('intruder'), { code: 'BUSY' }); await assert.rejects(f.mode.request({ action: 'wait' }), { code: 'BUSY' });
-  f.stopFailure = false; await f.mode.stop(); await f.mode.request({ action: 'wait' }); assert.throws(() => f.body.acquireTask('new-owner'), { code: 'BUSY' });
+  f.stopFailure = false; await end(); await f.mode.request({ action: 'wait' });
+  f.body.acquireTask('new-owner'); f.body.releaseTask('new-owner'); gate.resolve();
+});
+
+test('a failed stop with no child running still refuses new commands until it is confirmed', async t => {
+  const f = fixture(t); await f.follow(); f.stopFailure = true;
+  await assert.rejects(f.mode.stop(undefined, { clearGuard: true, clearPosture: true }), { code: 'STOP_UNCONFIRMED' });
+  await assert.rejects(f.mode.request({ action: 'wait' }), { code: 'BUSY' });
+  f.stopFailure = false; await f.mode.stop(undefined, { clearGuard: true, clearPosture: true }); await f.mode.request({ action: 'wait' });
+  assert.equal(f.posture.current.action, 'wait');
 });
 
 for (const fault of ['wrong-tool', 'full', 'unknown']) test(`${fault} blocks mining after one attempt without automatic rescan`, async t => {
@@ -161,7 +181,7 @@ for (const fault of ['wrong-tool', 'full', 'unknown']) test(`${fault} blocks min
   await f.spin(() => f.mode.snapshot().state === 'blocked');
   assert.equal(f.mode.snapshot().mining.attemptedBlocks, 1); assert.equal(f.mode.snapshot().mining.minedBlocks, 0);
   const scans = f.native('scan').length; f.advance(10000); await f.tick(); assert.equal(f.native('scan').length, scans);
-  assert.equal(f.native('dig-block').length, fault === 'unknown' ? 1 : 0); assert(f.native('stop').length >= 2);
+  assert.equal(f.native('dig-block').length, fault === 'unknown' ? 1 : 0); assert(f.native('stop').length >= 1); assert.equal(f.posture.current, null, 'a blocked mode holds no posture on the server: nothing carries on by itself');
   if (fault === 'unknown') assert.equal(f.mode.snapshot().mining.countStatus, 'partial-or-unknown');
 });
 
@@ -182,7 +202,7 @@ test('options reject unavailable capability, missing budget, duplicate IDs, pick
     { action: 'follow', player: 'Alex', mining: { ...f.mining, maxBlocks: 33 } },
   ]) await assert.rejects(f.mode.request(request), { code: 'INVALID_ARGUMENT' });
   f.body.hello.capabilities = f.body.hello.capabilities.filter(cap => cap !== 'companion-mining'); await assert.rejects(f.follow(), { code: 'UNSUPPORTED' });
-  assert.equal(f.native('follow-companion').length, 0); f.body.acquireTask('still-idle'); f.body.releaseTask('still-idle');
+  assert.equal(f.postures().length, 0); f.body.acquireTask('still-idle'); f.body.releaseTask('still-idle');
 });
 
 for (const code of ['COMPANION_OUT_OF_RANGE', 'TASK_TIMEOUT']) test(`unknown child with ${code} never restores follow even at the mode deadline`, async t => {
@@ -195,5 +215,5 @@ for (const code of ['COMPANION_OUT_OF_RANGE', 'TASK_TIMEOUT']) test(`unknown chi
   };
   await f.follow(); await f.spin(() => f.mode.snapshot().state === 'blocked');
   assert.equal(f.mode.snapshot().code, 'UNKNOWN'); assert.equal(f.mode.snapshot().mining.countStatus, 'partial-or-unknown');
-  assert.equal(f.native('follow-companion').length, 1); assert.equal(f.native('scan').length, 1);
+  assert.equal(f.postures().length, 1); assert.equal(f.native('scan').length, 1);
 });

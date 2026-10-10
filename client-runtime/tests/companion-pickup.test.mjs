@@ -11,6 +11,7 @@ import { EventJournal } from '../dist/events.js';
 import { RuntimeMonitor } from '../dist/lifecycle.js';
 import { createMcpServer } from '../dist/mcp.js';
 import { mockServerControl } from './mock-server-control.mjs';
+import { installPosture } from './mock-posture.mjs';
 
 const clone = value => structuredClone(value);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -23,7 +24,7 @@ async function fixture(t, { cap = true, full = false } = {}) {
     inventory: Array.from({ length: 36 }, (_, slot) => ({ slot, id: full ? 'minecraft:dirt' : 'minecraft:air', count: full ? 64 : 0, components: {}, ...(full ? { maxStackSize: 64 } : {}) })), groundItems: [], groundItemsTruncated: false, pickupCursor: 0, pickupOldestCursor: 0, pickupReceipts: [] };
   let generation = 0;
   const hello = mock.handlers.hello, observe = mock.handlers.observe, stop = mock.handlers.stop, operation = mock.handlers.operation;
-  mock.handlers.hello = () => ({ ...hello(), capabilities: ['send-chat', 'look-at', 'move-to-position', 'follow-companion', 'pickup-item', ...(cap ? ['companion-pickup'] : [])] });
+  mock.handlers.hello = () => ({ ...hello(), capabilities: ['send-chat', 'look-at', 'move-to-position', 'pickup-item', ...(cap ? ['companion-pickup'] : [])] });
   mock.handlers.observe = async params => {
     await f.beforeObserve?.();
     const result = { ...observe(params), ...clone(state) };
@@ -33,8 +34,7 @@ async function fixture(t, { cap = true, full = false } = {}) {
   mock.handlers.act = async (params, ctx) => {
     ctx.active(params);
     if (params.controlGeneration !== generation) throw Object.assign(new Error('stale'), { code: 'STALE_CONTROL' });
-    const op = { operationId: params.operationId, sessionId: params.sessionId, controlGeneration: params.controlGeneration, name: params.name, status: ['follow-companion', 'pickup-item'].includes(params.name) ? 'running' : 'succeeded', summary: params.name };
-    if (params.name === 'follow-companion') op.result = { ...params.args, state: f.followState, position: clone(state.position) };
+    const op = { operationId: params.operationId, sessionId: params.sessionId, controlGeneration: params.controlGeneration, name: params.name, status: params.name === 'pickup-item' ? 'running' : 'succeeded', summary: params.name };
     if (params.name === 'pickup-item') {
       assert.equal(params.args.companionGuard.player, 'Alex'); assert.equal(params.args.companionGuard.expectedEntityId, playerId);
       f.pickupRequests.set(op.operationId, params.args);
@@ -55,7 +55,12 @@ async function fixture(t, { cap = true, full = false } = {}) {
     const result = { ...op, status: code ? 'failed' : 'succeeded', summary: code ?? 'native pickup confirmed', result: code ? { code } : { pickedUpCount: item.stack.count, pickup: 'confirmed' } };
     ctx.operations.set(op.operationId, result); return result;
   };
-  const f = { mock, state, playerId, followState: 'waiting', holdPickup: false, pickupRequests: new Map(),
+  // The follow stands beside the player (arrived): what the pickup child waits for.
+  const posture = installPosture(mock); posture.arrived = true;
+  const f = { mock, state, playerId, posture, holdPickup: false, pickupRequests: new Map(),
+    postures: () => posture.requests.filter(request => request.action === 'follow'),
+    stops: () => mock.calls.filter(call => call.method === 'stop').map(call => call.params),
+    end: () => f.mode.stop(undefined, { clearGuard: true, clearPosture: true }),
     add(count = 3, id = 'minecraft:snowball', x = 2, components = {}) { const item = { entityId: randomUUID(), position: { x, y: 64, z: 0 }, onGround: true, visibility: 'visible', stack: { id, count, components, maxStackSize: id === 'minecraft:snowball' ? 16 : 64 } }; state.groundItems.push(item); return item; },
     pick(item, count = item.stack.count) {
       state.pickupCursor++;
@@ -80,11 +85,12 @@ test('two quiet pickups share the mode token, aggregate native evidence once and
   const f = await fixture(t); await f.follow(); const first = f.add(3);
   await f.spin(() => f.mode.snapshot().pickup?.pickedUpCount === 3 && f.mode.snapshot().activity === 'following' && f.mode.snapshot().stage === 'active');
   f.add(2); await f.spin(() => f.mode.snapshot().pickup?.pickedUpCount === 5 && f.mode.snapshot().activity === 'following' && f.mode.snapshot().stage === 'active');
-  assert.equal(f.native('pickup-item').length, 2); assert.equal(f.native('follow-companion').length, 3);
+  assert.equal(f.native('pickup-item').length, 2);
+  assert.equal(f.postures().length, 1, 'the follow is set once: a child pickup never restarts it');
+  assert.deepEqual(f.stops(), [], 'and nothing is stopped for it');
   assert.equal(f.events.since(0, ['task', 'companion']).length, 0);
   assert.equal(f.mode.snapshot().pickup.lastItem, first.stack.id);
-  assert.throws(() => f.body.acquireTask('finite'), { code: 'BUSY' });
-  await assert.rejects(f.body.act('look-at', { x: 0, y: 64, z: 0 }), { code: 'BUSY' });
+  f.body.acquireTask('finite'); await assert.rejects(f.body.act('look-at', { x: 0, y: 64, z: 0 }), { code: 'BUSY' }); f.body.releaseTask('finite'); // the task lock is a child job's only
   assert.equal((await f.body.act('send-chat', { message: '仍可聊天' })).status, 'succeeded');
 });
 test('ordinary follow keeps its old behavior; active pursuit requires whitelist and both positions near the same player', async t => {
@@ -93,19 +99,18 @@ test('ordinary follow keeps its old behavior; active pursuit requires whitelist 
   f.state.groundItems = []; // Remove the ordinary-follow fixture before checking excluded candidates.
   await f.follow(); f.add(1, 'minecraft:diamond', 2); f.add(1, 'minecraft:snowball', 7); await f.monitor.tick();
   assert.equal(f.native('pickup-item').length, 0);
-  f.followState = 'following';
-  const op = f.mock.operations.get(f.mode.snapshot().operationId); f.mock.operations.set(op.operationId, { ...op, result: { ...op.result, state: 'following' } });
+  f.posture.arrived = false; // still walking to the player: not beside them yet
   f.add(1); await f.monitor.tick(); assert.equal(f.native('pickup-item').length, 0);
 });
 test('fractional radius is valid for private pickup while public finite radius remains integer-only', async t => {
   const f = await fixture(t); await f.follow({ items: ['minecraft:snowball'], radius: 1.5 }, 1.5); f.add(1, 'minecraft:snowball', 1.8);
   await f.spin(() => f.mode.snapshot().pickup?.pickedUpCount === 1 && f.mode.snapshot().activity === 'following');
   assert.equal(f.native('pickup-item')[0].params.args.companionGuard.maxDistance, 1.5);
-  await f.mode.stop(); await assert.rejects(f.gather.start('collect-items', { item: 'minecraft:snowball', count: 1, radius: 1.5 }), { code: 'INVALID_ARGUMENT' });
+  await f.end(); await assert.rejects(f.gather.start('collect-items', { item: 'minecraft:snowball', count: 1, radius: 1.5 }), { code: 'INVALID_ARGUMENT' });
 });
 test('missing pickup cap and invalid follow options reject before any motion', async t => {
   const old = await fixture(t, { cap: false });
-  await assert.rejects(old.follow(), { code: 'UNSUPPORTED' }); assert.equal(old.native('follow-companion').length, 0);
+  await assert.rejects(old.follow(), { code: 'UNSUPPORTED' }); assert.equal(old.postures().length, 0);
   const f = await fixture(t);
   for (const request of [{ action: 'follow', player: 'Alex', pickup: { items: [], radius: 3 } }, { action: 'follow', player: 'Alex', distance: 4, pickup: { items: ['minecraft:snowball'], radius: 3 } }, { action: 'wait', pickup: { items: ['minecraft:snowball'] } }]) await assert.rejects(f.mode.request(request), { code: 'INVALID_ARGUMENT' });
 });
@@ -113,27 +118,30 @@ test('player range guard softly returns to following and never automatically ret
   const f = await fixture(t); f.holdPickup = true; await f.follow(); f.add();
   await f.spin(() => f.native('pickup-item').length === 1);
   f.state.entities[0].position.x = 20;
-  await f.spin(() => f.mode.snapshot().activity === 'following' && f.native('follow-companion').length === 2);
+  await f.spin(() => f.mode.snapshot().activity === 'following' && f.mode.snapshot().pickup.lastCode === 'COMPANION_OUT_OF_RANGE');
+  assert.equal(f.postures().length, 1, 'back to following by itself: the server never stopped following');
   assert.equal(f.mode.snapshot().pickup.pickedUpCount, 0); assert.equal(f.mode.snapshot().pickup.lastCode, 'COMPANION_OUT_OF_RANGE');
   f.state.entities[0].position.x = 1; f.holdPickup = false; await f.monitor.tick(); await delay(100);
   assert.equal(f.native('pickup-item').length, 1); assert.equal(f.events.since(0, ['companion']).length, 0);
 });
-test('full backpack stops the old follow before unlock, reports partial facts once and waits for explicit resume', async t => {
-  const f = await fixture(t, { full: true }); await f.follow(); const followId = f.mode.snapshot().operationId; f.add();
+test('full backpack takes the posture off before unlock, reports partial facts once and waits for explicit resume', async t => {
+  const f = await fixture(t, { full: true }); await f.follow(); f.add();
   await f.spin(() => f.mode.snapshot().state === 'blocked');
-  assert.equal(f.mode.snapshot().code, 'INVENTORY_FULL'); assert.equal(f.mock.operations.get(followId).status, 'cancelled'); assert.equal(f.native('pickup-item').length, 0);
+  assert.equal(f.mode.snapshot().code, 'INVENTORY_FULL'); assert.equal(f.posture.current, null, 'a blocked mode never carries on by itself'); assert.equal(f.native('pickup-item').length, 0);
   f.state.entities[0].position.x = 2; await f.monitor.tick();
-  assert.equal(f.native('follow-companion').length, 1); assert.equal(f.events.since(0, ['companion']).length, 1);
+  assert.equal(f.postures().length, 1); assert.equal(f.posture.current, null); assert.equal(f.events.since(0, ['companion']).length, 1);
   assert.equal(JSON.parse(f.events.since(0, ['companion'])[0].text).pickup.pickedUpCount, 0);
   f.body.acquireTask('finite'); f.body.releaseTask('finite');
 });
 test('pause preserves pickup, wait clears it, and explicit stop discards configuration and cannot resume', async t => {
   const f = await fixture(t); await f.follow(); await f.mode.request({ action: 'pause' });
   assert.equal(f.mode.snapshot().state, 'paused'); assert.deepEqual(f.mode.snapshot().pickup.items, ['minecraft:snowball']);
+  assert.equal(f.posture.current, null, 'paused is the posture off');
   f.body.acquireTask('finite'); f.body.releaseTask('finite');
   await f.mode.request({ action: 'resume' }); await until(() => f.mode.snapshot().stage === 'active');
+  assert.equal(f.posture.current.action, 'follow');
   await f.mode.request({ action: 'wait' }); assert.equal(f.mode.snapshot().pickup, undefined);
-  await f.follow(); await f.mode.stop(); assert.deepEqual(f.mode.snapshot(), { state: 'stopped' });
+  await f.follow(); await f.end(); assert.equal(f.posture.current, null); assert.deepEqual(f.mode.snapshot(), { state: 'stopped' });
   await assert.rejects(f.mode.request({ action: 'resume' }), { code: 'NO_COMPANION_INTENT' });
 });
 test('stop during a delayed pickup reply cannot restart follow or release a newly acquired write lock', async t => {
@@ -141,10 +149,10 @@ test('stop during a delayed pickup reply cannot restart follow or release a newl
   const gate = new Promise(resolve => { release = resolve; }), seen = new Promise(resolve => { entered = resolve; });
   f.afterAct = async params => { if (params.name === 'pickup-item') { entered(); await gate; } };
   await f.follow(); f.add(); await f.monitor.tick(); await seen;
-  await f.mode.stop(); f.body.acquireTask('new-finite');
+  await f.end(); f.body.acquireTask('new-finite');
   release(); await delay(150);
   assert.throws(() => f.body.acquireTask('intruder'), { code: 'BUSY' });
-  assert.deepEqual(f.mode.snapshot(), { state: 'stopped' }); assert.equal(f.native('follow-companion').length, 1);
+  assert.deepEqual(f.mode.snapshot(), { state: 'stopped' }); assert.equal(f.postures().length, 1);
   f.body.releaseTask('new-finite');
 });
 test('pause cancels an in-flight child, retains its policy and explicit resume uses a new token without a late restart', async t => {
@@ -157,7 +165,7 @@ test('pause cancels an in-flight child, retains its policy and explicit resume u
   f.body.acquireTask('finite'); f.body.releaseTask('finite');
   await f.mode.request({ action: 'resume' }); await until(() => f.mode.snapshot().stage === 'active');
   release(); await f.spin(() => f.mode.snapshot().pickup?.pickedUpCount === 3 && f.mode.snapshot().stage === 'active' && f.mode.snapshot().activity === 'following');
-  assert.equal(f.native('pickup-item').length, 2); assert.equal(f.native('follow-companion').length, 3);
+  assert.equal(f.native('pickup-item').length, 2); assert.equal(f.postures().length, 2, 'the first follow and the explicit resume');
   assert.equal(f.events.since(0, ['task', 'companion']).length, 0);
 });
 test('a confirmed pickup racing the anchor guard preserves its amount while softly following the same player', async t => {
@@ -169,19 +177,19 @@ test('a confirmed pickup racing the anchor guard preserves its amount while soft
 test('blocked cleanup cannot adopt a changed world context as a resumable mode', async t => {
   const f = await fixture(t, { full: true }); await f.follow(); f.add();
   let stops = 0;
-  f.afterStop = () => { if (++stops === 2) f.state.dimension = 'minecraft:the_nether'; };
+  f.afterStop = () => { if (++stops === 1) f.state.dimension = 'minecraft:the_nether'; };
   await f.spin(() => f.mode.snapshot().state === 'stopped');
   assert.equal(f.mode.snapshot().code, 'WORLD_CHANGED'); assert.equal(f.mode.snapshot().pickup, undefined);
   await assert.rejects(f.mode.request({ action: 'resume' }), { code: 'NO_COMPANION_INTENT' });
 });
-test('native receipts from arbitrary generations cannot be accepted as self-issued stop boundaries', async t => {
-  const f = await fixture(t); await f.follow(); const item = f.add(); f.pick(item); f.state.pickupReceipts[0].controlGeneration = 999;
+test('native receipts from another body session cannot be accepted into the ledger', async t => {
+  const f = await fixture(t); await f.follow(); const item = f.add(); f.pick(item); f.state.pickupReceipts[0].sessionId = 'some-other-session';
   await f.monitor.tick();
   assert.equal(f.mode.snapshot().state, 'stopped'); assert.equal(f.mode.snapshot().code, 'WORLD_CHANGED');
   const failure = JSON.parse(f.events.since(0, ['companion'])[0].text);
   assert.equal(failure.pickup.pickedUpCount, undefined); assert.equal(failure.pickup.lastConfirmedPickedUpCount, 0);
 });
-test('old monitor observation crossing either internal stop transaction is discarded without losing the lease', async t => {
+test('an old monitor observation crossing a posture change is discarded without losing the lease', async t => {
   const f = await fixture(t); f.holdPickup = true; await f.follow(); f.add(); await f.monitor.tick();
   await until(() => f.native('pickup-item').length === 1);
   let release, entered;
@@ -190,19 +198,17 @@ test('old monitor observation crossing either internal stop transaction is disca
   f.afterObserve = async () => { if (first) { first = false; entered(); await gate; } };
   const tick = f.monitor.tick(); await seen;
   f.holdPickup = false;
-  await until(() => f.native('follow-companion').length === 2);
+  await f.mode.request({ action: 'wait' });
   release(); await tick;
-  assert.notEqual(f.mode.snapshot().state, 'stopped'); assert.equal((await f.body.observe()).connected, true);
+  assert.equal(f.mode.snapshot().state, 'waiting', 'the late look at the old follow did not overwrite the wait'); assert.equal(f.posture.current.action, 'wait');
+  assert.equal((await f.body.observe()).connected, true);
 });
-test('native pickup during internal stop and during the child first read is counted rather than reported missing', async t => {
-  for (const window of ['stop', 'child-read', 'partial']) {
+test('native pickup during the child first read is counted rather than reported missing', async t => {
+  for (const window of ['child-read', 'partial']) {
     const f = await fixture(t); await f.follow(); const item = f.add(3); let picked = false;
-    if (window === 'stop') f.beforeStop = () => { if (!picked) { picked = true; f.pick(item); } };
-    else {
-      f.beforeObserve = () => {
-        if (!picked && f.mode.snapshot().activity === 'picking-up') { picked = true; f.pick(item, window === 'partial' ? 1 : 3); }
-      };
-    }
+    f.beforeObserve = () => {
+      if (!picked && f.mode.snapshot().activity === 'picking-up') { picked = true; f.pick(item, window === 'partial' ? 1 : 3); }
+    };
     await f.spin(() => f.mode.snapshot().pickup?.pickedUpCount === 3 && f.mode.snapshot().activity === 'following');
     assert.equal(f.native('pickup-item').length, window === 'partial' ? 1 : 0);
     assert.equal(f.events.since(0, ['companion', 'task']).length, 0);
@@ -213,12 +219,12 @@ test('other natural UUIDs are counted by the mode ledger once and never become t
   await f.spin(() => f.mode.snapshot().pickup?.pickedUpCount === 5 && f.mode.snapshot().activity === 'following');
   assert.equal(f.native('pickup-item').length, 1); assert.equal(f.events.since(0, ['companion', 'task']).length, 0);
 });
-test('a pickup receipt history gap stops native follow and only reports a last-confirmed lower bound', async t => {
-  const f = await fixture(t); await f.follow(); const id = f.mode.snapshot().operationId;
+test('a pickup receipt history gap takes the follow off and only reports a last-confirmed lower bound', async t => {
+  const f = await fixture(t); await f.follow();
   f.state.pickupCursor = 1; f.state.pickupOldestCursor = 1;
   await f.monitor.tick();
   assert.equal(f.mode.snapshot().state, 'blocked'); assert.equal(f.mode.snapshot().code, 'PICKUP_GAP'); assert.equal(f.mode.snapshot().pickup.pickedUpCount, undefined); assert.equal(f.mode.snapshot().pickup.lastConfirmedPickedUpCount, 0);
-  assert.equal(f.mock.operations.get(id).status, 'cancelled'); assert.equal(f.events.since(0, ['companion']).length, 1);
+  assert.equal(f.posture.current, null); assert.equal(f.events.since(0, ['companion']).length, 1);
 });
 test('obsolete blocked cleanup cannot clear a replacement transition or invalidate its stable observation epoch', async t => {
   for (const pending of [true, false]) {
@@ -232,7 +238,7 @@ test('obsolete blocked cleanup cannot clear a replacement transition or invalida
       return state;
     };
     const blocked = f.mode.update(state, f.mode.observationEpoch()); await seen[0].promise;
-    await f.mode.stop();
+    await f.end();
     const replacement = f.mode.request({ action: 'wait' }).then(value => ({ value }), error => ({ error }));
     await seen[1].promise;
     if (!pending) { gates[1].resolve(); await replacement; }
@@ -244,30 +250,8 @@ test('obsolete blocked cleanup cannot clear a replacement transition or invalida
     if (pending) assert.equal(third.error?.code, 'BUSY', 'obsolete block must not admit C and cancel B');
     assert.deepEqual(after, before); assert.equal(afterEpoch, epoch, 'only the current transition can change observation revision');
     assert.equal(afterNotifications, notifications); assert.equal(accepted.error, undefined); assert.equal(accepted.value.state, 'waiting');
-    assert.throws(() => f.body.acquireTask('intruder'), { code: 'BUSY' });
+    f.body.acquireTask('free'); f.body.releaseTask('free');
   }
-});
-
-test('obsolete internal stop cleanup cannot invalidate a replacement observation epoch', async t => {
-  const f = await fixture(t); await f.follow(); f.add();
-  const observe = f.body.observe.bind(f.body), gate = deferred(), seen = deferred(), completed = deferred();
-  let first = true;
-  f.body.observe = async (...args) => {
-    const state = await observe(...args);
-    if (first) { first = false; seen.resolve(); await gate.promise; }
-    return state;
-  };
-  // Observe completion of the real internal transaction triggered by the pickup scheduler.
-  const internalStop = f.mode.internalStop.bind(f.mode);
-  f.mode.internalStop = async (...args) => { try { return await internalStop(...args); } finally { completed.resolve(); } };
-  const state = await observe();
-  await f.mode.update(state, f.mode.observationEpoch()); await seen.promise;
-  await f.mode.stop(); await f.mode.request({ action: 'wait' });
-  const before = f.mode.snapshot(), epoch = f.mode.observationEpoch();
-  gate.resolve(); await completed.promise;
-  assert.deepEqual(f.mode.snapshot(), before); assert.equal(f.mode.observationEpoch(), epoch);
-  assert.throws(() => f.body.acquireTask('intruder'), { code: 'BUSY' });
-  assert.equal(f.native('pickup-item').length, 0); assert.equal(f.native('follow-companion').length, 1);
 });
 
 test('blocked cleanup failure advances cancellation epoch without keeping the transition busy', async t => {

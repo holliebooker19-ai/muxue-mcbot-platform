@@ -8,7 +8,7 @@ import { ServerBody, readServerConnection, type ServerLease } from './server-bod
 import { EventJournal } from './events.js';
 import { acquireRuntimeLock, RuntimeMonitor, hostedHeartbeatFresh } from './lifecycle.js';
 import { createMcpServer } from './mcp.js';
-import { CompanionMode } from './companion-mode.js';
+import { CompanionMode, hasCompanionMode } from './companion-mode.js';
 import { GatherTasks } from './gather-tasks.js';
 import { ContainerTasks } from './tasks.js';
 import { SurvivalTasks } from './survival-tasks.js';
@@ -18,7 +18,8 @@ import { BodyError, type Body, type GuardOptions } from './body.js';
 import { PlaceBook } from './places.js';
 import { MachineBook, MachineWatch } from './machines.js';
 import { BlueprintShelf } from './blueprints.js';
-import { writePosture } from './posture.js';
+import { writePosture, takeHeldPosture, type HeldPosture } from './posture.js';
+import { recoverAfterDeath } from './death-recovery.js';
 import { logClaimFailure } from './claim-failure.js';
 import { useGiftGear } from './gift-gear.js';
 import { loadPluginPolicy } from './plugins.js';
@@ -120,24 +121,26 @@ async function main(): Promise<void> {
     const machines = body.hello.capabilities.includes('smelt-item') ? new MachineWatch(new MachineBook(runtimeDir, values['world-id']), body, events) : undefined;
     if (machines) { events.onOperation(operation => machines.operation(operation)); void machines.tick(first.dimension); }
     const gather = new GatherTasks(body, events);
-    if (body.hello.capabilities.includes('follow-companion')) { companion = new CompanionMode(body, events, gather); companion.guardDefaults = guardDefaults; }
-    if (companion && values.hosted) companion.onPosture = writePosture(path.join(runtimeDir, `posture-${values.username}.json`));
+    if (hasCompanionMode(body.hello)) { companion = new CompanionMode(body, events, gather); companion.guardDefaults = guardDefaults; }
+    // The previous run's posture record is read (and taken) before this run can write its own: it is set again after a death or a restart (death-recovery.ts).
+    let held: HeldPosture | null = null;
+    if (companion && values.hosted) {
+      const postureFile = path.join(runtimeDir, `posture-${values.username}.json`);
+      if (body.hello.capabilities.includes('server-posture')) held = takeHeldPosture(postureFile, path.join(runtimeDir, `session-${values.username}.json`));
+      companion.onPosture = writePosture(postureFile);
+    }
     const tasks = new ContainerTasks(body, Date.now, operation => events!.deliverOperation(operation));
     const survival = ['survival-state', 'swap-inventory', 'eat-item'].every(cap => body!.hello.capabilities.includes(cap)) ? new SurvivalTasks(body, Date.now, operation => events!.recordOperation(operation)) : undefined;
     const stopCurrent = createActionStop(body, tasks, gather, companion, survival);
     // Better armour a player throws is put on by itself unless the body is working (gift-gear.ts); following or waiting is not working.
     useGiftGear(events, body, () => {
       try { tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle(); } catch { return true; }
-      if (body!.pendingOperations().some(operation => operation.name !== 'follow-companion')) return true;
-      const state = companion?.snapshot();
-      if (!state) return false;
-      if (state.mining || companion!.guardFighting() || state.state === 'paused') return true;
-      return ['following', 'waiting'].includes(state.state) && !body!.hello.capabilities.includes('beside-follow');
+      return body!.pendingOperations().length > 0 || companion?.busy() === true;
     });
-    const reflexes = survival ? new SurvivalReflexes(body, survival, events, { stopCurrent, stopWork: stopCurrent.keepCompanion, ...companionReflexHooks(tasks, gather, companion, stopCurrent.keepCompanion, survival, () => body!.isBusy?.() === true || body!.pendingOperations().length > 0), ordinaryBusy: () => {
+    const reflexes = survival ? new SurvivalReflexes(body, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: () => {
       try { tasks.assertIdle(); gather.assertIdle(); survival.assertIdle(); }
       catch { return true; }
-      return body!.isBusy?.() === true || body!.pendingOperations().length > 0 || !!companion && (!['idle', 'paused', 'stopped', 'blocked'].includes(companion.snapshot().state) || companion.guardFighting());
+      return body!.isBusy?.() === true || body!.pendingOperations().length > 0 || companion?.busy() === true;
     } }) : undefined;
     if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
     server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
@@ -155,6 +158,8 @@ async function main(): Promise<void> {
     process.stdin.once('end', () => { void shutdown(); });
     await server.connect(transport);
     monitor.start();
+    // After a death or a restart: fetch what was dropped when it is worth it, then set the posture the player had asked for.
+    if (companion && values.hosted && body.hello.capabilities.includes('server-posture')) void recoverAfterDeath({ body, companion, events }, held, body.hello.lastDeath).catch(error => process.stderr.write(`死后恢复出错：${(error as Error).message}\n`));
   } catch (error) {
     // Taking the body failed (body never connected): the hosting person sees why in the WebUI log, not only on stderr.
     if (values.hosted && !body) logClaimFailure(path.join(runtimeDir, `activity-${values.username}.jsonl`), error as Error);

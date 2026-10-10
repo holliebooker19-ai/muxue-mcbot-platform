@@ -9,6 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../dist/mcp.js';
 import { mockServerControl } from './mock-server-control.mjs';
+import { installPosture } from './mock-posture.mjs';
 
 // Bodies with guard-duty keep protection as a standing duty, not inside the follow (docs/companion_state_design.md, section 5).
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -23,7 +24,7 @@ async function fixture(t, fenced = true) {
   ] });
   let duty = null, guardRevision = 0;
   const hello = mock.handlers.hello;
-  mock.handlers.hello = () => ({ ...hello(), capabilities: ['send-chat', 'look-at', 'move-to-position', 'follow-companion', 'nearby-blocks', 'companion-guard', fenced ? 'guard-duty-fenced' : 'guard-duty'] });
+  mock.handlers.hello = () => ({ ...hello(), capabilities: ['send-chat', 'look-at', 'move-to-position', 'nearby-blocks', ...(fenced ? ['guard-duty-fenced'] : [])] });
   // Like ControlSession: settings and clearing stops apply in revision order; a clearing stop itself is never refused.
   const acceptRevision = params => {
     if (!Number.isSafeInteger(params.guardRevision) || params.guardRevision < 1) throw Object.assign(new Error('bad revision'), { code: 'INVALID_ARGUMENT' });
@@ -45,32 +46,25 @@ async function fixture(t, fenced = true) {
   };
   const observe = mock.handlers.observe;
   mock.handlers.observe = params => ({ ...observe(params), ...(duty ? { guard: duty } : {}) });
-  const act = mock.handlers.act;
-  mock.handlers.act = (params, ctx) => {
-    const op = act(params, ctx);
-    if (params.name !== 'follow-companion') return op;
-    const following = { ...op, status: 'running', result: { ...params.args, distance: params.args.distance ?? 2.5, state: 'following', position: { x: 0, y: 64, z: 0 } } };
-    ctx.operations.set(op.operationId, following); return following;
-  };
+  const server = installPosture(mock);
   const body = await ServerBody.connect({ connection: mock.connection, username: 'ServerBot', worldId: 'test-world', heartbeatIntervalMs: 60000 });
   const events = new EventJournal();
   const mode = new CompanionMode(body, events);
-  mode.resumeDelayMs = 0;
   const monitor = new RuntimeMonitor(body, events, { companion: mode, onFatal: () => {} });
   t.after(async () => { monitor.stop(); await body.close(); await mock.close(); });
   const guardCalls = () => mock.calls.filter(call => call.method === 'guard').map(call => call.params);
-  const follows = () => mock.calls.filter(call => call.method === 'act' && call.params.name === 'follow-companion').map(call => call.params.args);
-  return { mock, body, mode, events, monitor, guardCalls, follows,
+  const follows = () => mock.calls.filter(call => call.method === 'posture').map(call => call.params);
+  return { mock, server, body, mode, events, monitor, guardCalls, follows,
     duty: () => duty, setDuty: next => { duty = next === null ? null : { ...duty, ...next }; },
-    follow: async request => { await mode.request({ action: 'follow', player: 'Alex', ...request }); await until(() => mode.snapshot().stage === 'active'); } };
+    follow: request => mode.request({ action: 'follow', player: 'Alex', ...request }) };
 }
 
-test('follow turns the guard duty on for that player; the follow itself carries no guard', async t => {
+test('follow turns the guard duty on for that player; the posture request itself carries no guard', async t => {
   const f = await fixture(t);
   await f.follow();
   assert.equal(f.guardCalls().length, 1);
   assert.deepEqual({ player: f.guardCalls()[0].player, entityId: f.guardCalls()[0].expectedEntityId, options: f.guardCalls()[0].options }, { player: 'Alex', entityId: alex, options: {} });
-  assert.equal('guard' in f.follows()[0], false, 'protection is not a follow argument any more');
+  assert.equal('guard' in f.follows()[0], false, 'protection is not a posture argument');
   assert.equal(f.mode.snapshot().guardEnabled, true);
   await f.monitor.tick();
   assert.equal(f.mode.guarding(), true, 'covering: the 3-block self-defense stays out of the way');
@@ -79,15 +73,15 @@ test('follow turns the guard duty on for that player; the follow itself carries 
   assert.equal(f.duty(), null);
 });
 
-test('protection outlives a step aside and a wait, and works with no follow at all', async t => {
+test('protection outlives the posture giving way and a wait, and works with no follow at all', async t => {
   const f = await fixture(t);
   await f.follow();
-  const lease = await f.mode.yieldTo('build');
-  assert.equal(f.mode.snapshot().state, 'paused');
-  assert.equal(f.guardCalls().length, 1, 'stepping aside for a tool does not touch the duty');
+  f.server.suspend('build');
   await f.monitor.tick();
+  assert.equal(f.mode.snapshot().suspendedFor, 'build');
+  assert.equal(f.guardCalls().length, 1, 'the posture giving way to a tool does not touch the duty');
   assert.equal(f.mode.guarding(), true, 'still protecting while the follow stands aside');
-  await lease.release();
+  f.server.resume();
   await f.mode.request({ action: 'wait' });
   assert.equal(f.guardCalls().length, 1, 'waiting keeps protecting the same player');
   assert.equal(f.mode.snapshot().guardEnabled, true);
@@ -109,20 +103,41 @@ test('guard without a follow needs a player; an unknown player is refused before
   assert.equal(f.mode.snapshot().state, 'idle', 'protection alone starts no follow');
 });
 
-test('companion-mode stop and stop-action end protection; a plain reflex stop does not', async t => {
+test('companion-mode stop and stop-action end protection and posture; a plain reflex stop does not', async t => {
   const f = await fixture(t);
   await f.follow();
   await f.mode.stop('reflex');
   assert.notEqual(f.duty(), null, 'a reflex stop keeps the duty');
+  assert.equal(f.server.current.action, 'follow', 'and the posture');
+  assert.equal(f.mock.calls.filter(c => c.method === 'stop').at(-1).params.clearPosture, undefined);
   await f.mode.dropGuard();
   assert.equal(f.duty(), null, 'stop-action drops it');
   await f.mode.request({ action: 'guard', player: 'Alex', guard: true });
   const ended = await f.mode.request({ action: 'stop' });
   assert.equal(f.duty(), null, 'companion-mode stop with no follow still ends protection');
-  assert.match(ended.reason, /保护已关/);
+  assert.match(ended.reason, /保护/);
   await f.follow();
   await f.mode.request({ action: 'stop' });
   assert.equal(f.duty(), null, 'companion-mode stop ends the follow and the protection');
+  assert.equal(f.server.current, null);
+});
+
+test('whoever is followed is whoever is protected: no guard for someone else while following, and a follow of another player moves the duty', async t => {
+  const f = await fixture(t);
+  await f.follow();
+  await assert.rejects(f.mode.request({ action: 'guard', player: 'Sam', guard: true }), { code: 'INVALID_ARGUMENT' });
+  assert.equal(f.duty().player, 'Alex');
+  await f.mode.request({ action: 'guard', player: 'Alex', guard: { radius: 5 } });
+  assert.deepEqual(f.duty().options, { radius: 5 });
+  await f.follow({ player: 'Sam' });
+  assert.equal(f.duty().player, 'Sam', 'the new follow takes the protection with it');
+  const g = await fixture(t);
+  g.mode.guardDefaults = false;
+  await g.mode.request({ action: 'guard', player: 'Alex', guard: true });
+  await g.follow({ player: 'Sam' });
+  assert.equal(g.duty(), null, 'following Sam without protection must not leave Alex protected');
+  await g.mode.request({ action: 'guard', guard: true });
+  assert.equal(g.duty().player, 'Sam', 'guard without a player means the followed one');
 });
 
 test('fights reported by the duty wake the model once; a duty the server dropped is reported', async t => {
@@ -252,6 +267,7 @@ test('a stronger stop during an ordinary stop still clears standing protection',
   const explicit = call('stop-action'); delayed.release();
   await ordinary; assert.equal((await explicit).result.stopped, true);
   assert.equal(f.duty(), null); assert.equal(f.mode.snapshot().guardEnabled, false);
+  assert.equal(f.mock.calls.filter(c => c.method === 'stop').at(-1).params.clearPosture, true, 'and the same explicit stop clears the posture');
 });
 
 test('an ordinary stop preserves an already accepted guard whose acknowledgement is delayed', async t => {
@@ -274,11 +290,13 @@ test('loss of control clears standalone protection even without a follow intent'
   assert.equal(f.mode.snapshot().state, 'stopped');
 });
 
-test('an older guard-duty server uses the existing guarded-follow path', async t => {
+test('a server without the fenced guard duty has no protection: an explicit guard is refused, a plain follow still works', async t => {
   const f = await fixture(t, false);
   await f.follow();
   assert.equal(f.guardCalls().length, 0);
-  assert.deepEqual(f.follows()[0].guard, {});
+  assert.equal(f.mode.snapshot().guardEnabled, undefined);
+  await assert.rejects(f.mode.request({ action: 'guard', player: 'Alex', guard: true }), { code: 'UNSUPPORTED' });
+  await assert.rejects(f.follow({ guard: true }), { code: 'UNSUPPORTED' });
   await assert.rejects(f.body.setGuard({ off: true }), { code: 'UNSUPPORTED' });
 });
 
@@ -295,6 +313,7 @@ test('companion-mode stop during an in-flight ordinary stop still ends the follo
   delayed.release(); await ordinary;
   assert.equal((await ended).error, false);
   assert.equal(f.duty(), null); assert.equal(f.mode.snapshot().guardEnabled, false);
+  assert.equal(f.server.current, null); assert.equal(f.mode.snapshot().state, 'stopped');
 });
 
 test('an off overtaken at the server by an ordinary stop still turns protection off', async t => {

@@ -13,7 +13,7 @@ const receipt = (seq, id, thrownBy = 'muxue') => ({ seq, entityId: `00000000-000
 const seen = (receipts, overrides = {}) => observation({ source: 'server-observed', username: 'ServerBot', instanceId: 'instance-1', sessionId: 'server-session-1', controlGeneration: 0,
   pickupCursor: receipts.length ? Math.max(...receipts.map(r => r.seq)) : 0, pickupOldestCursor: 0, pickupReceipts: receipts, ...overrides });
 const giftTexts = events => events.since(0).filter(event => event.type === 'gift').map(event => event.text);
-const CAPS = ['send-chat', 'gift-receipts', 'equip-item', 'assess-armour', 'beside-follow'];
+const CAPS = ['send-chat', 'gift-receipts', 'equip-item', 'assess-armour'];
 const DIAMOND = 'minecraft:diamond_chestplate', IRON = 'minecraft:iron_chestplate';
 
 /** A mock server that answers assess-armour with the given candidates and equip-item with a swap receipt. */

@@ -1,10 +1,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z, type ZodRawShape } from 'zod';
-import { BodyError, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
+import { BodyError, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
 import { EventJournal } from './events.js';
 import { ContainerTasks } from './tasks.js';
-import { CompanionMode, type CompanionRequest } from './companion-mode.js';
+import { CompanionMode, FOLLOW_DISTANCE, hasCompanionMode, type CompanionRequest } from './companion-mode.js';
 import { GatherTasks } from './gather-tasks.js';
 import { SurvivalTasks } from './survival-tasks.js';
 import { SurvivalReflexes } from './survival-reflexes.js';
@@ -29,16 +29,14 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const serverObserved = rawBody.hello.backend === 'server';
   const tasks = options.tasks ?? new ContainerTasks(rawBody, Date.now, operation => events.deliverOperation(operation));
   const gather = options.gather ?? new GatherTasks(rawBody, events);
-  const companion = rawBody.hello.capabilities.includes('follow-companion') ? options.companion ?? new CompanionMode(rawBody, events, gather) : undefined;
+  const companion = hasCompanionMode(rawBody.hello) ? options.companion ?? new CompanionMode(rawBody, events, gather) : undefined;
   const survival = options.survival ?? (['survival-state', 'swap-inventory', 'eat-item'].every(cap => rawBody.hello.capabilities.includes(cap)) ? new SurvivalTasks(rawBody, Date.now, operation => events.recordOperation(operation)) : undefined);
   const stopCurrent = options.stopCurrent ?? createActionStop(rawBody, tasks, gather, companion, survival);
-  const reflexes = options.reflexes ?? (survival ? new SurvivalReflexes(rawBody, survival, events, { stopCurrent, stopWork: stopCurrent.keepCompanion, ...companionReflexHooks(tasks, gather, companion, stopCurrent.keepCompanion, survival, () => rawBody.isBusy?.() === true || rawBody.pendingOperations().length > 0), ordinaryBusy: () => {
+  const reflexes = options.reflexes ?? (survival ? new SurvivalReflexes(rawBody, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: () => {
     try { tasks.assertIdle(); gather.assertIdle(); survival.assertIdle(); } catch { return true; }
-    return rawBody.isBusy?.() === true || rawBody.pendingOperations().length > 0 || !!companion && (!['idle', 'paused', 'stopped', 'blocked'].includes(companion.snapshot().state) || companion.guardFighting());
+    return rawBody.isBusy?.() === true || rawBody.pendingOperations().length > 0 || companion?.busy() === true;
   } }) : undefined);
   if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
-  /** A follow/wait that stepped aside for a tool picks up again only when none of these is running any more. */
-  if (companion) companion.busyProbe = () => { try { tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle(); } catch { return true; } return false; };
   /** A stop (explicit, reflex preemption or reconfiguration) ends every tool call admitted before it: their later body.act submissions are refused. */
   let localStops = 0;
   const stopEpoch = () => localStops + (stopCurrent.generation?.() ?? 0);
@@ -75,21 +73,6 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   let eventCursor = 0;
   const returnedSeqs = new Set<number>();
   const currentChat = (chat: Observation['chat']) => options.chatFloor === undefined ? chat : chat.filter(line => line.seq > options.chatFloor!);
-  /** Tools that use the body. A running follow/wait steps aside for them (state paused, suspendedFor = the tool) and picks up again by itself once nothing is running. */
-  const bodyTools = new Set(['prepare-item', 'eat-food', 'pillar-up', 'pillar-down', 'sleep-in-bed', 'wake-up', 'sit', 'stand-up', 'emote', 'craft-item', 'smelt-item', 'workstation-options', 'produce-item', 'modify-item', 'tend-crops', 'use-bucket', 'machine-items', 'breed-animals', 'hunt', 'build',
-    'travel-to', 'go-to-place', 'approach-container', 'container-list', 'container-withdraw', 'give-item', 'fetch-and-give', 'collect-items', 'gather-resources', 'use-item', 'equip-item', 'interact-block',
-    'look-at', 'move-to-position', 'follow-player', 'approach-player', 'dig-block', 'place-block', 'open-container', 'click-slot', 'close-container', 'select-slot', 'drop-item']);
-  const withCompanionStepAside = async (name: string, run: () => Promise<unknown>): Promise<unknown> => {
-    if (!companion || !bodyTools.has(name)) return run();
-    const now = companion.snapshot();
-    if (!(['following', 'waiting'].includes(now.state) || (now.state === 'paused' && now.suspendedFor))) return run();
-    // Momentary survival actions do not stop a following/waiting companion when the server declares beside-follow.
-    if (body.hello.capabilities.includes('beside-follow') && ['select-slot', 'equip-item'].includes(name) && ['following', 'waiting'].includes(now.state)) return run();
-    // A refused call must not move the follow.
-    tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle();
-    const lease = await companion.yieldTo(name);
-    try { return await run(); } finally { await lease.release(); }
-  };
   /** Usage notes of enabled official plugins, appended to the tool each one is about (plugins.ts). */
   const notes = pluginNotes(rawBody.hello);
   const register = (name: string, description: string, shape: ZodRawShape, handler: (args: any) => Promise<unknown>) => {
@@ -100,7 +83,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
           if (args.action !== 'follow' || args.pickup || (args.distance ?? 2.5) > args.mining.radius || new Set(args.mining.blockIds).size !== args.mining.blockIds.length) throw new BodyError('INVALID_ARGUMENT', '陪挖仅用于跟随，不能同时开启独立拾取，跟随距离须在陪挖半径内，矿石列表不能重复');
         }
         if (!readOnlyCall(name, args)) reflexes?.authorizeAction();
-        const result = await calls.run({ epoch: stopEpoch() }, () => withCompanionStepAside(name, () => handler(args)));
+        const result = await calls.run({ epoch: stopEpoch() }, () => handler(args));
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
         return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ code: error instanceof BodyError ? error.code : 'ERROR', message: (error as Error).message }) }] };
@@ -128,7 +111,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   register('get-operation', 'Check an operation created by this controller. running is not success; unknown must be checked against the world, never blindly retried.', { operationId: z.string().uuid(), ...(serverObserved ? { details: z.boolean().default(false) } : {}) }, async ({ operationId, details }) => { const op = survival?.operation(operationId) ?? gather.operation(operationId) ?? tasks.operation(operationId) ?? await body.operation(operationId); events.deliverOperation(op); const visible = publicOperation(op); return serverObserved && !details ? summarizeOperation(visible) : visible; });
   register('stop-action', 'Immediately cancel current body actions and discard companion intent (and protection) while keeping the character online. Does not wait for a model.', {}, async () => {
     localStops++;
-    return reflexes ? reflexes.stop() : stopCurrent({ clearGuard: true });
+    return reflexes ? reflexes.stop() : stopCurrent({ clearGuard: true, clearPosture: true });
   });
   if (body.survivalState && body.hello.capabilities.includes('survival-state')) register('get-survival-state', `Read current server survival facts, native dangers/threats when supported, active defense and effective program policy. Compact by default; details includes guarded inventory. Missing or incomplete threat facts do not establish safety. Reading never rearms stopped behavior.${equipment ? ' Hostile and unknown threats carry equipment (held and worn items, same format as get-status) to judge the danger, e.g. a zombie in iron armour or a skeleton with a bow.' : ''}`, { details: z.boolean().default(false) }, async args => ({ ...await body.survivalState!(args), ...(reflexes ? { policy: reflexes.read() } : {}) }));
   if (body.assessTool && body.hello.capabilities.includes('assess-tool')) register('assess-tool', 'Read-only whole-inventory tool eligibility and estimated base speed for a loaded block. Does not equip or dig. Unknown means not established; estimates exclude unobserved equip-dependent mod hooks. Actual native mining remains authoritative.', { ...blockXyz, expectedBlock: registryId.optional(), policy: z.enum(['fastest_valid', 'conserve_durability']).optional(), minRemainingDurability: z.number().int().min(0).max(10000).optional(), dropPreference: z.enum(['any', 'silk_touch', 'no_silk_touch']).default('any') }, async args => {
@@ -145,12 +128,12 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     ...(body.hello.capabilities.includes('defend-entity') ? { autoDefend: z.boolean().optional(), defenseRadius: z.number().finite().min(1).max(3).optional(), lowHealth: z.number().finite().min(1).max(20).optional(), excludedEntityIds: z.array(z.string().uuid()).max(64).optional(), maxAttacks: z.number().int().min(1).max(3).optional(), defenseTimeoutMs: z.number().int().min(500).max(5000).optional() } : {}),
   }, args => reflexes.configure(args));
   if (companion) {
-    register('companion-mode', `Following (or waiting in place) is a persistent state, not a task. Tools that use the body (travel, gather, craft, build, eat, emote, sleep...) make it step aside by themselves (get-companion-mode then shows state paused with suspendedFor = that tool) and it picks up again when they end, also after sleeping, so you never pause/resume around other work; if the player is out of sight by then it waits for them to come back. action pause is only a deliberate manual stop until resume. action stop ends the follow/wait for good and interrupts nothing else that is running. action guard (needs guard) turns protection on or off, or changes its options${body.hello.capabilities.includes('guard-duty-fenced') ? ': protection is its own standing duty, kept while following, waiting, stepping aside and doing other work; while the body is within 16 blocks of the player it fights, while following, waiting or idle, foes within the guard radius around the player (default 8 blocks, 3-12 by the radius option) and anything already attacking the body within 8 blocks, walking out no farther than the leash (radius + 4, at most 16 blocks from the player); when waiting it goes back to its spot after the fight,' + (body.hello.capabilities.includes('guard-duty-tasks') ? 'and it also stops walking, travelling, building on the ground, farming, breeding, pickups and the walk to a workstation for a fight, after which that work carries on by itself with its time limit extended by the fight; it waits for digging, eating, an open menu, a scaffold or roof, a bed or a gesture to end, meanwhile only defending itself' : 'while other work runs it only defends itself until that work ends') + '; without a follow give player; companion-mode stop and stop-action also end it' : ', on the current follow without a new follow; the setting stays while the follow steps aside'}. The player's halt (stop-action) still discards the intent. Start persistent follow of an explicitly named visible player on ${navigation}, or wait in place. Optional pickup only pursues listed drops. Optional mining requires companion-mining capability (${body.hello.capabilities.includes('companion-mining') ? 'available' : 'unavailable on this body'}): explicitly authorize up to eight ore block IDs or tags (e.g. #c:ores for every ore, modded too; non-ores are skipped) and a finite candidate-attempt budget. Each selected visible block is guarded against live player proximity and competing player mining, then mined and picked up before following resumes. No tunnels, support digging or automatic budget renewal. pickup and mining are mutually exclusive. maxBlocks caps attempted block candidates, not an item quantity promise; report confirmed mined blocks and native picked items separately, without claiming per-block drop provenance. Expiry/exhaustion disables mining but keeps following. pause/resume preserves used budget and the original deadline; unknown or blocked does not retry. Chat remains available. wait clears both options; stop-action discards intent. Only follow accepts player/distance/wander/pickup/mining.`, {
-      action: z.enum((body.hello.capabilities.includes('companion-guard') ? ['follow', 'wait', 'pause', 'resume', 'stop', 'guard'] : ['follow', 'wait', 'pause', 'resume', 'stop']) as [string, ...string[]]), player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(),
-      distance: z.number().finite().min(1.5).max(6).optional(), say: z.string().min(1).max(256).optional(),
+    register('companion-mode', `Following (or waiting in place) is a persistent state held by the game server, not a task. Tools that use the body (travel, gather, craft, build, eat, emote, sleep...) make it give way by themselves (get-companion-mode then shows suspendedFor = that tool) and it takes over again a few seconds after they end, also after sleeping, so you never pause/resume around other work; if the player is out of sight by then it waits for them to come back (away). Standing beside the player while following shows as state waiting. action pause is only a deliberate manual stop until resume. action stop ends the follow/wait for good and interrupts nothing else that is running. Sitting (sit) ends the follow/wait; stand-up and a new follow/wait are needed to carry on. action guard (needs guard) turns protection on or off, or changes its options${body.hello.capabilities.includes('guard-duty-fenced') ? ': protection is its own standing duty, kept while following, waiting, doing other work and sitting, and always for the followed player (a follow protects whoever it follows); while the body is within 16 blocks of the player it fights, while following, waiting or idle, foes within the guard radius around the player (default 8 blocks, 3-12 by the radius option) and anything already attacking the body within 8 blocks, walking out no farther than the leash (radius + 4, at most 16 blocks from the player); when waiting it goes back to its spot after the fight, when seated it walks back to the seat and sits again (if that fails the posture becomes a wait and you get an event),' + (body.hello.capabilities.includes('guard-duty-tasks') ? 'and it also stops walking, travelling, building on the ground, farming, breeding, pickups and the walk to a workstation for a fight, after which that work carries on by itself with its time limit extended by the fight; it waits for digging, eating, an open menu, a scaffold or roof, a bed or a gesture to end, meanwhile only defending itself' : 'while other work runs it only defends itself until that work ends') + '; without a follow give player; companion-mode stop and stop-action also end it' : ''}. The player's halt (stop-action) ends the follow/wait and the protection. Start persistent follow of an explicitly named visible player on ${navigation}, or wait in place. Optional pickup only pursues listed drops. Optional mining requires companion-mining capability (${body.hello.capabilities.includes('companion-mining') ? 'available' : 'unavailable on this body'}): explicitly authorize up to eight ore block IDs or tags (e.g. #c:ores for every ore, modded too; non-ores are skipped) and a finite candidate-attempt budget. Each selected visible block is guarded against live player proximity and competing player mining, then mined and picked up (the body is briefly busy; other tools get BUSY meanwhile) before following carries on by itself. No tunnels, support digging or automatic budget renewal. pickup and mining are mutually exclusive. maxBlocks caps attempted block candidates, not an item quantity promise; report confirmed mined blocks and native picked items separately, without claiming per-block drop provenance. Expiry/exhaustion disables mining but keeps following. pause/resume preserves used budget and the original deadline; unknown or blocked does not retry. Chat remains available. wait clears both options; stop-action discards intent. Only follow accepts player/distance/wander/pickup/mining. A server without the companion posture (server-posture) answers follow/wait with UNSUPPORTED: the core mod needs updating.`, {
+      action: z.enum((body.hello.capabilities.includes('guard-duty-fenced') ? ['follow', 'wait', 'pause', 'resume', 'stop', 'guard'] : ['follow', 'wait', 'pause', 'resume', 'stop']) as [string, ...string[]]), player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(),
+      distance: z.number().finite().min(FOLLOW_DISTANCE.min).max(FOLLOW_DISTANCE.max).optional(), say: z.string().min(1).max(256).optional(),
       wander: z.boolean().optional().describe('Default true: while the followed player stands still, now and then stroll a few steps nearby and stay there until they move. Always off with pickup or mining.'),
-      ...(body.hello.capabilities.includes('companion-guard') ? { guard: z.union([z.boolean(), z.object({ radius: z.number().finite().min(3).max(12).optional(), lowHealth: z.number().finite().min(4).max(16).optional(), bow: z.boolean().optional(), shield: z.boolean().optional() }).strict()]).optional()
-        .describe('Protect the followed player (on by default, settings from the WebUI): the game fights hostiles within radius of the player by itself, sword in reach, bow at range, shield up, backs off toward the player at lowHealth, never hits players, pets, villagers or named mobs, never chases beyond the leash. guard events report fights; no tool calls are needed for fighting. false only when the player asks not to fight. With action guard: true/false/options for the current follow.') } : {}),
+      ...(body.hello.capabilities.includes('guard-duty-fenced') ? { guard: z.union([z.boolean(), z.object({ radius: z.number().finite().min(3).max(12).optional(), lowHealth: z.number().finite().min(4).max(16).optional(), bow: z.boolean().optional(), shield: z.boolean().optional() }).strict()]).optional()
+        .describe('Protect the followed player (on by default, settings from the WebUI): the game fights hostiles within radius of the player by itself, sword in reach, bow at range, shield up, backs off toward the player at lowHealth, never hits players, pets, villagers or named mobs, never chases beyond the leash. guard events report fights; no tool calls are needed for fighting. false only when the player asks not to fight. With action guard: true/false/options for the followed player (or, without a follow, the one named in player).') } : {}),
       ...(body.hello.capabilities.includes('companion-pickup') ? { pickup: z.object({ items: z.array(registryId).min(1).max(8), radius: z.number().finite().min(1.5).max(4).default(3) }).optional() } : {}),
       mining: z.object({
         blockIds: z.array(resourceSelector).min(1).max(8).describe('Ores to mine: block IDs or tags, e.g. ["#c:ores"] for every ore (modded too) or ["#c:ores/iron","#c:ores/diamond"]. Non-ores are skipped.'),
@@ -162,8 +145,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       tasks.assertIdle(); return companion.request(args as CompanionRequest);
     });
     register('get-companion-mode', 'Read the current persistent companion mode without starting, resuming or stopping any action.', {}, async () => {
-      // A fight may have got the body up since sit; the server observation is the authority on sitting.
-      if (companion.snapshot().seated && serverObserved) { try { if ((await body.observe()).sitting === false) companion.stoodUp(); } catch { /* the stale mark only costs a wrong hint */ } }
+      // The server's posture is the authority (sitting, standing up, a follow it ended): take its word now rather than at the next tick.
+      await companion.refresh();
       return companion.read();
     });
   }
@@ -228,18 +211,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     register('wake-up', 'Get out of bed now. Succeeds when already awake.', {}, async () => operationResult(await body.act('wake-up', {})));
   }
   if (serverObserved && body.hello.capabilities.includes('sit')) {
-    // The sit is over when the body is observed riding a seat; then the follow/wait ends (protection stays) whichever way the result arrives.
-    if (companion) events.onOperation(operation => {
-      // seatedDown refuses (BUSY) while the companion is mid-change, e.g. the follow picking up again after stepping aside; wait it out rather than leave the follow running under a seated body.
-      if (operation.name === 'sit' && operation.status === 'succeeded') void (async () => {
-        for (let attempt = 0; attempt < 50; attempt++) {
-          try { await companion.seatedDown(); return; }
-          catch (error) { if (!(error instanceof BodyError && error.code === 'BUSY')) return; await new Promise(resolve => setTimeout(resolve, 100)); }
-        }
-      })();
-      if (operation.name === 'stand-up' && operation.status === 'succeeded') companion.stoodUp();
-    });
-    register('sit', 'Walk to a free chair or stool within 8 blocks (or the block at x,y,z) and sit on it, like a player right-clicking it; the body rides the seat. Only seats an installed seat add-on knows count (for example Kaleidoscope Cookery chairs and cook stools); stairs and slabs never do, and with no such add-on you get NO_SEAT. Fails with SEAT_OCCUPIED, NO_SEAT, NO_PATH, OUT_OF_REACH or SIT_REFUSED. Success is confirmed only when the body is really riding the seat. Sitting ends a follow/wait (companion-mode shows seated); protection stays on, and a hostile creature close by gets you up to fight, and you stay standing afterwards. While seated only chatting, looking, emotes, inventory and eating work: every action that moves the body is refused with SEATED until stand-up. get-status shows sitting. running requires polling get-operation.', {
+    register('sit', 'Walk to a free chair or stool within 8 blocks (or the block at x,y,z) and sit on it, like a player right-clicking it; the body rides the seat. Only seats an installed seat add-on knows count (for example Kaleidoscope Cookery chairs and cook stools); stairs and slabs never do, and with no such add-on you get NO_SEAT. Fails with SEAT_OCCUPIED, NO_SEAT, NO_PATH, OUT_OF_REACH or SIT_REFUSED. Success is confirmed only when the body is really riding the seat. Sitting ends a follow/wait (companion-mode shows seated); protection stays on, and a hostile creature close by gets you up to fight, after which you walk back and sit again; if the seat is gone or taken you wait where you are and get an event. While seated only chatting, looking, emotes, inventory and eating work: every action that moves the body is refused with SEATED until stand-up. get-status shows sitting. running requires polling get-operation.', {
       x: z.number().int().optional(), y: z.number().int().optional(), z: z.number().int().optional(), timeoutMs,
     }, async args => {
       if ([args.x, args.y, args.z].some(value => value === undefined) && [args.x, args.y, args.z].some(value => value !== undefined)) throw new BodyError('INVALID_ARGUMENT', 'x、y、z 要么都给，要么都不给');
@@ -248,7 +220,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     });
   }
   if (serverObserved && body.hello.capabilities.includes('stand-up')) {
-    register('stand-up', 'Get up from the seat now. Succeeds when already standing. After this, follow/wait is not resumed by itself: call companion-mode follow again if the player wants you with them.', {}, async () => operationResult(await body.act('stand-up', {})));
+    register('stand-up', 'Get up from the seat now. Succeeds when already standing. After this there is no follow/wait: call companion-mode follow again if the player wants you with them.', {}, async () => operationResult(await body.act('stand-up', {})));
   }
   if (serverObserved && body.hello.capabilities.includes('emote')) {
     const gestures = body.hello.emotes?.builtin ?? [];
@@ -262,13 +234,9 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       say: z.string().min(1).max(256).optional(),
     }, async ({ say, ...args }) => {
       tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle();
-      // The follow has stepped aside for the emote (suspendedFor) and picks up again after it.
-      const following = !!companion?.snapshot().suspendedFor;
       if (say) await body.act('send-chat', { message: say });
       const operation = await body.act('emote', args as import('./body.js').ActionArguments['emote']);
       const done = await settle(operation, 3000);
-      // A looping add-on animation would stop as soon as following starts again; let it play out first.
-      if (following && args.source && done.status === 'succeeded') await new Promise(resolve => setTimeout(resolve, (args.seconds ?? 6) * 1000));
       return operationResult(done);
     });
   }
@@ -436,8 +404,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   };
   if (canTravel) {
     const places = options.places ?? new PlaceBook();
-    const walk = { tolerance: z.number().min(1).max(8).optional(), timeoutMs: z.number().int().min(5000).max(900000).optional(), say: z.string().min(1).max(256).optional() };
-    register('travel-to', 'Walk a long way (up to 2000 blocks) to a point, leg by leg over the surface; chunks load as the body goes. Finds the way round cliffs and out of valleys over the ground it can see (about 96 blocks around), swims across rivers and lakes like a player, steps down only one block at a time, opens and closes wooden doors; never digs or builds. A follow/wait steps aside by itself and picks up again when it ends (if the player is out of sight by then it waits for them to come back). running: the result arrives as a task event: arrived, or NO_PATH with how far it got and how close the walkable ground comes (tell the player; a cliff or deep valley may need them); stop-action ends it.', { x: coordinate, y: coordinate.optional(), z: coordinate, ...walk }, async ({ x, y, z: zz, ...extra }) => travel({ x, z: zz, ...(y !== undefined ? { y } : {}) }, extra));
+    const walk = { tolerance: z.number().min(1).max(8).optional(), timeoutMs: z.number().int().min(TRAVEL_TIMEOUT_MS.min).max(TRAVEL_TIMEOUT_MS.max).optional(), say: z.string().min(1).max(256).optional() };
+    register('travel-to', `Walk a long way (up to ${TRAVEL_MAX_BLOCKS} blocks) to a point, leg by leg over the surface; chunks load as the body goes. Finds the way round cliffs and out of valleys over the ground it can see (about 96 blocks around), swims across rivers and lakes like a player, steps down only one block at a time, opens and closes wooden doors; never digs or builds. A follow/wait steps aside by itself and picks up again when it ends (if the player is out of sight by then it waits for them to come back). running: the result arrives as a task event: arrived, or NO_PATH with how far it got and how close the walkable ground comes (tell the player; a cliff or deep valley may need them); stop-action ends it.`, { x: coordinate, y: coordinate.optional(), z: coordinate, ...walk }, async ({ x, y, z: zz, ...extra }) => travel({ x, z: zz, ...(y !== undefined ? { y } : {}) }, extra));
     register('remember-place', 'Remember a named spot in this world for later (home/家, mine entrance, farm). Defaults to where you stand; player uses where that player stands; or give x/y/z. The same name overwrites. A place named home or 家 also makes you get a bedtime event at night when you are near it.', {
       name: z.string().min(1).max(32), player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(), x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(), note: z.string().max(120).optional(),
     }, async ({ name, player, x, y, z: zz, note }) => {

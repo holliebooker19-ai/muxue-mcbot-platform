@@ -67,10 +67,10 @@ test('repeated right-click stops submitting once stop-action ran between attempt
 });
 
 test('read-only queries never authorize action, while a real action or a non-survey tend does', async t => {
-  const { body } = await setup(t, ['workstation-options', 'travel-to', 'tend-crops', 'breed-animals', 'follow-companion']);
+  const { body } = await setup(t, ['workstation-options', 'travel-to', 'tend-crops', 'breed-animals', 'server-posture']);
   let authorized = 0;
   const reflexes = { authorizeAction() { authorized++; }, async stop() { return { stopped: true }; }, read() { return { armed: false }; } };
-  const c = await client(t, body, new EventJournal(), { reflexes, companion: { snapshot: () => ({ state: 'idle' }), read: () => ({ state: 'idle' }), request: async () => ({}) } });
+  const c = await client(t, body, new EventJournal(), { reflexes, companion: { snapshot: () => ({ state: 'idle' }), read: () => ({ state: 'idle' }), refresh: async () => {}, request: async () => ({}) } });
   await raw(c, 'workstation-options', {}); await raw(c, 'list-places', {}); await raw(c, 'get-companion-mode', {});
   await raw(c, 'tend-crops', { survey: true }); await raw(c, 'breed-animals', { animal: 'minecraft:cow', survey: true });
   await raw(c, 'remember-place', { name: 'home' });

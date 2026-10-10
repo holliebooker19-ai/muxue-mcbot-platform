@@ -11,7 +11,7 @@ import { mockServerControl } from './mock-server-control.mjs';
 async function fixture(t, mining = true) {
   const mock = await mockServerControl(); t.after(() => mock.close());
   const original = mock.handlers.hello;
-  mock.handlers.hello = () => ({ ...original(), capabilities: ['send-chat', 'follow-companion', 'nearby-resources', 'pickup-item', 'companion-pickup', ...(mining ? ['companion-mining'] : [])] });
+  mock.handlers.hello = () => ({ ...original(), capabilities: ['send-chat', 'server-posture', 'nearby-resources', 'pickup-item', 'companion-pickup', ...(mining ? ['companion-mining'] : [])] });
   mock.handlers['nearby-resources'] = (params, context) => {
     context.active(params);
     return { instanceId: params.instanceId, sessionId: params.sessionId, worldId: 'test-world', dimension: 'minecraft:overworld', controlGeneration: 0,

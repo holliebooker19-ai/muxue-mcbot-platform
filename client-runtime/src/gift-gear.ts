@@ -5,9 +5,10 @@ import type { EventJournal, GiftItem } from './events.js';
 /**
  * Armour or a shield a player threw to the body is put on by itself when it is better than what is worn.
  * Whether it is better is decided only by the server (assess-armour, ArmourChoice.java); this file decides when to
- * act and what the gift event says. Timing: if the body is working (a task, gathering, a protection fight, mining
- * beside the player) nothing is touched and the event says it could be put on; following or waiting is not working,
- * the swap runs beside the follow (beside-follow). Not interrupting is deliberate: an armour swap is three inventory
+ * act and what the gift event says. Timing: if the body is working (a task, gathering, an operation running, the companion
+ * posture suspended or in a protection fight, a pickup/mining job beside the player) nothing is touched and the event
+ * says it could be put on; following or waiting is not working, the swap runs beside the posture (the server does not
+ * suspend it for equip-item; which operations it leaves alone is its call alone). Not interrupting is deliberate: an armour swap is three inventory
  * clicks that must not collide with a task's own clicks, and the model can still call equip-item itself afterwards.
  */
 export function useGiftGear(events: EventJournal, body: Body, busy: () => boolean): void {

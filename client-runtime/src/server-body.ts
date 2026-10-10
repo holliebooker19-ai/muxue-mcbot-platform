@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
 import { applyPluginPolicy, pluginRefusal, type PluginPolicy } from './plugins.js';
-import { BodyError, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type StopOptions } from './body.js';
+import { BodyError, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type PostureRequest, type PostureState, type StopOptions, TRAVEL_TIMEOUT_MS, PICKUP_TIMEOUT_MS } from './body.js';
 import { serverDetail } from './claim-failure.js';
 
 const identifier = z.string().min(1);
@@ -11,7 +11,6 @@ const generation = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const operationBudget = z.object({ used: generation, remaining: generation, limit: generation.refine(value => value > 0), exhausted: z.boolean() })
   .refine(value => value.used <= value.limit && value.remaining === value.limit - value.used && value.exhausted === (value.remaining === 0), 'Inconsistent operation budget');
 const components = z.record(z.unknown());
-const guardOptions = z.object({ radius: z.number().finite().min(3).max(12).optional(), lowHealth: z.number().finite().min(4).max(16).optional(), bow: z.boolean().optional(), shield: z.boolean().optional() }).strict();
 const maxStackSize = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional();
 const position = z.object({ x: z.number().finite(), y: z.number().finite(), z: z.number().finite() });
 const observedStackShape = { slot: z.number().int().nonnegative(), id: z.string(), count: z.number().int().nonnegative(), components: components.optional(), componentsComplete: z.boolean().optional(), componentError: z.string().optional(), maxStackSize, source: z.enum(['container', 'player', 'unknown']).optional(), playerSlot: z.number().int().nonnegative().optional(), active: z.boolean().optional(), mayPickup: z.boolean().optional() };
@@ -24,6 +23,24 @@ const equippedItem = z.object({ id: z.string().min(1).max(64), count: z.number()
 const equipmentSchema = z.object({ mainhand: equippedItem.optional(), offhand: equippedItem.optional(), head: equippedItem.optional(), chest: equippedItem.optional(), legs: equippedItem.optional(), feet: equippedItem.optional(), body: equippedItem.optional() });
 const tolerant = <T extends z.ZodTypeAny>(schema: T) => z.unknown().transform((value): z.output<T> | undefined => { const parsed = schema.safeParse(value); return parsed.success ? parsed.data : undefined; });
 const equipmentFields = { equipment: tolerant(equipmentSchema), equipmentOmitted: tolerant(z.boolean()) };
+// Same bound as the error-code pattern of rpc() and equippedItem.id: names the server sends (an operation name, a reason code) are short.
+const NAME_LIMIT = 64;
+// server-posture: the standing posture and the last death's drops. A malformed value only drops that field, never the observation or hello.
+const postureSchema = z.object({
+  action: z.enum(['follow', 'wait', 'seated']), postureRevision: generation,
+  state: z.enum(['following', 'waiting', 'seated', 'guarding', 'suspended', 'away', 'blocked']),
+  player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(), entityId: z.string().uuid().optional(), distance: z.number().finite().optional(), wander: z.boolean().optional(),
+  arrived: z.boolean().optional(), strolling: z.boolean().optional(), returning: z.boolean().optional(),
+  suspendedFor: z.string().max(NAME_LIMIT).optional(), resumeInMs: z.number().finite().nonnegative().optional(),
+  seat: position.optional(), reason: z.string().regex(new RegExp(`^[A-Z_]{1,${NAME_LIMIT}}$`)).optional(),
+});
+const lastDeathSchema = z.object({
+  message: z.string().optional(), dimension: z.string(), position, at: z.number().finite(),
+  drops: tolerant(z.object({
+    count: z.number().int().nonnegative(), items: z.array(z.object({ id: identifier, count: z.number().int().positive() })).optional(),
+    despawnAt: z.number().finite().optional(), remaining: z.number().int().nonnegative().nullable().optional(),
+  })),
+});
 const threatSchema = z.object({ entityId: z.string().uuid(), type: identifier.nullable(), classification: z.enum(['hostile', 'attacking_self', 'neutral', 'friendly', 'player', 'unknown']), hostilitySource: z.enum(['vanilla_hostile_allowlist', 'native_target_self', 'native_recent_attacker', 'none', 'unknown']), targetingSelf: z.boolean().nullable(), distance: z.number().finite().nonnegative().nullable(), lineOfSight: z.boolean().nullable(), alive: z.boolean().nullable(), explosionPreparing: z.boolean().nullable(), defenseEligible: z.boolean(), defenseReason: z.string().nullable(), factsAvailable: z.boolean().optional(), ...equipmentFields }).refine(threat => threat.factsAvailable !== false || threat.classification === 'unknown' && threat.hostilitySource === 'unknown' && threat.defenseEligible === false, 'Unavailable threat facts cannot declare an eligible hostile');
 const survivalSchema = z.object({ ...stateIdentity, operationBudget: operationBudget.optional(), serverTick: generation, observedAt: z.number().finite(), health: z.number().finite(), maxHealth: z.number().positive(), food: z.number().finite(), saturation: z.number().finite(), selectedSlot: z.number().int().min(0).max(8), inventory: z.array(stack).optional(),
   dangers: z.object({ onFire: z.boolean(), inLava: z.boolean(), inWater: z.boolean(), air: z.number().finite(), maxAir: z.number().finite(), fallDistance: z.number().finite().nonnegative(), lowHealth: z.boolean(), retreatRecommended: z.boolean() }).optional(),
@@ -46,6 +63,7 @@ const helloSchema = z.object({
   appearances: z.array(z.object({ id: z.string().regex(/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/), choices: z.array(z.string().max(128)).max(256) })).max(32).optional(),
   // Third-party text: entries are checked and cleaned by applyPluginPolicy, a bad one only drops that hint.
   hints: z.array(z.unknown()).max(1024).optional(),
+  lastDeath: tolerant(lastDeathSchema),
 });
 const observationSchema = z.object({
   instanceId: identifier, controlGeneration: generation,
@@ -59,9 +77,10 @@ const observationSchema = z.object({
   source: z.literal('server-observed'),
   sleeping: z.boolean().optional(), sitting: z.boolean().optional(), time: z.object({ dayTime: z.number().int().min(0).max(23999), canSleep: z.boolean() }).optional(),
   weather: z.object({ natural: z.boolean(), sky: z.boolean(), raining: z.boolean(), thundering: z.boolean() }).optional(),
-  groundItems: z.array(z.object({ entityId: z.string().uuid(), position, stack: itemValue, onGround: z.boolean().optional(), visible: z.boolean().nullable().optional(), visibility: z.enum(['visible', 'occluded', 'unknown']) })).max(32).optional(), groundItemsTruncated: z.boolean().optional(),
+  groundItems: z.array(z.object({ entityId: z.string().uuid(), position, stack: itemValue, onGround: z.boolean().optional(), visible: z.boolean().nullable().optional(), visibility: z.enum(['visible', 'occluded', 'unknown']), deathDrop: tolerant(z.boolean()) })).max(32).optional(), groundItemsTruncated: z.boolean().optional(),
   pickupCursor: generation.optional(), pickupOldestCursor: generation.optional(), pickupReceipts: z.array(z.object({ seq: generation, entityId: z.string().uuid(), position, stack: itemValue, pickedUpCount: z.number().int().positive(), sessionId: identifier, controlGeneration: generation, dimension: identifier, storedIn: identifier.optional(), thrownBy: tolerant(z.string().min(1).max(32)) })).max(256).optional(),
   guard: z.lazy(() => guardDutySchema).optional(),
+  posture: tolerant(postureSchema),
 });
 const guardDutySchema = z.object({
   enabled: z.literal(true), player: z.string(), entityId: z.string().uuid(), options: z.record(z.unknown()).optional(),
@@ -107,7 +126,7 @@ interface ServerOptions {
   plugins?: PluginPolicy;
 }
 export interface RespawnResult { respawned: true; connected: true; instanceId: string; sessionId: string; controlGeneration: number }
-const implementedActions: ActionName[] = ['send-chat', 'look-at', 'move-to-position', 'follow-player', 'follow-companion', 'approach-container', 'approach-player', 'approach-resource', 'pickup-item', 'dig-block', 'place-block', 'open-container', 'click-slot', 'close-container', 'select-slot', 'drop-item', 'swap-inventory', 'eat-item', 'equip-item', 'defend-entity', 'retreat-from-entity', 'use-item-on-block', 'use-item', 'pillar-up', 'sleep-in-bed', 'wake-up', 'sit', 'stand-up', 'craft-item', 'smelt-item', 'travel-to', 'workstation-options', 'produce-item', 'modify-item', 'tend-crops', 'breed-animals', 'hunt', 'use-bucket', 'machine-items', 'emote', 'set-appearance', 'build'];
+const implementedActions: ActionName[] = ['send-chat', 'look-at', 'move-to-position', 'follow-player', 'approach-container', 'approach-player', 'approach-resource', 'pickup-item', 'dig-block', 'place-block', 'open-container', 'click-slot', 'close-container', 'select-slot', 'drop-item', 'swap-inventory', 'eat-item', 'equip-item', 'defend-entity', 'retreat-from-entity', 'use-item-on-block', 'use-item', 'pillar-up', 'sleep-in-bed', 'wake-up', 'sit', 'stand-up', 'craft-item', 'smelt-item', 'travel-to', 'workstation-options', 'produce-item', 'modify-item', 'tend-crops', 'breed-animals', 'hunt', 'use-bucket', 'machine-items', 'emote', 'set-appearance', 'build'];
 const recoverable = new Set(['BUSY', 'INVALID_ARGUMENT', 'OUT_OF_REACH', 'UNSUPPORTED', 'UNLOADED', 'STALE_BLOCK', 'BLOCK_CHANGED', 'WRONG_CONTAINER', 'ITEM_CHANGED', 'UNKNOWN_OPERATION', 'OPERATION_CONFLICT', 'OPERATION_LIMIT', 'CONTAINER_CHANGED', 'REVISION_CHANGED', 'PROTECTED', 'CANCELLED', 'OBSTRUCTED', 'STALE_TARGET', 'BLOCKED', 'NO_PATH', 'PATH_BUDGET', 'TARGET_MOVED', 'NO_LINE_OF_SIGHT', 'PLAYER_NOT_VISIBLE', 'COMPANION_OUT_OF_RANGE', 'STALE_COMPANION', 'COMPANION_PROTECTED', 'COMPANION_MINING_CONFLICT', 'GAME_PAUSED']);
 /** One explicit server lease. No implicit claim, mutation retry or generation synchronization. */
 export class ServerBody implements Body {
@@ -162,7 +181,7 @@ export class ServerBody implements Body {
   private async connect(): Promise<void> {
     // The single plugin filter: everything below (and every tool registered from this.hello) sees the filtered hello.
     const hello = applyPluginPolicy(await this.readHello(), this.options.plugins);
-    const capabilities = hello.capabilities.filter(name => implementedActions.includes(name as ActionName) || ['nearby-blocks', 'nearby-resources', 'look-around', 'companion-pickup', 'companion-mining', 'companion-guard', 'survival-state', 'assess-tool', 'navigation-3d', 'machine-status', 'guard-duty-fenced', 'guard-duty-tasks', 'step-aside-stop', 'gift-receipts', 'entity-equipment', 'beside-follow', 'assess-armour'].includes(name));
+    const capabilities = hello.capabilities.filter(name => implementedActions.includes(name as ActionName) || ['nearby-blocks', 'nearby-resources', 'look-around', 'companion-pickup', 'companion-mining', 'companion-guard', 'survival-state', 'assess-tool', 'navigation-3d', 'machine-status', 'guard-duty-fenced', 'guard-duty-tasks', 'server-posture', 'gift-receipts', 'entity-equipment', 'assess-armour'].includes(name));
     // Interaction actions are only usable together with the IDs the server actually registered.
     const interactions = [...new Set(hello.interactions ?? [])];
     this.hello = { ...hello, interactions, capabilities: interactions.length ? capabilities : capabilities.filter(name => name !== 'use-item-on-block' && name !== 'use-item') };
@@ -186,7 +205,7 @@ export class ServerBody implements Body {
     }
     if (claim.instanceId !== hello.instanceId) throw new BodyError('WRONG_INSTANCE', '接管回执不属于当前服务实例');
     this.lease = { protocol: 2, backend: 'server', worldId: hello.worldId, username: hello.username, instanceId: claim.instanceId, sessionId: claim.sessionId, leaseId: claim.leaseId, stopToken: claim.stopToken, controllerId, chatCursor: claim.chatCursor };
-    this.controlGeneration = claim.controlGeneration; this.carryFloor = claim.controlGeneration;
+    this.controlGeneration = claim.controlGeneration;
     this.hello = { ...this.hello, connected: true, sessionId: claim.sessionId };
     this.state = 'active';
     await this.observe();
@@ -297,6 +316,22 @@ export class ServerBody implements Body {
       return reply;
     } catch (error) { throw this.invalidate(error); }
   }
+  private postureRevision = 0;
+  /** Same ordering as setGuard: one revision sequence for settings and clearing stops, a late reply of a superseded request is CANCELLED, never applied. */
+  async setPosture(request: PostureRequest): Promise<PostureState | { posture: null }> {
+    this.assertActive();
+    if (!this.hello.capabilities.includes('server-posture')) throw new BodyError('UNSUPPORTED', '身体不支持陪伴姿态（server-posture）；需要更新核心模组');
+    const postureRevision = ++this.postureRevision;
+    try {
+      const raw = await this.rpc('posture', { ...this.identity(), postureRevision, ...request });
+      this.assertActive();
+      if (postureRevision !== this.postureRevision) throw new BodyError('CANCELLED', '姿态请求已被更新的设置或停止取代');
+      const reply = z.union([postureSchema, z.object({ posture: z.null(), postureRevision: generation })]).parse(raw);
+      // A cleared posture answers with the revision it was cleared at; a snapshot may carry an older one (a seated posture was set by sit, not by this request), never a newer.
+      if ('posture' in reply ? reply.postureRevision !== postureRevision : reply.postureRevision > postureRevision) throw new BodyError('INVALID_RESPONSE', '姿态回执序号不匹配');
+      return 'posture' in reply ? { posture: null } : reply;
+    } catch (error) { throw this.invalidate(error); }
+  }
   acquireTask(taskToken: string): void {
     this.assertActive();
     if (this.taskOwner || this.exclusive || this.stopping) throw new BodyError('BUSY', '已有动作或任务运行');
@@ -383,17 +418,15 @@ export class ServerBody implements Body {
   }
   async act<N extends ActionName>(name: N, args: ActionArguments[N], taskToken?: string): Promise<Operation> {
     this.assertActive();
-    // select-slot and equip-item are momentary: beside a running follow-companion they pass the task lock and take no exclusive slot (beside-follow).
-    const holder = this.exclusive ? this.operations.get(this.exclusive) : undefined;
-    const beside = ['select-slot', 'equip-item'].includes(name) && this.hello.capabilities.includes('beside-follow') && holder?.name === 'follow-companion' && holder.status === 'running';
-    if (name !== 'send-chat' && this.taskOwner && taskToken !== this.taskOwner && !beside) throw new BodyError('BUSY', '任务正在运行，原子动作不能绕过任务锁');
+    // Which operations leave the companion posture alone (select-slot, equip-item, send-chat) is the server's call alone; this side has no list of them.
+    if (name !== 'send-chat' && this.taskOwner && taskToken !== this.taskOwner) throw new BodyError('BUSY', '任务正在运行，原子动作不能绕过任务锁');
     if (!this.hello.capabilities.includes(name)) throw new BodyError('UNSUPPORTED', `ServerBody 当前未实现 ${name}`);
     const refusal = pluginRefusal(name, args, this.options.plugins);
     if (refusal) throw new BodyError('UNSUPPORTED', refusal);
     if (this.stopping) throw new BodyError('BUSY', '正在停止，请等待确认后发送明确新动作');
     if (name === 'send-chat' && args && 'message' in args && (args.message.startsWith('/') || /[\r\n]/.test(args.message))) throw new BodyError('INVALID_ARGUMENT', 'send-chat 只允许普通单行聊天');
     this.validateSurvivalArguments(name, args);
-    const exclusive = name !== 'send-chat' && !beside;
+    const exclusive = name !== 'send-chat';
     if (exclusive && this.exclusive) throw new BodyError('BUSY', '已有身体动作运行；先查询或停止');
     const operationId = randomUUID();
     if (this.taskOwner && taskToken === this.taskOwner) this.internalOperations.add(operationId);
@@ -432,8 +465,7 @@ export class ServerBody implements Body {
     const guardedBlock = { x: z.number().int(), y: z.number().int(), z: z.number().int(), expectedBlock: identifier, expectedProperties: components };
     const schemas: Partial<Record<ActionName, z.ZodTypeAny>> = {
       'approach-resource': z.object({ targetToken: z.string().uuid(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
-      'pickup-item': z.object({ entityId: z.string().uuid(), expectedItem: identifier, expectedCount: z.number().int().positive(), expectedComponents: components, expectedMaxStackSize: maxStackSize, companionGuard: z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), maxDistance: z.number().finite().min(1.5).max(4) }).optional(), resourceTargetToken: z.string().uuid().optional(), timeoutMs: z.number().int().min(500).max(30000).optional() }),
-      'follow-companion': z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), distance: z.number().finite().min(1.5).max(6).optional(), wander: z.boolean().optional(), guard: guardOptions.optional() }).strict(),
+      'pickup-item': z.object({ entityId: z.string().uuid(), expectedItem: identifier, expectedCount: z.number().int().positive(), expectedComponents: components, expectedMaxStackSize: maxStackSize, companionGuard: z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), maxDistance: z.number().finite().min(1.5).max(4) }).optional(), resourceTargetToken: z.string().uuid().optional(), timeoutMs: z.number().int().min(PICKUP_TIMEOUT_MS.min).max(PICKUP_TIMEOUT_MS.max).optional() }),
       'approach-container': z.object({ targetToken: z.string().uuid(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
       'approach-player': z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid().optional(), distance: z.number().finite().min(1).max(1.5).optional(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
       'dig-block': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }), 'open-container': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }),
@@ -454,7 +486,7 @@ export class ServerBody implements Body {
       'stand-up': z.object({}).strict(),
       'craft-item': z.object({ item: identifier, count: z.number().int().min(1).max(256).optional(), timeoutMs: z.number().int().min(1000).max(120000).optional() }).strict(),
       'smelt-item': z.object({ input: identifier.optional(), count: z.number().int().min(1).max(64).optional(), fuel: identifier.optional(), wait: z.boolean().optional(), furnace: z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() }).strict().optional(), timeoutMs: z.number().int().min(1000).max(900000).optional() }).strict(),
-      'travel-to': z.object({ x: z.number().finite(), y: z.number().finite().optional(), z: z.number().finite(), tolerance: z.number().min(1).max(8).optional(), timeoutMs: z.number().int().min(5000).max(900000).optional() }).strict(),
+      'travel-to': z.object({ x: z.number().finite(), y: z.number().finite().optional(), z: z.number().finite(), tolerance: z.number().min(1).max(8).optional(), timeoutMs: z.number().int().min(TRAVEL_TIMEOUT_MS.min).max(TRAVEL_TIMEOUT_MS.max).optional() }).strict(),
       'workstation-options': z.object({ item: identifier.optional(), potion: identifier.optional(), count: z.number().int().min(1).max(64).optional(), subjects: z.union([identifier, z.literal('*')]).optional() }).strict(),
       'produce-item': z.object({ item: identifier, count: z.number().int().min(1).max(64).optional(), potion: identifier.optional(), wait: z.boolean().optional(), station: z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() }).strict().optional(), timeoutMs: z.number().int().min(1000).max(600000).optional() }).strict(),
       'modify-item': z.object({ subject: z.string().regex(/^item-[a-z0-9]{8}$/), action: z.object({ kind: z.enum(['enchant', 'anvil', 'grind', 'smith', 'loom', 'cartography']), option: z.number().int().min(1).max(3).optional(), with: z.union([identifier, z.string().regex(/^item-[a-z0-9]{8}$/)]).optional(), rename: z.string().min(1).max(50).optional(), template: identifier.optional(), addition: identifier.optional(), dye: identifier.optional(), pattern: identifier.optional(), patternItem: identifier.optional() }).strict(), preview: z.boolean().optional(), maxLevels: z.number().int().min(0).max(39).optional(), expect: z.string().min(1).max(512).optional(), station: z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() }).strict().optional(), timeoutMs: z.number().int().min(1000).max(120000).optional() }).strict(),
@@ -504,27 +536,22 @@ export class ServerBody implements Body {
   }
   pendingOperations(): readonly Operation[] { return [...this.operations.values()].filter(op => op.status === 'running' && !this.internalOperations.has(op.operationId)); }
   isBusy(): boolean { return !!(this.taskOwner || this.exclusive || this.stopping); }
-  /** Oldest generation whose targets still hold: only step-aside stops since (mirrors ControlSession.carries). */
-  private carryFloor = 0;
-  private stoppingAside = false;
-  carries(generation: number): boolean { return this.state === 'active' && generation >= this.carryFloor && generation <= this.controlGeneration; }
   stop(options: StopOptions = {}): Promise<{ stopped: true }> {
-    // A stronger stop arriving during an ordinary stop must also clear protection; any other stop arriving during a
-    // step-aside must cut the carried targets too, so it runs on its own instead of sharing the step-aside.
-    if (this.stopping) return options.clearGuard || (this.stoppingAside && !options.stepAside) ? this.stopping.then(() => this.stop(options)) : this.stopping;
+    // A stronger stop arriving during an ordinary stop must also clear protection and the posture, so it runs on its own after it.
+    if (this.stopping) return options.clearGuard || options.clearPosture ? this.stopping.then(() => this.stop(options)) : this.stopping;
     this.assertActive();
     const oldGeneration = this.controlGeneration;
     const clearGuard = options.clearGuard === true && this.hello.capabilities.includes('guard-duty-fenced');
-    const stepAside = options.stepAside === true && !options.clearGuard && this.hello.capabilities.includes('step-aside-stop');
+    const clearPosture = options.clearPosture === true && this.hello.capabilities.includes('server-posture');
     const guardRevision = clearGuard ? ++this.guardRevision : undefined;
+    const postureRevision = clearPosture ? ++this.postureRevision : undefined;
     this.revision++;
     const stopping = async (): Promise<{ stopped: true }> => {
       try {
-        const reply = z.object({ stopped: z.literal(true), controlGeneration: generation }).parse(await this.rpc('stop', { ...this.identity(), ...(clearGuard ? { clearGuard: true, guardRevision } : {}), ...(stepAside ? { stepAside: true } : {}) }));
+        const reply = z.object({ stopped: z.literal(true), controlGeneration: generation }).parse(await this.rpc('stop', { ...this.identity(), ...(clearGuard ? { clearGuard: true, guardRevision } : {}), ...(clearPosture ? { clearPosture: true, postureRevision } : {}) }));
         this.assertActive();
         if (reply.controlGeneration !== oldGeneration + 1) throw new BodyError('STALE_CONTROL', '停止回执代次异常，控制已终止');
         this.controlGeneration = reply.controlGeneration;
-        if (!stepAside) this.carryFloor = reply.controlGeneration;
         // Fence reads begun after stop was sent but before its new generation was confirmed.
         this.revision++;
         for (const op of this.operations.values()) if (op.status === 'running') this.remember({ ...op, status: 'cancelled', summary: '用户已停止动作' });
@@ -537,8 +564,7 @@ export class ServerBody implements Body {
         this.lose(terminal); throw terminal;
       }
     };
-    this.stoppingAside = stepAside;
-    this.stopping = stopping().finally(() => { this.stopping = undefined; this.stoppingAside = false; });
+    this.stopping = stopping().finally(() => { this.stopping = undefined; });
     return this.stopping;
   }
   async close(): Promise<void> {

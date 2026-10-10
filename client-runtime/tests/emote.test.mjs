@@ -7,6 +7,7 @@ import { createMcpServer } from '../dist/mcp.js';
 import { EventJournal } from '../dist/events.js';
 import { mockServerControl, serverCapabilities } from './mock-server-control.mjs';
 import { observation } from './mock-control.mjs';
+import { companionFixture } from './companion-fixture.mjs';
 
 const YSM = { id: 'yes_steve_model:animation', hint: 'emote wheel ones are extra0..extra7' };
 async function setup(t, { capabilities = ['emote', 'set-appearance'], sources = [YSM], appearances = [] } = {}) {
@@ -53,15 +54,17 @@ test('emote forwards the gesture or animation; malformed names never reach the s
   assert.equal(acts().length, 2);
 });
 
-test('a gesture while following makes the follow step aside, and it is let back after the act', async t => {
-  const { body, acts } = await setup(t, { capabilities: ['emote', 'follow-companion'] });
-  const order = [];
-  let state = 'following', suspendedFor;
-  const companion = { snapshot: () => ({ state, suspendedFor }), read: () => ({ state, suspendedFor }),
-    yieldTo: async reason => { order.push(['yield', reason, acts().length]); state = 'paused'; suspendedFor = reason; return { release: async () => { order.push(['release', acts().length]); state = 'following'; suspendedFor = undefined; }, hold() {} }; } };
-  const c = await client(t, body, { companion });
-  await call(c, 'emote', { name: 'nod' });
-  assert.deepEqual(order, [['yield', 'emote', 0], ['release', 1]], 'stepped aside before the act, let back after it');
+test('a gesture while following goes straight to the server: the posture gives way there and the runtime sends nothing around it', async t => {
+  const f = await companionFixture(t, { capabilities: ['send-chat', 'look-at', 'move-to-position', 'nearby-blocks', 'emote'] });
+  f.body.hello.emotes = { builtin: ['wave', 'nod'], sources: [] };
+  const c = await client(t, f.body, { companion: f.mode });
+  await f.follow();
+  const before = f.mock.calls.length;
+  assert.equal((await call(c, 'emote', { name: 'nod' })).status, 'succeeded');
+  const sent = f.mock.calls.slice(before).map(entry => entry.method).filter(method => ['act', 'stop', 'posture'].includes(method));
+  assert.deepEqual(sent, ['act'], 'no stop, no pause, no new posture request');
+  assert.equal(f.mode.snapshot().intent, 'follow');
+  assert.equal(f.server.current.action, 'follow');
 });
 
 test('scene hints: sunset, rain and thunder once each, only under the open sky; the first observation is a baseline', () => {

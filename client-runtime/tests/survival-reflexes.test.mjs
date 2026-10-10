@@ -52,7 +52,7 @@ test('only the explicit stop clears standing protection; urgent preemption keeps
   await f.reflexes.tick(); await turn();
   assert.deepEqual(stops, [undefined]);
   await f.reflexes.stop();
-  assert.deepEqual(stops, [undefined, { clearGuard: true }]);
+  assert.deepEqual(stops, [undefined, { clearGuard: true, clearPosture: true }]);
 });
 test('stale policy writes fail; disabling while a read is pending prevents automatic action', async () => {
   const f = fixture(), pending = deferred(); f.body.survivalState = () => pending.promise;

@@ -134,44 +134,21 @@ export function runtimeFiles(runtimeDir, name) {
     halt: path.join(runtimeDir, `companion-${name}.halt`),
     session: path.join(runtimeDir, `session-${name}.json`),
     botLock: path.join(runtimeDir, `bot-${name}.lock`),
-    // 运行端写的持续状态（跟随／等待／保护），重连后告诉 Agent；见 client-runtime/src/posture.ts
+    // 运行端写的持续状态（跟随／等待／保护）；重连时由运行端自己读、自己恢复（client-runtime/src/posture.ts），驱动器只在叫停和真正退出时删
     posture: path.join(runtimeDir, `posture-${name}.json`),
   };
 }
 
-// 游戏名之类的字段只认规范的游戏名；服务端给的死亡消息可能带命名牌上的字，只当资料，去掉控制字符并截短
-const GAME_NAME = /^[A-Za-z0-9_]{1,16}$/;
+// 服务端给的死亡消息可能带命名牌上的字，只当资料，去掉控制字符并截短
 const plainText = (text, max) => String(text ?? '').replace(/[\u0000-\u001f\u007f§]/g, ' ').trim().slice(0, max);
 
-/** 断开前的持续状态（运行端写的）；没有、坏了或超过 maxAgeMs 的不算 */
-export function readPosture(file, now = Date.now(), maxAgeMs = 60 * 60 * 1000) {
-  try {
-    const p = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!['follow', 'wait', 'guard'].includes(p?.action) || !Number.isFinite(p.at) || now - p.at > maxAgeMs || now < p.at - 60000) return null;
-    if (p.player !== undefined && !GAME_NAME.test(p.player)) return null;
-    if ((p.action === 'follow' || p.action === 'guard') && !p.player) return null;
-    return { action: p.action, ...(p.player ? { player: p.player } : {}), guard: p.guard === true, at: p.at };
-  } catch { return null; }
-}
-
-/** 重连后告诉 Agent 断开前在做的持续状态：跟随和保护是玩家要的，接上不算重放旧动作 */
-export function postureNote(p) {
-  if (!p) return '';
-  const who = p.player ?? '';
-  const what = p.action === 'follow' ? `在跟随 ${who}，保护${p.guard ? '开着' : '关着'}`
-    : p.action === 'wait' ? `在原地等${p.guard ? '，保护开着' : ''}` : `在保护 ${who}（没跟随）`;
-  const next = p.action === 'wait' ? '原来等的地方可能已经不在附近，问一下玩家要不要回去，或者改成跟随'
-    : `${who} 在附近就直接用 companion-mode ${p.action === 'follow' ? `follow 接上${p.guard ? '（保护照旧开着）' : ''}` : `guard 带 player:${who} 接上`}；不在附近就告诉玩家你在哪，等玩家过来或者按玩家说的做`;
-  return `【断开前的陪伴状态】断开前你${what}。这是玩家要你一直保持的状态，不是旧动作，接上它不算重放：先看清自己和玩家在哪，${next}。玩家说过不用了就别接。`;
-}
-
-/** 复活提示：服务端记下的死因和死的地方（30 分钟内的才用） */
+/** 复活提示：服务端记下的死因和死的地方（30 分钟内的才用）。死亡掉落和之前的陪伴状态由运行端自己处理，处理结果以【死后恢复】事件告诉 Agent */
 export function deathNote(death, now = Date.now()) {
   const recent = death && Number.isFinite(death.at) && now - death.at >= 0 && now - death.at < 30 * 60 * 1000;
   const message = recent ? plainText(death.message, 120) : '';
   const p = recent ? death.position : null;
   const where = p && [p.x, p.y, p.z].every(Number.isFinite) ? `，死在 ${Math.round(p.x)} ${Math.round(p.y)} ${Math.round(p.z)}${death.dimension && death.dimension !== 'minecraft:overworld' ? `（${plainText(death.dimension, 64)}）` : ''}` : '';
-  return `【角色重生】你之前死了${message ? `（游戏记录：「${message}」）` : ''}${where}，托管启动时已在重生点复活（有床在床边，没有在世界出生点）。身上的东西可能掉在死的地方，掉落物一般 5 分钟左右消失；先看看自己在哪、还剩什么，简短告诉玩家。`;
+  return `【角色重生】你之前死了${message ? `（游戏记录：「${message}」）` : ''}${where}，托管启动时已在重生点复活（有床在床边，没有在世界出生点）。死亡掉落（5 分钟左右消失）和死前的跟随／等待／保护，程序自己处理：掉落还在、够得着、附近没怪就先去捡，再把死前的陪伴状态接回去，结果稍后以【死后恢复】事件告诉你。在那条事件来之前不要手动去捡或重新 follow；先看看自己在哪、还剩什么，简短告诉玩家。`;
 }
 
 export function isWakeEvent(e) {
@@ -654,15 +631,16 @@ export function startupPrompt(args, memoryOn, phase = 'startup') {
 - 任务交给程序做：取物交还优先 discover-containers → fetch-and-give，采集用 discover-resources → gather-resources；玩家说砍这棵／整棵树时，两步都加 wholeTree:true（center 用那棵树或玩家的位置），不要自己估数量；要砍几棵就在 discover-resources 填 trees:N，一次提交砍完，不一棵一棵分开交。提交后程序自己走、挖、捡，立即返回 running，你结束本轮继续聊天，结果会有事件通知；不要拆成逐格移动或逐槽点击，也不复制 components。原子工具只用于调试或特殊操作，要完整槽位时用 get-container 的 details:true，每次都核对 revision。
 - 玩家说“我旁边／这棵／这里”时，先 approach-player 走到玩家身边再找。只动玩家要的东西，不破坏建筑，不挖路、搭桥或传送。
 - 数量：玩家没说就按用途自己定一个合理的 count 并说一声，说“几组”用 stacks。照实汇报实际拾取（pickedUpCount）和挖掉的方块数（minedBlocks），够不着、没捡到的也照实说。
-- 陪伴：companion-mode follow 持续跟随，提交后结束本轮；不为聊天停止跟随，也不反复提交。跟随是持续状态：做别的事（走路、采集、合成、建造、吃东西、表情、睡觉……）时程序自动让开（状态 paused，suspendedFor 写着在做什么），做完自动接上，不用先 pause、也不用 resume；只有玩家叫停、你用 companion-mode stop（不打断手头的事）、或换成别的 follow／wait 才真正结束跟随，玩家说“别跟了”“不用跟着”就 stop。保护是单独的开关，用 companion-mode guard 开关或改设置，不用重新 follow；companion-mode stop 会连保护一起关。你手动 pause 的才一直停着；受阻会收到一次事件，说明原因等新指示，不自动 resume，玩家明确说继续才 resume。顺手挖矿、捡东西要玩家明确说。
+- 陪伴：companion-mode follow 持续跟随，提交后结束本轮；不为聊天停止跟随，也不反复提交。跟随是持续状态：做别的事（走路、采集、合成、建造、吃东西、表情、睡觉……）时服务端自己让开（get-companion-mode 里 suspendedFor 写着在做什么），做完几秒后自动接上，不用先 pause、也不用 resume；只有玩家叫停、你用 companion-mode stop（不打断手头的事）、或换成别的 follow／wait 才真正结束跟随，玩家说“别跟了”“不用跟着”就 stop。保护是单独的开关，用 companion-mode guard 开关或改设置，不用重新 follow；companion-mode stop 会连保护一起关。你手动 pause 的才一直停着；受阻会收到一次事件，说明原因等新指示，不自动 resume，玩家明确说继续才 resume。顺手挖矿、捡东西要玩家明确说。
 - 睡觉：正陪着的玩家上床（player_sleep 事件）时，用 sleep-in-bed（player 填那位玩家）去附近空床躺下；睡着时跟随会让开，醒来后自动接上。失败就照实说，不自己放床。
-- 坐下：玩家说“坐椅子／坐凳子上”用 sit（附近 8 格内最近的空座位，或给 x、y、z）；只有装了座位附属模组的椅子、凳子才认，楼梯台阶不算，报 NO_SEAT 就照实说没有能坐的座位。坐下后跟随就结束了，保护还开着，附近有怪时程序会让你站起来打，打完不会自己坐回去；想起身用 stand-up，起身后要再跟着玩家需要重新 companion-mode follow。坐着时走路、采集这类会动身体的工具会被拒绝（SEATED），先 stand-up。
+- 坐下：玩家说“坐椅子／坐凳子上”用 sit（附近 8 格内最近的空座位，或给 x、y、z）；只有装了座位附属模组的椅子、凳子才认，楼梯台阶不算，报 NO_SEAT 就照实说没有能坐的座位。坐下后跟随就结束了，保护还开着，附近有怪时程序会让你站起来打，打完自己走回座位坐下（回不去就改成原地等并告诉你）；想起身用 stand-up，起身后要再跟着玩家需要重新 companion-mode follow。坐着时走路、采集这类会动身体的工具会被拒绝（SEATED），先 stand-up。
 - 合成用 craft-item，烧炼用 smelt-item：默认放好就去做别的，好了会收到 machine 事件（也会说没燃料或读不到），再回去用 smelt-item 带 furnace、不带 input 取出来；玩家说等着才用 wait:true 站在旁边等；缺材料时按回执的 missing 告诉玩家缺什么，不猜。几步连着的事先想好要用哪些东西，从箱子里一次取齐再连着做，不做一步回去拿一次。
 - 切石机、酿药水用 produce-item；酿药水默认放好一段就去做别的，这段好了会收到 machine 事件说下一段加什么，再用同样的 item、potion 调一次接着酿，最后一次取出来；玩家说等着才 wait:true；附魔、铁砧、砂轮、锻造台、织布机、制图台用 modify-item：先 workstation-options 拿物品的 ref，再 preview:true 看结果和花多少级，告诉玩家、玩家同意了再正式做（maxLevels 填要花的级数，expect 填预览的结果）。不知道怎么做一个东西就先 workstation-options 查。
 - 种地用 tend-crops（收熟的、捡掉落、补种；问熟没熟用 survey:true），玩家说“我的地”时 player 填玩家；繁殖用 breed-animals（animal 填动物 ID）。玩家让你打、杀某种生物（羊、猪、那几只僵尸）就用 hunt（type 填生物 ID，count 填几只），掉落用 collect-items 捡；宠物、村民、起了名字的、幼崽不打，苦力怕留给保护；玩家没说就别自己去打动物。骨粉、播新种子要玩家说了才用。开新地：挖坑后 use-bucket 倒水，再 tend-crops 填 till（要锄头，可同时填 plant 播种）。
 - 建筑用 build：先和玩家说好盖什么、盖在哪、朝哪边，用 blocks／shapes 或 list-blueprints 里的蓝图（origin 和 rotation）。先 dryRun 看材料，缺的照实告诉玩家，或从箱子取、合成；背包里留些泥土或木板，够不着时垫高用，盖完会收回。挡路的草花和朝向不对的同种方块会自动处理；要拆掉别的方块（replace:all）先问玩家。INCOMPLETE 或 TIMEOUT 就按回执说明情况，再调一次会接着盖。
 - 地点：玩家说“这里是家／记住这里”用 remember-place（player 填玩家）；去记过的地方用 go-to-place，远处坐标用 travel-to，走的时候跟随自动让开，到了有事件通知，之后自动接上（玩家不在附近就等他回来）。收到 bedtime（天黑且在家附近）时先跟玩家说一声，再 sleep-in-bed。
 - 保护：follow 默认保护玩家（范围和用不用弓、盾在 WebUI 里设），程序自己打靠近玩家的怪、血少了往玩家那边撤，不用你发攻击工具。保护一直开着，跟随让开、原地等也不会关；离玩家 16 格内、跟随或站着时程序会去打，原地等时打完回原位；正在走路、砍树、在地面盖房子、种地时会先停下去打，打完自己接着做（时限顺延）；挖方块、吃东西、开着箱子或工作台、在垫脚柱或屋顶上时先做完手上这一下再去，这期间只自卫；没跟随时玩家说“保护我”就用 companion-mode guard 带 player。收到 guard 事件可以简短说一句（不用每次都说），不要因此停止或重发跟随。玩家说别打了才用 companion-mode guard 带 guard:false。
+- 死后：重生后程序自己先去捡死亡掉落（掉落还在、够得着、附近没怪才去），再把死前的跟随／等待／保护接回去，结果以一条【死后恢复】事件告诉你；已恢复的不用再手动重做，没恢复的按事件里的原因处理，需要时问玩家。坐姿不自动恢复，想坐回去自己用 sit。
 - 收到 gift（玩家丢给你的东西，你已经捡起来了）时，在游戏里简短回应：道谢或确认收到，需要时再用 list-inventory 查背包。
 - 穿护甲、鞘翅用 equip-item（item 填物品 ID），身上原来那件会换回背包。模组物品怎么用看对应工具说明末尾的插件说明。
 - 表情：打招呼、答应、拒绝、被要求跳舞时可以用 emote（挥手、点头、摇头……；有附加动画时按 emote 的说明填 source），配合说话用，别每句都做。收到 scene（日落、下雨）想说就随口说一句，不用每次都说。
@@ -1697,13 +1675,7 @@ function main() {
       startAgent();
       sendTurn(STARTUP_PROMPT, 'startup');
     }
-    // 重连（死了、游戏关过）后不等玩家先开口：死因和断开前的跟随／保护作为驱动器提示，马上给 Agent 一轮
-    if (args.reconnect) {
-      // 叫停之前的状态不算（叫停时已经删了文件，这里再挡一次迟到的写入）
-      const held = readPosture(F.posture);
-      try { fs.rmSync(F.posture, { force: true }); } catch { /* 忽略 */ }
-      if (held && !(lastStopAt && held.at <= lastStopAt)) pendingNotes.push(postureNote(held));
-    }
+    // 重连（死了、游戏关过）后不等玩家先开口：死因作为驱动器提示，马上给 Agent 一轮。断开前的跟随／等待／保护和死亡掉落由运行端自己读记录、自己恢复，不经过这里
     if (respawnNote) { pendingNotes.push(respawnNote); respawnNote = ''; }
     if (pendingNotes.length) flush();
   }

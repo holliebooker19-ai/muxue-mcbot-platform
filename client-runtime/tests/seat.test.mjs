@@ -1,57 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { ServerBody } from '../dist/server-body.js';
 import { createMcpServer } from '../dist/mcp.js';
-import { CompanionMode } from '../dist/companion-mode.js';
-import { EventJournal } from '../dist/events.js';
-import { mockServerControl } from './mock-server-control.mjs';
+import { companionFixture } from './companion-fixture.mjs';
 
-// sit / stand-up: the tools, their arguments, and what sitting does to a running follow (ends it, keeps protection).
+// sit / stand-up: the tools, their arguments, and what the server's seat does to the runtime's view of a follow (the follow ends, protection stays).
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function until(check) { for (let i = 0; i < 400; i++) { if (check()) return; await delay(5); } assert.fail('condition did not become observable'); }
-const alex = randomUUID();
-const capabilities = ['send-chat', 'look-at', 'move-to-position', 'follow-companion', 'nearby-blocks', 'companion-guard', 'guard-duty-fenced', 'sit', 'stand-up'];
+const capabilities = ['send-chat', 'look-at', 'move-to-position', 'nearby-blocks', 'sit', 'stand-up'];
 
 async function setup(t, { caps = capabilities, sitResult } = {}) {
-  const mock = await mockServerControl();
-  mock.setState({ entities: [{ id: alex, name: 'Alex', type: 'minecraft:player', position: { x: 3, y: 64, z: 0 } }] });
-  let duty = null;
-  const hello = mock.handlers.hello;
-  mock.handlers.hello = () => ({ ...hello(), capabilities: caps });
-  mock.handlers.guard = params => {
-    if (params.off) { duty = null; return { enabled: false, guardRevision: params.guardRevision }; }
-    duty = { enabled: true, player: params.player, entityId: params.expectedEntityId, options: params.options, covering: true, state: 'idle', hits: 0, kills: 0, shots: 0, retreats: 0, damage: 0, busyMs: 0 };
-    return { ...duty, guardRevision: params.guardRevision };
-  };
-  const stop = mock.handlers.stop;
-  mock.handlers.stop = params => { const result = stop(params); if (params.clearGuard === true) duty = null; return result; };
-  const observe = mock.handlers.observe;
-  mock.handlers.observe = params => ({ ...observe(params), ...(duty ? { guard: duty } : {}) });
-  const act = mock.handlers.act;
-  mock.handlers.act = (params, ctx) => {
+  const f = await companionFixture(t, { capabilities: caps });
+  // The server sits the body when a sit succeeds and stands it up on stand-up; the posture changes with it.
+  const act = f.mock.handlers.act;
+  f.mock.handlers.act = (params, ctx) => {
     const op = act(params, ctx);
-    if (params.name === 'sit' && sitResult) { const failed = { ...op, ...sitResult }; ctx.operations.set(op.operationId, failed); return failed; }
-    if (params.name !== 'follow-companion') return op;
-    const following = { ...op, status: 'running', result: { ...params.args, distance: params.args.distance ?? 2.5, state: 'following', position: { x: 0, y: 64, z: 0 } } };
-    ctx.operations.set(op.operationId, following); return following;
+    if (params.name === 'sit') {
+      if (sitResult) { const failed = { ...op, ...sitResult }; ctx.operations.set(op.operationId, failed); return failed; }
+      f.server.seat(); f.mock.setState({ sitting: true });
+    }
+    if (params.name === 'stand-up') { f.server.drop(); f.mock.setState({ sitting: false }); }
+    return op;
   };
-  const body = await ServerBody.connect({ connection: mock.connection, username: 'ServerBot', worldId: 'test-world', heartbeatIntervalMs: 60000 });
-  const events = new EventJournal();
-  const mode = new CompanionMode(body, events);
-  mode.resumeDelayMs = 0;
-  const told = [];
-  mode.onPosture = posture => told.push(posture);
-  const server = createMcpServer(body, events, { companion: mode });
+  const server = createMcpServer(f.body, f.events, { companion: f.mode });
   const [left, right] = InMemoryTransport.createLinkedPair(), client = new Client({ name: 'seat-test', version: '1' });
   await server.connect(left); await client.connect(right);
-  t.after(async () => { await client.close(); await server.close(); await body.close().catch(() => {}); await mock.close(); });
-  const acts = () => mock.calls.filter(call => call.method === 'act').map(call => call.params);
+  t.after(async () => { await client.close(); await server.close(); });
+  const acts = () => f.mock.calls.filter(call => call.method === 'act').map(call => call.params);
   const call = async (name, args = {}) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
-  const follow = async request => { await mode.request({ action: 'follow', player: 'Alex', ...request }); await until(() => mode.snapshot().stage === 'active'); };
-  return { mock, body, mode, told, acts, call, client, follow };
+  const follows = () => f.postures().filter(request => request.action === 'follow');
+  return Object.assign(f, { client, acts, call, follows });
 }
 
 test('sit and stand-up are published only with their capabilities', async t => {
@@ -80,58 +58,73 @@ test('sit forwards an optional seat position; partial or malformed arguments nev
 test('a successful sit ends the follow, keeps the guard duty and is not resumed by itself; stand-up clears the mark', async t => {
   const f = await setup(t);
   await f.follow();
-  assert.deepEqual(f.told.at(-1), { action: 'follow', player: 'Alex', guard: true });
-  assert.equal(f.acts().filter(act => act.name === 'follow-companion').length, 1);
+  assert.deepEqual(f.told.at(-1), { action: 'follow', player: 'Alex', guard: true, distance: 2.5 });
+  assert.equal(f.follows().length, 1);
 
   const sat = await f.call('sit');
   assert.equal(sat.status, 'succeeded');
   assert.ok(f.acts().some(act => act.name === 'sit'), 'sit went to the server');
+  assert.equal((await f.call('get-companion-mode')).seated, true);
   const state = f.mode.snapshot();
   assert.equal(state.seated, true);
   assert.equal(state.intent, undefined, 'the follow is over');
   assert.equal(state.guardEnabled, true, 'protection stays');
-  assert.deepEqual(f.told.at(-1), { action: 'guard', player: 'Alex', guard: true }, 'what is left of the posture is the guard');
+  assert.deepEqual(f.told.at(-1), { action: 'seated', player: 'Alex', guard: true }, 'a seat is recorded as what it is: reported after a death, never restored');
   assert.equal(f.told.includes(null), false);
 
-  await delay(120);
-  assert.equal(f.acts().filter(act => act.name === 'follow-companion').length, 1, 'no follow resumed after the tool released');
+  await delay(120); await f.monitor.tick();
+  assert.equal(f.follows().length, 1, 'no follow set again by anyone');
   assert.equal(f.mode.snapshot().seated, true);
 
   assert.equal((await f.call('stand-up')).status, 'succeeded');
-  await until(() => f.mode.snapshot().seated !== true);
+  assert.equal((await f.call('get-companion-mode')).seated, undefined);
   assert.equal(f.mode.snapshot().guardEnabled, true, 'standing up leaves the protection alone');
-  await delay(60);
-  assert.equal(f.acts().filter(act => act.name === 'follow-companion').length, 1, 'stand-up does not bring the follow back');
+  assert.deepEqual(f.told.at(-1), { action: 'guard', player: 'Alex', guard: true }, 'only the protection is left of it');
+  await delay(60); await f.monitor.tick();
+  assert.equal(f.follows().length, 1, 'stand-up does not bring the follow back');
+  assert.equal(f.server.current, null);
 });
 
-test('sitting without protection leaves no posture to restore', async t => {
+test('sitting without protection is recorded as a seat only', async t => {
   const f = await setup(t);
   await f.follow({ guard: false });
-  assert.deepEqual(f.told.at(-1), { action: 'follow', player: 'Alex', guard: false });
+  assert.deepEqual(f.told.at(-1), { action: 'follow', player: 'Alex', guard: false, distance: 2.5 });
   assert.equal((await f.call('sit')).status, 'succeeded');
-  assert.equal(f.told.at(-1), null, 'the follow was the posture and sitting ended it');
+  await f.mode.refresh();
+  assert.deepEqual(f.told.at(-1), { action: 'seated', guard: false });
   assert.equal(f.mode.snapshot().seated, true);
 });
 
-test('a refused sit leaves the follow as it was and picks it up again', async t => {
+test('a refused sit leaves the follow as it was: the server never gave it up, nothing is sent', async t => {
   const f = await setup(t, { sitResult: { status: 'failed', summary: 'SEAT_OCCUPIED: Someone is already sitting there', result: { code: 'SEAT_OCCUPIED' } } });
   await f.follow();
   const refused = await f.call('sit');
   assert.equal(refused.status, 'failed');
+  await f.mode.refresh();
   assert.equal(f.mode.snapshot().seated, undefined);
-  await until(() => f.mode.snapshot().state === 'following');
+  assert.equal(f.mode.snapshot().state, 'following');
   assert.equal(f.mode.snapshot().intent, 'follow');
   assert.equal(f.told.at(-1).action, 'follow');
+  assert.equal(f.postures().length, 1);
 });
 
-test('get-companion-mode drops the sitting mark when the server observes the body standing (a fight got it up)', async t => {
+test('get-companion-mode drops the sitting mark when the server shows no seat any more (a fight got the body up)', async t => {
   const f = await setup(t);
   await f.follow();
   await f.call('sit');
-  f.mock.setState({ sitting: true });
   assert.equal((await f.call('get-companion-mode')).seated, true);
-  f.mock.setState({ sitting: false });
-  assert.equal((await f.call('get-companion-mode')).seated, undefined);
+  // The guard got the body up and is walking back to the seat: still seated for the model.
+  f.server.set({ returning: true });
+  assert.equal((await f.call('get-companion-mode')).seated, true);
+  // The way back failed: the server turned the seat into a wait with the sit code. The model is told, once.
+  f.server.drop(); f.server.current = { action: 'wait', postureRevision: f.server.revision + 1 }; f.server.set({ state: 'waiting', reason: 'SEAT_OCCUPIED' });
+  const back = await f.call('get-companion-mode');
+  assert.equal(back.seated, undefined);
+  assert.equal(back.intent, 'wait');
+  const told = f.events.since(0, ['companion']).map(event => JSON.parse(event.text));
+  assert.equal(told.filter(event => event.code === 'SEAT_OCCUPIED').length, 1);
+  await f.mode.refresh();
+  assert.equal(f.events.since(0, ['companion']).length, told.length, 'said once');
   assert.equal(f.mode.snapshot().guardEnabled, true);
 });
 
@@ -142,17 +135,15 @@ test('get-status shows sitting from the server observation', async t => {
   assert.equal(status.sitting, true);
 });
 
-test('a sit that succeeds while the companion is mid-change still ends the follow once the change settles', async t => {
+test('a wait racing a sit gets the seat back from the server and holds no wait of its own', async t => {
   const f = await setup(t);
   await f.follow();
-  const real = f.mode.seatedDown.bind(f.mode);
-  let refused = 0;
-  f.mode.seatedDown = async () => {
-    if (refused < 2) { refused++; const { BodyError } = await import('../dist/body.js'); throw new BodyError('BUSY', 'mid-change'); }
-    return real();
-  };
-  assert.equal((await f.call('sit')).status, 'succeeded');
-  await until(() => f.mode.snapshot().seated === true);
-  assert.equal(refused, 2);
+  // The server sits the body right before it answers the wait: wait while seated returns the seat (docs: 陪伴姿态).
+  const posture = f.mock.handlers.posture;
+  f.mock.handlers.posture = async (params, ctx) => { if (params.action === 'wait') { f.server.seat(); f.server.revision = params.postureRevision - 1; f.mock.setState({ sitting: true }); } return posture(params, ctx); };
+  const waited = await f.mode.request({ action: 'wait' });
+  assert.equal(waited.seated, true);
+  assert.equal(f.mode.snapshot().intent, undefined);
   assert.notEqual(f.mode.snapshot().state, 'following');
+  assert.equal(f.server.current.action, 'seated');
 });

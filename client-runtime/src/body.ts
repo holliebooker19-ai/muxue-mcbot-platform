@@ -5,7 +5,7 @@ export interface OperationBudget { used: number; remaining: number; limit: numbe
 export type Components = Record<string, unknown>;
 export interface ItemValue { id: string; count: number; components?: Components; maxStackSize?: number; componentsComplete?: boolean; componentError?: string }
 export interface ItemStack extends ItemValue { slot: number; source?: 'container' | 'player' | 'unknown'; playerSlot?: number; active?: boolean; mayPickup?: boolean }
-export interface GroundItem { entityId: string; position: Position; stack: ItemValue; onGround?: boolean; visible?: boolean | null; visibility: 'visible' | 'occluded' | 'unknown' }
+export interface GroundItem { entityId: string; position: Position; stack: ItemValue; onGround?: boolean; visible?: boolean | null; visibility: 'visible' | 'occluded' | 'unknown'; /** server-posture: dropped by this body's own death (the server tags them), the ones to fetch back. */ deathDrop?: boolean }
 export interface CompanionGuard { player: string; expectedEntityId: string; maxDistance: number }
 export interface ResourceScanOptions { blockIds: string[]; radius: number; maxResults: number; center?: Position; wholeTree?: boolean; trees?: number; companionMiningGuard?: CompanionGuard }
 export interface PickupReceipt { seq: number; entityId: string; position: Position; stack: ItemValue; pickedUpCount: number; sessionId: string; controlGeneration: number; dimension: string; /** A carried mod storage (e.g. a backpack) took the items instead of the inventory. */ storedIn?: string; /** gift-receipts: the player (not the body) who threw the item. */ thrownBy?: string }
@@ -79,7 +79,31 @@ export interface Observation {
   weather?: { natural: boolean; sky: boolean; raining: boolean; thundering: boolean };
   /** ServerBody: the guard duty, present while it is on. */
   guard?: GuardDutyState;
+  /** ServerBody (server-posture): the standing companion posture, present while there is one; see PostureState. */
+  posture?: PostureState;
 }
+/** The server's own state words for the companion posture (docs/server_body_protocol.md, "陪伴姿态"). */
+export type PostureStateName = 'following' | 'waiting' | 'seated' | 'guarding' | 'suspended' | 'away' | 'blocked';
+/** The standing posture the server holds on the lease; the observation field and the reply of the posture method have this shape. */
+export interface PostureState {
+  action: 'follow' | 'wait' | 'seated'; postureRevision: number; state: PostureStateName;
+  player?: string; entityId?: string; distance?: number; wander?: boolean;
+  /** following: standing beside the player / strolling nearby. */
+  arrived?: boolean; strolling?: boolean;
+  /** seated: the guard got the body up and it is walking back to sit again (observation sitting is false meanwhile). */
+  returning?: boolean;
+  /** suspended: the name of the operation the posture gave way to, and the ms left before it takes over again. */
+  suspendedFor?: string; resumeInMs?: number;
+  seat?: Position;
+  /** away: PLAYER_AWAY; blocked: NO_PATH, BLOCKED (cannot walk now) or INTERNAL (tried again next tick); a failed way back to the seat (action wait): the sit code (SEAT_OCCUPIED, EMPTY_HAND_REQUIRED, NO_LINE_OF_SIGHT, ...), NO_SEAT when the block is no seat any more, NO_PATH after the time limit. */
+  reason?: string;
+}
+/** The posture method: follow a player, wait in place, or off. The server accepts these only with a postureRevision (ServerBody adds it). */
+export type PostureRequest = { action: 'follow'; player: string; expectedEntityId: string; distance?: number; wander?: boolean } | { action: 'wait' } | { off: true };
+/** The latest death, as hello reports it (drops: server-posture). */
+export interface LastDeath { message?: string; dimension: string; position: Position; at: number; drops?: DeathDrops }
+/** count 0: nothing fell (keepInventory, or nothing carried). despawnAt: wall-clock ms the items should vanish by; remaining: tagged items still there in loaded chunks, null when not known. */
+export interface DeathDrops { count: number; items?: Array<{ id: string; count: number }>; despawnAt?: number; remaining?: number | null }
 export interface BodyHello {
   protocol: 1 | 2; backend?: 'client' | 'server'; instanceId?: string; worldId?: string;
   platform: { minecraft: string; loader: string; loaderVersion: string };
@@ -98,6 +122,8 @@ export interface BodyHello {
   appearances?: Array<{ id: string; choices: string[] }>;
   /** ServerBody: add-on usage notes; after plugin filtering only official plugins that are on (see plugins.ts). */
   hints?: Array<{ id: string; text: string }>;
+  /** ServerBody: the latest death (message, place, time and, with server-posture, what fell); absent while the body never died. */
+  lastDeath?: LastDeath;
 }
 /** What modify-item does to the referenced item; see the MCP tool for the fields each kind takes. */
 export type ModifyAction = { kind: 'enchant' | 'anvil' | 'grind' | 'smith' | 'loom' | 'cartography'; option?: number; with?: string; rename?: string; template?: string; addition?: string; dye?: string; pattern?: string; patternItem?: string };
@@ -120,7 +146,6 @@ export interface ActionArguments {
   'look-at': Position;
   'move-to-position': Position & { tolerance?: number; timeoutMs?: number };
   'follow-player': { player: string; distance?: number; timeoutMs?: number };
-  'follow-companion': { player: string; expectedEntityId: string; distance?: number; wander?: boolean; guard?: GuardOptions };
   'approach-container': { targetToken: string; timeoutMs?: number };
   'approach-player': { player: string; expectedEntityId?: string; distance?: number; timeoutMs?: number };
   'approach-resource': { targetToken: string; timeoutMs?: number };
@@ -172,21 +197,16 @@ export interface Operation {
   operationId: string; sessionId: string; name: string; status: OperationStatus; summary: string; result?: unknown; controlGeneration?: number;
   operationBudget?: OperationBudget;
 }
+/** A stop only ends the operations; clearGuard and clearPosture also end the standing guard duty and companion posture (an explicit end: stop-action, the player's halt, companion-mode stop). */
 export interface StopOptions {
   clearGuard?: boolean;
-  /** A follow/wait stepping aside for a tool or reflex (capability step-aside-stop): targets found before it stay valid. Never together with clearGuard. */
-  stepAside?: boolean;
+  clearPosture?: boolean;
 }
-type ControlContext = { instanceId?: string; sessionId?: string; worldId?: string; dimension?: string; controlGeneration?: number };
-/**
- * A reference (resourceRef, containerRef) taken in `then` still belongs to the control observed in `now`: same instance,
- * session, world and dimension, and the same control generation or one the body still carries (Body.carries).
- */
-export function sameControl(body: Pick<Body, 'carries'>, then: ControlContext, now: ControlContext): boolean {
-  if (then.instanceId !== now.instanceId || then.sessionId !== now.sessionId || then.worldId !== now.worldId || then.dimension !== now.dimension) return false;
-  if (then.controlGeneration === now.controlGeneration) return true;
-  return then.controlGeneration !== undefined && now.controlGeneration !== undefined && body.carries?.(then.controlGeneration) === true && then.controlGeneration < now.controlGeneration;
-}
+/** travel-to limits as the protocol table has them (farthest 2000 blocks; timeoutMs 5000..900000): the one place the runtime reads them from. */
+export const TRAVEL_MAX_BLOCKS = 2000;
+export const TRAVEL_TIMEOUT_MS = { min: 5000, max: 900000 } as const;
+/** pickup-item timeoutMs limits (the server-body.ts schema); the death recovery asks within them. */
+export const PICKUP_TIMEOUT_MS = { min: 500, max: 30000 } as const;
 /** assess-armour: per candidate stack in the main inventory, whether wearing it improves on what is worn (decided server-side). */
 export interface ArmourCandidate { slot: number; item: string; count: number; part: 'head' | 'chest' | 'legs' | 'feet' | 'offhand'; verdict: 'better' | 'not-better' | 'blocked'; reason: string; wearing?: string }
 export interface ArmourAssessment { candidates: ArmourCandidate[] }
@@ -203,6 +223,8 @@ export interface Body {
   machineStatus?(position: Position): Promise<MachineStatus>;
   /** Turn the standing guard duty on, change it, or off (capability guard-duty). Not an operation; a stop keeps it. */
   setGuard?(request: GuardDutyRequest): Promise<GuardDutyState | { enabled: false }>;
+  /** Set the standing companion posture (follow, wait) or clear it (capability server-posture). Not an operation; a plain stop keeps it, an operation makes it give way by itself. */
+  setPosture?(request: PostureRequest): Promise<PostureState | { posture: null }>;
   /** ServerBody: total milliseconds guard duties held the body for fights so far, as of the last observation (only grows). */
   fightMs?(): number;
   acquireTask?(taskToken: string): void;
@@ -211,8 +233,6 @@ export interface Body {
   pendingOperations(): readonly Operation[];
   isBusy?(): boolean;
   stop(options?: StopOptions): Promise<{ stopped: true }>;
-  /** ServerBody: whether targets found in that control generation still hold, i.e. only step-aside stops came since (ControlSession.carries on the server). */
-  carries?(generation: number): boolean;
   close(): Promise<void>;
 }
 export class BodyError extends Error {

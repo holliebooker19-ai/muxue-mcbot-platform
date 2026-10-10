@@ -7,6 +7,7 @@ import { createMcpServer } from '../dist/mcp.js';
 import { EventJournal } from '../dist/events.js';
 import { mockServerControl, serverCapabilities } from './mock-server-control.mjs';
 import { observation } from './mock-control.mjs';
+import { companionFixture } from './companion-fixture.mjs';
 
 async function setup(t, capabilities = ['sleep-in-bed', 'wake-up']) {
   const mock = await mockServerControl(); t.after(() => mock.close());
@@ -44,16 +45,16 @@ test('sleep-in-bed forwards the player to search around; malformed arguments nev
   assert.equal(acts().length, 2);
 });
 
-test('sleep-in-bed makes a running companion mode step aside before walking to the bed', async t => {
-  const { body, acts } = await setup(t, ['sleep-in-bed', 'wake-up', 'follow-companion']);
-  const order = [];
-  let state = 'following', suspendedFor;
-  const companion = { snapshot: () => ({ state, suspendedFor }), read: () => ({ state, suspendedFor }),
-    yieldTo: async reason => { order.push(['companion', 'yield', reason, acts().length]); state = 'paused'; suspendedFor = reason; return { release: async () => { order.push(['companion', 'release', acts().length]); }, hold() {} }; } };
-  const c = await client(t, body, { companion });
-  await call(c, 'sleep-in-bed', {});
-  assert.deepEqual(order, [['companion', 'yield', 'sleep-in-bed', 0], ['companion', 'release', 1]], 'stepped aside before any act; the runtime lets it back (after waking)');
-  assert.deepEqual(acts().map(act => act.name), ['sleep-in-bed']);
+test('sleep-in-bed while following goes straight to the server: the posture gives way there and the runtime sends nothing around it', async t => {
+  const f = await companionFixture(t, { capabilities: ['send-chat', 'look-at', 'move-to-position', 'nearby-blocks', 'sleep-in-bed', 'wake-up'] });
+  const c = await client(t, f.body, { companion: f.mode });
+  await f.follow();
+  const before = f.mock.calls.length;
+  assert.equal((await call(c, 'sleep-in-bed', {})).status, 'succeeded');
+  const sent = f.mock.calls.slice(before).map(entry => entry.method).filter(method => ['act', 'stop', 'posture'].includes(method));
+  assert.deepEqual(sent, ['act'], 'no stop, no pause, no new posture request');
+  assert.deepEqual(f.mock.calls.slice(before).filter(entry => entry.method === 'act').map(entry => entry.params.name), ['sleep-in-bed']);
+  assert.equal(f.mode.snapshot().intent, 'follow');
 });
 
 test('a nearby player going to bed and the body getting up are model events; the first observation is a baseline', () => {

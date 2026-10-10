@@ -31,10 +31,6 @@ export class SurvivalReflexes {
     stopCurrent: (options?: StopOptions) => Promise<{ stopped: true }>; ordinaryBusy: () => boolean;
     /** The server guard is fighting for the followed player; the 3-block self-defense stays out of its way. */
     guarding?: () => boolean;
-    /** Step a follow aside for a short reflex and return how to let it pick up again (hold keeps it paused when the outcome is unknown), or undefined when something else must be stopped instead. */
-    pauseCompanion?: (reason: string) => Promise<(() => Promise<void>) & { hold?: () => void } | undefined>;
-    /** Stop running work but keep a follow that is stepping aside; used when the policy changes. Falls back to stopCurrent. */
-    stopWork?: () => Promise<{ stopped: true }>;
   }) {}
   read() {
     const { threats, dangers: _dangers, ...compactSensed } = this.sensed ?? {};
@@ -52,7 +48,7 @@ export class SurvivalReflexes {
     const fighting = this.defenseTarget;
     this.disarm('explicit-stop'); const epoch = this.epoch; this.phase = 'stopping';
     try {
-      const result = await this.options.stopCurrent({ clearGuard: true });
+      const result = await this.options.stopCurrent({ clearGuard: true, clearPosture: true });
       // Stop ends what is running, not the reflexes: a body that was told to stop walking still hits back when attacked.
       // Only the fight it was stopped in pauses for a moment; if that mob keeps at it, defense picks it up again.
       if (epoch === this.epoch) {
@@ -79,7 +75,7 @@ export class SurvivalReflexes {
     const epoch = this.epoch;
     if (running) {
       this.phase = 'stopping';
-      try { await (this.options.stopWork ?? this.options.stopCurrent)(); }
+      try { await this.options.stopCurrent(); }
       catch (error) { if (epoch === this.epoch) this.phase = 'blocked'; throw error; }
     }
     if (epoch !== this.epoch) throw new BodyError('CANCELLED', '策略变更被更新的停止或决策取代');
@@ -174,14 +170,14 @@ export class SurvivalReflexes {
   }
   private async defend(epoch: number, threat?: Threat, preempt = false, entityId?: string): Promise<Operation> {
     const sensedAt = this.sensed?.receivedAt, stopRequestedAt = preempt ? Date.now() : undefined;
-    let stopConfirmedAt: number | undefined, resume: (() => Promise<void>) & { hold?: () => void } | undefined, resumable = false;
+    let stopConfirmedAt: number | undefined;
     const check = () => { if (epoch !== this.epoch || !this.armed) throw new BodyError('CANCELLED', '防卫被更新的策略或人工停止取消'); };
     try {
       if (preempt) {
-        resume = await this.options.pauseCompanion?.('自卫');
-        if (!resume) await this.options.stopCurrent();
+        // A plain stop: the work ends, the companion posture and protection stay and carry on by themselves.
+        await this.options.stopCurrent();
         check(); stopConfirmedAt = Date.now();
-        this.events.add('survival', resume ? '近距自卫：跟随先让开，打完自动接着跟' : '近距自卫已停止原任务；保留已确认进度，结束后不会重放旧任务');
+        this.events.add('survival', '近距自卫已停止原任务；保留已确认进度，结束后不会重放旧任务');
       }
       check();
       const operation = await this.tasks.defend({ entityId: threat?.entityId ?? entityId, previouslyObserved: !!threat, policy: structuredClone(this.policy), check, sensedAt, stopRequestedAt, stopConfirmedAt });
@@ -193,18 +189,16 @@ export class SurvivalReflexes {
         this.events.notifyOperation(operation); this.defenseEvent = { entityId: threat?.entityId ?? entityId, at: Date.now(), summary: operation.summary };
       }
       // A definite failure (nothing in reach, a refusal, a retreat with no way out) changed nothing it does not report:
-      // keep defending, only leave that one target alone for a moment, and let the follow pick up again as after a win.
-      // Only an unknown outcome switches defense off and keeps the follow paused.
+      // keep defending, only leave that one target alone for a moment (the server's posture picks up again as after a win).
+      // Only an unknown outcome switches defense off.
       if (operation.status === 'failed') {
         this.lastReason = operation.summary;
         const failedOn = threat?.entityId ?? entityId;
         if (failedOn && (operation.result as { code?: string } | undefined)?.code !== 'NO_THREAT') this.cooling.set(failedOn, Date.now() + 3000);
       }
       else if (operation.status !== 'succeeded' && operation.status !== 'cancelled') { this.armed = false; this.revision++; this.phase = 'blocked'; this.lastReason = operation.summary; }
-      resumable = ['succeeded', 'failed', 'cancelled'].includes(operation.status);
       return operation;
     } catch (error) {
-      if (error instanceof BodyError && error.code === 'CANCELLED') resumable = true;
       if (epoch === this.epoch) {
         this.armed = false; this.revision++; this.phase = 'blocked'; this.lastReason = (error as Error).message;
         this.events.add('survival', `自动防卫已阻断，未自动重试：${this.lastReason}`);
@@ -214,41 +208,30 @@ export class SurvivalReflexes {
       return { operationId: '', sessionId: this.body.hello?.sessionId ?? '', name: 'defend-self', status: 'failed', summary: (error as Error).message };
     } finally {
       if (epoch === this.epoch) { this.defenseTarget = undefined; if (this.phase === 'defending') this.phase = 'idle'; }
-      if (resume) await this.resumeCompanion(resume, '自卫', resumable);
     }
   }
-  private async resumeCompanion(resume: (() => Promise<void>) & { hold?: () => void }, what: string, ok: boolean): Promise<void> {
-    // An outcome nobody confirmed keeps the follow paused until the model or the player says so.
-    if (!ok) { resume.hold?.(); return; }
-    try { await resume(); }
-    catch (error) { this.events.add('survival', `${what}后没能接着跟随：${(error as Error).message}`); }
-  }
   private async eat(epoch: number, preempt: boolean): Promise<void> {
-    let resume: (() => Promise<void>) & { hold?: () => void } | undefined, resumable = false;
     try {
       if (preempt) {
-        resume = await this.options.pauseCompanion?.('进食');
-        if (!resume) await this.options.stopCurrent();
-        if (epoch !== this.epoch || !this.armed) { resumable = true; return; }
-        this.events.add('survival', resume ? '紧急进食：跟随先让开，吃完自动接着跟' : '紧急进食已停止原任务；保留其已确认结果，吃完不会自动重放旧任务');
+        // A plain stop: the work ends, the companion posture and protection stay and carry on by themselves.
+        await this.options.stopCurrent();
+        if (epoch !== this.epoch || !this.armed) return;
+        this.events.add('survival', '紧急进食已停止原任务；保留其已确认结果，吃完不会自动重放旧任务');
       }
       if (epoch !== this.epoch || !this.armed) return;
       const operation = await this.tasks.eat({ policy: this.policy });
       if (epoch !== this.epoch) return;
       this.handledResult = operation.operationId;
-      if ((preempt && !resume) || operation.status !== 'succeeded') this.events.notifyOperation(operation);
-      resumable = operation.status !== 'unknown';
+      if (preempt || operation.status !== 'succeeded') this.events.notifyOperation(operation);
       if (operation.status === 'unknown') { this.armed = false; this.phase = 'blocked'; this.revision++; this.lastReason = 'unknown-consumption'; }
       else if (operation.status !== 'succeeded') { this.armed = false; this.revision++; this.lastReason = operation.summary; }
     } catch (error) {
-      if (error instanceof BodyError && error.code === 'CANCELLED') resumable = true;
       if (epoch !== this.epoch) return;
       if (error instanceof BodyError && error.code === 'BUSY' && !preempt) { this.lastReason = 'waiting-for-task-gap'; return; }
       this.armed = false; this.revision++; this.phase = 'blocked'; this.lastReason = (error as Error).message;
       this.events.add('survival', `自动进食已阻断，未自动重试：${this.lastReason}`);
     } finally {
       if (epoch === this.epoch && this.phase === 'eating') this.phase = 'idle';
-      if (resume) await this.resumeCompanion(resume, '进食', resumable);
     }
   }
 }

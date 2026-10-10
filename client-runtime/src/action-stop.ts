@@ -6,10 +6,12 @@ import type { SurvivalTasks } from './survival-tasks.js';
 
 export type StopCurrent = ((options?: StopOptions) => Promise<{ stopped: true }>) & {
   generation?: () => number;
-  /** Same barrier for the work in progress, but a follow/wait that is stepping aside keeps its intent (reflex preemption, policy changes). */
-  keepCompanion?: () => Promise<{ stopped: true }>;
 };
-/** Shared stop barrier for explicit stops and program preemption; never resumes old intent. */
+/**
+ * Shared stop barrier for explicit stops and program preemption; never resumes old intent. Without options it is the plain stop
+ * (the work ends, the companion posture and the guard duty stay: reflex preemption, policy changes); an explicit end passes
+ * clearGuard and clearPosture.
+ */
 export function createActionStop(body: Body, tasks: ContainerTasks, gather: GatherTasks, companion?: CompanionMode, survival?: SurvivalTasks): StopCurrent {
   let revision = 0;
   const barrier = (stopBody: (options?: StopOptions) => Promise<{ stopped: true }>) => async (options?: StopOptions): Promise<{ stopped: true }> => {
@@ -25,23 +27,9 @@ export function createActionStop(body: Body, tasks: ContainerTasks, gather: Gath
     return result;
   };
   /** generation rises as soon as any stop starts, so tool calls admitted earlier can tell they were stopped. */
-  return Object.assign(barrier(options => companion ? companion.stop(undefined, options) : body.stop(options)), { generation: () => revision, keepCompanion: barrier(() => companion ? companion.stopWork() : body.stop()) });
+  return Object.assign(barrier(options => companion ? companion.stop(undefined, options) : body.stop(options)), { generation: () => revision });
 }
-/** Reflex hooks around a follow: the server guard owns fighting, and a short reflex steps the follow aside instead of discarding it. */
-export function companionReflexHooks(tasks: ContainerTasks, gather: GatherTasks, companion?: CompanionMode, stopWork?: () => Promise<{ stopped: true }>, survival?: SurvivalTasks, bodyBusy?: () => boolean) {
-  return {
-    guarding: () => companion?.guarding() === true,
-    pauseCompanion: async (reason = 'reflex') => {
-      if (!companion) return undefined;
-      const now = companion.snapshot();
-      if (!(['following', 'waiting'].includes(now.state) || (now.state === 'paused' && now.suspendedFor))) return undefined;
-      // Work that is still running (a gather or meal while the follow stood aside) must be cancelled first, and the follow outlives that.
-      let busy = bodyBusy?.() === true;
-      try { tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle(); } catch { busy = true; }
-      if (busy && !stopWork) return undefined;
-      const lease = await companion.yieldTo(reason);
-      if (busy) { try { await stopWork!(); } catch (error) { lease.hold(); throw error; } }
-      return Object.assign(() => lease.release(), { hold: () => lease.hold() });
-    },
-  };
+/** Reflex hook: the server guard owns fighting, and the 3-block self-defense stays out of its way. */
+export function companionReflexHooks(companion?: CompanionMode) {
+  return { guarding: () => companion?.guarding() === true };
 }
