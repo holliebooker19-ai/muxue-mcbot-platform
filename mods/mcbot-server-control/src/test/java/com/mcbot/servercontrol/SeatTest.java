@@ -26,7 +26,7 @@ final class SeatTest {
         // A sitting body talks, looks, handles its inventory and eats; everything that moves it needs stand-up first.
         for(String action:new String[]{"send-chat","look-at","emote","wake-up","sit","stand-up","select-slot","equip-item","eat-item","open-container","click-slot","close-container","swap-inventory","drop-item","set-appearance"})
             check(NativeSeat.allowedWhileSeated(action),action+" is allowed while sitting");
-        for(String action:new String[]{"move-to-position","follow-player","follow-companion","approach-container","approach-player","approach-resource","pickup-item","dig-block","place-block","travel-to","build","hunt","tend-crops","breed-animals","craft-item","smelt-item","sleep-in-bed","pillar-up","use-bucket","use-item-on-block","defend-entity","retreat-from-entity"})
+        for(String action:new String[]{"move-to-position","follow-player","approach-container","approach-player","approach-resource","pickup-item","dig-block","place-block","travel-to","build","hunt","tend-crops","breed-animals","craft-item","smelt-item","sleep-in-bed","pillar-up","use-bucket","use-item-on-block","defend-entity","retreat-from-entity"})
             check(!NativeSeat.allowedWhileSeated(action),action+" needs stand-up first");
 
         // Protection stays on while sitting; only a hostile creature close by gets the body up.

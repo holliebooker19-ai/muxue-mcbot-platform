@@ -11,9 +11,9 @@ public final class ControlSessionTest {
     private static final class FakeGame implements ControlSession.Game {
         boolean exists,dead,savedDead;
         int creations,starts,stops,respawns;
-        boolean immediate=true,beside;
+        boolean immediate=true,postureCap;
         boolean crashChat,crashStop,nearby,guardDuty;
-        JsonObject guarding;int dutyClears;
+        JsonObject guarding,posturing;int dutyClears,postureClears;
         int discoveries;
         final List<String> notices=new ArrayList<>();
         ControlSession.Operation active;
@@ -24,9 +24,11 @@ public final class ControlSessionTest {
             exists=true;dead=false;savedDead=false;respawns++;
         }
         @Override public boolean leave() { if(!exists)return false;exists=false;dead=false;return true; }
-        @Override public JsonObject hello() { List<String> caps=new ArrayList<>(List.of("send-chat"));if(nearby)caps.add("nearby-blocks");if(guardDuty)caps.add("guard-duty-fenced");return obj("capabilities",caps); }
+        @Override public JsonObject hello() { List<String> caps=new ArrayList<>(List.of("send-chat"));if(nearby)caps.add("nearby-blocks");if(guardDuty)caps.add("guard-duty-fenced");if(postureCap)caps.add("server-posture");return obj("capabilities",caps); }
         @Override public JsonObject guard(JsonObject p) { guarding=p.has("off")?null:p;return obj("enabled",guarding!=null); }
         @Override public void clearDuty() { dutyClears++;guarding=null; }
+        @Override public JsonObject posture(JsonObject p) { posturing=p.has("off")?null:p;return obj("state","following"); }
+        @Override public void clearPosture() { postureClears++;posturing=null; }
         @Override public JsonObject observe(JsonObject p) { return obj("source","server-observed","container",null); }
         @Override public JsonObject nearbyBlocks(JsonObject p) {discoveries++;return obj("dimension","minecraft:overworld","candidates",List.of());}
         @Override public JsonObject watch() { return obj("chat",List.of(),"chatCursor",7); }
@@ -39,7 +41,6 @@ public final class ControlSessionTest {
         }
         @Override public void abort(ControlSession.Operation o) {if(active==o)stop();}
         @Override public void stop() {stops++;if(crashStop)throw new IllegalStateException("Injected native cleanup failure");active=null;}
-        @Override public boolean besideFollow(String name) {return beside&&(name.equals("select-slot")||name.equals("equip-item"));}
     }
     private static final class Fixture {
         final FakeGame game=new FakeGame();
@@ -62,28 +63,42 @@ public final class ControlSessionTest {
     private static void budget(JsonObject response,int used,String message) {
         check(response.getAsJsonObject("operationBudget").equals(obj("used",used,"remaining",ControlSession.ID_LIMIT-used,"limit",ControlSession.ID_LIMIT,"exhausted",used==ControlSession.ID_LIMIT)),message);
     }
-    /** beside-follow: select-slot and equip-item run beside a running follow-companion; any other action stays BUSY. */
-    private static void besideFollow() {
-        Fixture f=new Fixture();JsonObject claim=f.claim("a");
-        int stops=f.game.stops;f.game.beside=true;f.game.immediate=false;
-        check(f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"follow-companion")).get("status").getAsString().equals("running"),"follow-companion keeps running");
-        f.game.immediate=true;
-        check(f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"select-slot")).get("status").getAsString().equals("succeeded"),"select-slot runs beside a running follow");
-        check(f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"equip-item")).get("status").getAsString().equals("succeeded"),"equip-item runs beside a running follow");
-        check(f.game.stops==stops&&f.game.active!=null,"beside actions never stop the follow");
-        errorCode("BUSY",()->f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"dig-block")));
-        f.game.beside=false;
-        errorCode("BUSY",()->f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"select-slot")));
-        Fixture g=new Fixture();JsonObject gClaim=g.claim("a");
-        g.game.beside=true;g.game.immediate=false;
-        g.session.call("act",g.act(gClaim,UUID.randomUUID().toString(),"build"));
-        g.game.immediate=true;
-        errorCode("BUSY",()->g.session.call("act",g.act(gClaim,UUID.randomUUID().toString(),"select-slot")));
-        Fixture h=new Fixture();JsonObject hClaim=h.claim("a");
-        h.game.beside=true;h.game.immediate=false;
-        h.session.call("act",h.act(hClaim,UUID.randomUUID().toString(),"follow-companion"));
-        JsonObject stuck=h.session.call("act",h.act(hClaim,UUID.randomUUID().toString(),"equip-item"));
-        check(stuck.get("status").getAsString().equals("failed")&&stuck.get("summary").getAsString().startsWith("INTERNAL"),"a beside-follow action left running is failed defensively");
+    /** The posture: a lease-bound method like the guard, ordered by postureRevision; a stop keeps it, clearPosture or the end of the lease drops it. */
+    private static void posture() {
+        Fixture f=new Fixture();JsonObject claim=f.claim("a");int base=f.game.postureClears;
+        JsonObject follow=f.auth(claim);follow.addProperty("postureRevision",1);follow.addProperty("action","follow");
+        errorCode("UNSUPPORTED",()->f.session.call("posture",follow));
+        f.game.postureCap=true;
+        JsonObject set=f.session.call("posture",follow);
+        check(set.get("postureRevision").getAsLong()==1&&f.game.posturing!=null&&f.game.starts==0,"posture is set by its own method, not an operation");
+        budget(set,0,"posture uses no operation ID");
+        errorCode("CANCELLED",()->f.session.call("posture",follow));
+        JsonObject zero=f.auth(claim);zero.addProperty("postureRevision",0);zero.addProperty("action","wait");
+        errorCode("INVALID_ARGUMENT",()->f.session.call("posture",zero));
+        f.session.call("stop",f.auth(claim));
+        check(f.game.posturing!=null&&f.game.postureClears==base,"an ordinary stop keeps the posture");
+        JsonObject clearing=f.auth(claim);clearing.addProperty("clearPosture",true);clearing.addProperty("postureRevision",2);
+        long before=f.session.generation();f.session.call("stop",clearing);
+        check(f.game.posturing==null&&f.game.postureClears==base+1&&f.session.generation()==before+1,"a stop with clearPosture stops and clears in one request");
+        JsonObject newer=f.auth(claim);newer.addProperty("postureRevision",4);newer.addProperty("action","wait");f.session.call("posture",newer);
+        JsonObject late=f.auth(claim);late.addProperty("clearPosture",true);late.addProperty("postureRevision",3);
+        before=f.session.generation();f.session.call("stop",late);
+        check(f.game.posturing!=null&&f.session.generation()==before+1,"a late clearing stop still stops but keeps the newer posture");
+        JsonObject both=f.auth(claim);both.addProperty("clearPosture",true);both.addProperty("postureRevision",5);both.addProperty("clearGuard",true);both.addProperty("guardRevision",1);
+        f.session.call("stop",both);
+        check(f.game.posturing==null&&f.game.dutyClears>=1,"stop-action clears guard and posture together");
+        // Nothing runs beside an operation any more: the follow is no operation, so select-slot is BUSY only behind a real one.
+        f.game.immediate=false;JsonObject now=f.claim("a");
+        JsonObject move=f.act(now,UUID.randomUUID().toString(),"move-to-position");move.add("controlGeneration",JSON.toJsonTree(f.session.generation()));
+        f.session.call("act",move);f.game.immediate=true;
+        JsonObject select=f.act(now,UUID.randomUUID().toString(),"select-slot");select.add("controlGeneration",JSON.toJsonTree(f.session.generation()));
+        errorCode("BUSY",()->f.session.call("act",select));
+        JsonObject held=f.auth(now);held.addProperty("postureRevision",6);held.addProperty("action","wait");f.session.call("posture",held);
+        int clears=f.game.postureClears;f.session.call("release",f.auth(now));
+        check(f.game.posturing==null&&f.game.postureClears>clears,"releasing the lease drops the posture");
+        JsonObject again=f.claim("b");
+        JsonObject fresh=f.auth(again);fresh.addProperty("postureRevision",1);fresh.addProperty("action","wait");
+        check(f.session.call("posture",fresh).get("postureRevision").getAsLong()==1,"a new lease counts posture revisions from zero again");
     }
     public static void main(String[] ignored) throws Exception {
         Fixture f=new Fixture();
@@ -281,39 +296,18 @@ public final class ControlSessionTest {
         errorCode("LEASE_LOST",()->duty.session.call("guard",noLease));
         duty.session.call("release",duty.auth(dutyLease));
         check(duty.game.guarding==null&&duty.game.dutyClears>=1,"releasing the lease drops the guard duty");
-        // A follow stepping aside for a tool (stepAside) keeps the targets found before it; any other stop does not.
-        Fixture carry=new Fixture();JsonObject carryLease=carry.claim("a");
-        long found=carry.session.generation();
-        JsonObject aside=carry.auth(carryLease);aside.addProperty("stepAside",true);
-        long afterAside=carry.session.call("stop",aside).get("controlGeneration").getAsLong();
-        check(afterAside==found+1&&carry.session.carries(found)&&carry.session.carries(afterAside),"a step-aside stop moves the generation on but still carries targets found before it");
-        carry.session.call("stop",aside);
-        check(carry.session.carries(found)&&carry.session.carries(found+1),"several step-asides in a row keep the chain");
-        check(!carry.session.carries(carry.session.generation()+1),"a generation that has not happened is never carried");
-        long beforeStop=carry.session.generation();
-        carry.session.call("stop",carry.auth(carryLease));
-        check(!carry.session.carries(found)&&!carry.session.carries(beforeStop)&&carry.session.carries(carry.session.generation()),"an ordinary stop (the player's stop-action) cuts the chain: older targets are stale");
-        carry.session.call("stop",aside);
-        check(!carry.session.carries(found)&&carry.session.carries(carry.session.generation()-1),"a step-aside after the stop does not bring the older targets back");
-        carry.game.guardDuty=true;
-        JsonObject clearing=carry.auth(carryLease);clearing.addProperty("stepAside",true);clearing.addProperty("clearGuard",true);clearing.addProperty("guardRevision",1);
-        long beforeClear=carry.session.generation();carry.session.call("stop",clearing);
-        check(!carry.session.carries(beforeClear),"a stop that clears protection is never a step-aside");
-        long beforeRelease=carry.session.generation();
-        carry.session.call("release",carry.auth(carryLease));JsonObject carryAgain=carry.claim("b");
-        check(!carry.session.carries(beforeRelease)&&carry.session.carries(carryAgain.get("controlGeneration").getAsLong()),"a new claim never carries the old lease's targets");
-        java.util.function.LongPredicate chain=g->g>=4&&g<=6;
+        // Any stop makes the targets found before it stale (no step-aside chain any more: following never stops the body).
         TargetTokens.Target container=new TargetTokens.Target("s",4,"minecraft:overworld",net.minecraft.core.BlockPos.ZERO,List.of(),100);
-        check(TargetTokens.validContext(container,"s",chain,"minecraft:overworld",1)&&!TargetTokens.validContext(container,"s",g->g==6,"minecraft:overworld",1),"container tokens follow the carried chain");
-        check(!TargetTokens.validContext(container,"other",chain,"minecraft:overworld",1)&&!TargetTokens.validContext(container,"s",chain,"minecraft:the_nether",1)&&!TargetTokens.validContext(container,"s",chain,"minecraft:overworld",100),"session, dimension and expiry still invalidate carried container tokens");
-        besideFollow();
+        check(TargetTokens.validContext(container,"s",4,"minecraft:overworld",1)&&!TargetTokens.validContext(container,"s",5,"minecraft:overworld",1),"container tokens hold for their own generation only");
+        check(!TargetTokens.validContext(container,"other",4,"minecraft:overworld",1)&&!TargetTokens.validContext(container,"s",4,"minecraft:the_nether",1)&&!TargetTokens.validContext(container,"s",4,"minecraft:overworld",100),"session, dimension and expiry invalidate container tokens");
+        posture();
         System.out.println("ControlSessionTest: "+checks+" checks passed");
         LocalHttpBridgeTest.run();
         ExactNbtTest.run();
         InteractionObservationTest.run();
         ApproachSafetyTest.run();
         SlotClickRulesTest.run();
-        FollowCompanionTest.run();
+        FollowCompanionTest.run();PostureTest.run();
         ResourcePickupTest.run();
         CompanionMiningTest.run();
         CompanionPickupTest.run();

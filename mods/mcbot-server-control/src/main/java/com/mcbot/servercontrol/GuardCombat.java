@@ -555,10 +555,7 @@ final class GuardCombat {
     }
     static boolean shield(ItemStack stack){return verified(stack,ShieldItem.class,Known.SHIELD);}
 
-    static GuardCombat create(BodyPlayer body,ControlSession session,ControlSession.Operation operation,MinecraftServer server,String companionName,Options options) {
-        return create(body,()->session.mayDrive(operation),server,companionName,options);
-    }
-    /** mayDrive: whether the guard may still move and swing (the follow operation is running, or the guard duty's lease is live). */
+    /** mayDrive: whether the guard may still move and swing (the guard duty's lease is live). */
     static GuardCombat create(BodyPlayer body,java.util.function.BooleanSupplier mayDrive,MinecraftServer server,String companionName,Options options) {
         GuardExecution execution=new GuardExecution(mayDrive);
         View view=new View() {

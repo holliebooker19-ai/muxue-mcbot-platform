@@ -26,8 +26,6 @@ final class ControlSession {
         default JsonObject assessArmour(JsonObject params) {throw error("UNSUPPORTED","Armour assessment is not available");}
         JsonObject watch();
         long chatCursor();
-        /** A momentary action may run beside a running follow-companion without stopping it (capability beside-follow). */
-        default boolean besideFollow(String name) {return false;}
         void begin(Operation operation);
         void abort(Operation operation);
         void stop();
@@ -36,6 +34,10 @@ final class ControlSession {
         default JsonObject guard(JsonObject params) {throw error("UNSUPPORTED","Guard duty is not available");}
         /** The lease ended: drop standing duties. A stop keeps them. */
         default void clearDuty() {}
+        /** Set the companion posture (follow, wait) or turn it off ({off:true}); not an operation (docs/server_body_protocol.md, 陪伴姿态). */
+        default JsonObject posture(JsonObject params) {throw error("UNSUPPORTED","Companion posture is not available");}
+        /** Drop the posture: a stop with clearPosture, or the lease ended. An ordinary stop keeps it. */
+        default void clearPosture() {}
         /** Short plain host message shown to players; rate limited by the session (docs/server_body_protocol.md). */
         default void notice(String text){throw error("UNSUPPORTED","Host notice is not available");}
     }
@@ -63,9 +65,7 @@ final class ControlSession {
     private final LongSupplier clock;
     final String instanceId=UUID.randomUUID().toString(), worldId, username;
     private String sessionId, leaseId, stopToken, controllerId;
-    private long expiresAt, generation, guardRevision;
-    /** Oldest generation whose targets still hold: only step-aside stops (stepAside:true) since then. */
-    private long carryFloor;
+    private long expiresAt, generation, guardRevision, postureRevision;
     private final LinkedHashMap<String,Operation> history=new LinkedHashMap<>();
     private final Set<String> seenIds=new HashSet<>();
     private final ArrayDeque<Retired> retired=new ArrayDeque<>();
@@ -76,11 +76,8 @@ final class ControlSession {
     }
     String sessionId() { return sessionId; }
     long generation() { return generation; }
-    /**
-     * Targets issued in `issued` still belong to this control: the same generation, or only step-aside stops since
-     * (a follow stepping aside for a tool the model asked for). Any other stop, a claim or a revoke cuts the chain.
-     */
-    boolean carries(long issued) { return issued>=carryFloor&&issued<=generation; }
+    /** Names of the operations running now (the posture yields to them). */
+    List<String> running() { return history.values().stream().filter(o->o.status.equals("running")).map(o->o.name).toList(); }
     void bodyChanged() {
         revokeCurrent("Body died, changed dimension, or was removed");
         sessionId=UUID.randomUUID().toString();
@@ -95,10 +92,20 @@ final class ControlSession {
     }
     /** Guard settings apply in the order the controller issued them: false when a later setting already arrived. */
     private boolean acceptGuardRevision(JsonObject params) {
-        double requested=number(params,"guardRevision");
-        if(requested<1||requested!=Math.rint(requested)||requested>9_007_199_254_740_991d)throw error("INVALID_ARGUMENT","Invalid guardRevision");
+        long requested=revision(params,"guardRevision");
         if(requested<=guardRevision)return false;
-        guardRevision=(long)requested;return true;
+        guardRevision=requested;return true;
+    }
+    /** Posture settings follow the same ordering as guard settings, with their own counter. */
+    private boolean acceptPostureRevision(JsonObject params) {
+        long requested=revision(params,"postureRevision");
+        if(requested<=postureRevision)return false;
+        postureRevision=requested;return true;
+    }
+    private static long revision(JsonObject params,String key) {
+        double requested=number(params,key);
+        if(requested<1||requested!=Math.rint(requested)||requested>9_007_199_254_740_991d)throw error("INVALID_ARGUMENT","Invalid "+key);
+        return (long)requested;
     }
     boolean mayDrive(Operation operation) {
         expire();
@@ -106,7 +113,7 @@ final class ControlSession {
     }
     private void cancel(String reason) {
         // Withdraw authority before cleanup can reenter a native hook.
-        generation++;carryFloor=generation;
+        generation++;
         for(Operation o:history.values()) o.finish("cancelled",reason,o.result);
         try { game.stop(); }
         catch(RuntimeException ignored) { /* Metadata and the next physical guard remain authoritative. */ }
@@ -120,7 +127,7 @@ final class ControlSession {
     }
     void revokeCurrent(String reason) {
         Retired previous=leaseId==null?null:new Retired(sessionId,leaseId,stopToken);
-        try { try { game.clearDuty(); } catch(RuntimeException ignored) { /* the next physical guard remains authoritative */ } cancel(reason); }
+        try { try { game.clearDuty(); game.clearPosture(); } catch(RuntimeException ignored) { /* the next physical guard remains authoritative */ } cancel(reason); }
         finally {
             if(previous!=null) {
                 retired.addLast(previous);
@@ -175,8 +182,8 @@ final class ControlSession {
             game.ensureBody();
             if(!game.connected()) throw error("WORLD_CHANGED","Cannot claim an unavailable body");
             if(sessionId==null) sessionId=UUID.randomUUID().toString();
-            try { game.clearDuty(); } catch(RuntimeException ignored) { }
-            cancel("New explicit claim"); history.clear(); seenIds.clear(); guardRevision=0;
+            try { game.clearDuty(); game.clearPosture(); } catch(RuntimeException ignored) { }
+            cancel("New explicit claim"); history.clear(); seenIds.clear(); guardRevision=0; postureRevision=0;
             leaseId=UUID.randomUUID().toString(); stopToken=UUID.randomUUID().toString(); controllerId=requestedController;
             expiresAt=clock.getAsLong()+TTL_MS;
             return claimResult();
@@ -214,12 +221,10 @@ final class ControlSession {
             case "heartbeat": expiresAt=clock.getAsLong()+TTL_MS; return withOperationBudget(obj("ttlMs",TTL_MS,"controlGeneration",generation));
             case "release": revokeCurrent("Controller released control");requireNativeStopped(); return obj("released",true);
             case "stop": {
-                // The stop itself always happens; protection is cleared unless a later guard setting already arrived.
+                // The stop itself always happens; protection and posture are cleared unless a later setting of each already arrived.
                 boolean clear=p.has("clearGuard")&&bool(p,"clearGuard")&&acceptGuardRevision(p);
-                // A follow stepping aside for a tool keeps the targets the model just found; a stop that also clears protection never does.
-                boolean stepAside=p.has("stepAside")&&bool(p,"stepAside")&&!clear;
-                long floor=carryFloor;
-                try { cancel("Stopped by controller"); } finally { if(clear)game.clearDuty(); if(stepAside)carryFloor=floor; }
+                boolean clearPosture=p.has("clearPosture")&&bool(p,"clearPosture")&&acceptPostureRevision(p);
+                try { cancel("Stopped by controller"); } finally { try { if(clear)game.clearDuty(); } finally { if(clearPosture)game.clearPosture(); } }
                 requireNativeStopped(); return withOperationBudget(obj("stopped",true,"controlGeneration",generation));
             }
             case "observe", "nearby-blocks", "nearby-resources", "look-around", "survival-state", "assess-tool", "machine-status", "assess-armour": {
@@ -253,6 +258,15 @@ final class ControlSession {
                 if(!off)requireNativeStopped();
                 JsonObject result=game.guard(p);
                 requireNativeStopped();result.addProperty("guardRevision",guardRevision);
+                return withOperationBudget(result);
+            }
+            case "posture": {
+                if(!game.hello().getAsJsonArray("capabilities").contains(JSON.toJsonTree("server-posture"))) throw error("UNSUPPORTED","Companion posture is not available");
+                boolean off=p.has("off")&&bool(p,"off");
+                if(!acceptPostureRevision(p))throw error("CANCELLED","Posture request was superseded by a newer setting or stop");
+                if(!off)requireNativeStopped();
+                JsonObject result=game.posture(p);
+                requireNativeStopped();result.addProperty("postureRevision",postureRevision);
                 return withOperationBudget(result);
             }
             case "operation", "act": return operation(method,p);
@@ -295,8 +309,7 @@ final class ControlSession {
         if(seenIds.contains(id)) throw error("UNKNOWN_OPERATION","Result evicted; never replay this ID");
         if(seenIds.size()>=ID_LIMIT) throw error("OPERATION_LIMIT","All "+ID_LIMIT+" lease operation IDs are used; stop and observation remain available; release and explicitly claim again for a new budget");
         if(!name.equals("send-chat")&&game.nativeWriteInProgress())throw error("BUSY","A synchronous native write must return before another action may start");
-        boolean beside=game.besideFollow(name);
-        if(!name.equals("send-chat")&&history.values().stream().anyMatch(o->o.status.equals("running")&&!o.name.equals("send-chat")&&!(beside&&o.name.equals("follow-companion")))) throw error("BUSY","Stop the current operation first");
+        if(!name.equals("send-chat")&&history.values().stream().anyMatch(o->o.status.equals("running")&&!o.name.equals("send-chat"))) throw error("BUSY","Stop the current operation first");
         Operation operation=new Operation(id,sessionId,generation,name,args);
         history.put(id,operation); seenIds.add(id);
         while(history.size()>HISTORY_LIMIT) {
@@ -304,7 +317,7 @@ final class ControlSession {
             if(removable==null) break;
             history.remove(removable);
         }
-        try { game.begin(operation); if(beside&&operation.status.equals("running")) operation.finish("failed","INTERNAL: beside-follow action did not finish at once",obj("code","INTERNAL")); }
+        try { game.begin(operation); }
         catch(Protocol.Error e) { operation.finish("failed",e.code+": "+e.getMessage(),obj("code",e.code)); }
         catch(RuntimeException e) {
             operation.finish("failed","Action failed: "+e.getClass().getSimpleName(),obj("code","INTERNAL"));

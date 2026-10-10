@@ -30,7 +30,7 @@ import java.util.function.Consumer;
 import static com.mcbot.servercontrol.Protocol.*;
 
 final class ServerController implements ControlSession.Game {
-    static final List<String> CAPABILITIES=List.of("send-chat","look-at","move-to-position","follow-player","follow-companion","dig-block","place-block","open-container","click-slot","close-container","select-slot","drop-item","nearby-blocks","nearby-resources","approach-container","approach-player","approach-resource","pickup-item","companion-pickup","companion-mining","companion-guard","swap-inventory","eat-item","equip-item","survival-state","assess-tool","defend-entity","retreat-from-entity","navigation-3d","look-around","pillar-up","sleep-in-bed","wake-up","craft-item","smelt-item","travel-to","workstation-options","produce-item","modify-item","tend-crops","breed-animals","hunt","use-bucket","emote","set-appearance","build","machine-items","machine-status","guard-duty-fenced","guard-duty-tasks","step-aside-stop","gift-receipts","entity-equipment","host-notice","beside-follow","last-death","assess-armour","sit","stand-up");
+    static final List<String> CAPABILITIES=List.of("send-chat","look-at","move-to-position","follow-player","dig-block","place-block","open-container","click-slot","close-container","select-slot","drop-item","nearby-blocks","nearby-resources","approach-container","approach-player","approach-resource","pickup-item","companion-pickup","companion-mining","swap-inventory","eat-item","equip-item","survival-state","assess-tool","defend-entity","retreat-from-entity","navigation-3d","look-around","pillar-up","sleep-in-bed","wake-up","craft-item","smelt-item","travel-to","workstation-options","produce-item","modify-item","tend-crops","breed-animals","hunt","use-bucket","emote","set-appearance","build","machine-items","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","sit","stand-up","server-posture");
     private final MinecraftServer server;
     private final ServerConfig config;
     final ControlSession session;
@@ -47,7 +47,9 @@ final class ServerController implements ControlSession.Game {
     private long actionDeadline;
     private ServerPlayer approachPlayer;
     private Vec3 approachPlayerStart;
-    private FollowCompanion companion;
+    /** Companion posture (follow, wait, seated): kept across operations and ordinary stops, cleared with the lease (docs/companion_state_design.md, section 7). */
+    private Posture posture;
+    private boolean postureDrove;
     /** Standing guard: kept across operations and stops, cleared when the lease ends (docs/companion_state_design.md, section 5). */
     private GuardDuty duty;
     private boolean dutyDrove;
@@ -92,6 +94,15 @@ final class ServerController implements ControlSession.Game {
     private final Consumer<net.neoforged.neoforge.event.entity.living.LivingDeathEvent> deathListener=this::recordDeath;
     /** How and where the body last died (vanilla's death message), shown in hello until the next death; null before any. */
     private JsonObject lastDeath;
+    /** Marks the items the body dropped when it died, so a recovery after respawn picks up only those (protocol 陪伴姿态, 死亡掉落). */
+    static final String DEATH_DROP_TAG="mcbot_body_death_drop";
+    /** Vanilla ItemEntity.LIFETIME (private in 1.21.1): an item on the ground despawns after this many ticks. */
+    static final int DROP_LIFETIME_TICKS=6000;
+    /** At most this many kinds of item listed in lastDeath.drops: an inventory holds 41 stacks, and hello stays short. */
+    static final int DEATH_DROP_KINDS=16;
+    /** The item entities of the last death's drops; how many are still there is read when hello is asked. */
+    private final List<UUID> deathDrops=new ArrayList<>();
+    private final Consumer<net.neoforged.neoforge.event.entity.living.LivingDropsEvent> dropsListener=this::recordDrops;
     ServerController(MinecraftServer server,ServerConfig config) {
         this.server=server; this.config=config;
         session=new ControlSession(this,()->System.nanoTime()/1_000_000,config.worldId(),config.username());
@@ -107,12 +118,41 @@ final class ServerController implements ControlSession.Game {
         NeoForge.EVENT_BUS.addListener(EventPriority.HIGHEST,friendlyFireGuard);
         NeoForge.EVENT_BUS.addListener(EventPriority.HIGHEST,projectileMark);
         NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST,deathListener);
+        NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST,dropsListener);
     }
     /** A death that went through (not cancelled): the message vanilla is about to print, the place the drops fall, the time. */
     private void recordDeath(net.neoforged.neoforge.event.entity.living.LivingDeathEvent event) {
         if(player==null||event.getEntity()!=player)return;
         String message;try{message=player.getCombatTracker().getDeathMessage().getString();}catch(RuntimeException ignored){message=event.getSource().getMsgId();}
         lastDeath=obj("message",message,"dimension",player.serverLevel().dimension().location().toString(),"position",position(player.position()),"at",System.currentTimeMillis());
+        // Nothing dropped until the drops event says so: keepInventory, an empty inventory, or a mod that took the drops (a grave) leave it at 0.
+        deathDrops.clear();lastDeath.add("drops",obj("count",0));
+    }
+    /** The drops of that death (vanilla fires this after the death event, before the items enter the world): tag and count them. */
+    private void recordDrops(net.neoforged.neoforge.event.entity.living.LivingDropsEvent event) {
+        if(player==null||event.getEntity()!=player||lastDeath==null)return;
+        deathDrops.clear();
+        Map<String,Integer> kinds=new LinkedHashMap<>();
+        for(ItemEntity item:event.getDrops()) {
+            item.addTag(DEATH_DROP_TAG);deathDrops.add(item.getUUID());
+            kinds.merge(BuiltInRegistries.ITEM.getKey(item.getItem().getItem()).toString(),item.getItem().getCount(),Integer::sum);
+        }
+        JsonArray items=new JsonArray();
+        kinds.entrySet().stream().limit(DEATH_DROP_KINDS).forEach(kind->items.add(obj("id",kind.getKey(),"count",kind.getValue())));
+        lastDeath.add("drops",obj("count",deathDrops.size(),"items",items,"despawnAt",lastDeath.get("at").getAsLong()+DROP_LIFETIME_TICKS*GuardCombat.TICK_MS));
+    }
+    /** lastDeath for hello, with how many of the drops are still on the ground: null when that place is not loaded (unknown). */
+    private JsonObject deathReport() {
+        JsonObject death=lastDeath.deepCopy();
+        JsonObject drops=death.getAsJsonObject("drops");
+        if(drops==null||drops.get("count").getAsInt()==0)return death;
+        var level=server.getLevel(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION,net.minecraft.resources.ResourceLocation.parse(death.get("dimension").getAsString())));
+        BlockPos at=BlockPos.containing(point(death.getAsJsonObject("position")));
+        if(level==null||!level.hasChunkAt(at)){drops.add("remaining",JsonNull.INSTANCE);return death;}
+        int remaining=0;
+        for(UUID id:deathDrops){Entity item=level.getEntity(id);if(item!=null&&item.isAlive()&&!item.isRemoved())remaining++;}
+        drops.addProperty("remaining",remaining);
+        return death;
     }
     /** The body never tramples farmland: a companion walking the player's field must not turn it back to dirt. */
     /** Whatever the body does (a swing, an arrow, a guard fight), it never hurts a player, a pet, a villager or anything named. */
@@ -205,7 +245,7 @@ final class ServerController implements ControlSession.Game {
         List<String> capabilities=new ArrayList<>(CAPABILITIES);capabilities.addAll(ItemInteractions.capabilities(interactions));
         JsonObject hello=obj("platform",obj("minecraft","1.21.1","loader","neoforge","loaderVersion",loaderVersion()),"capabilities",capabilities);
         hello.add("interactions",ItemInteractions.ids(interactions));
-        if(lastDeath!=null)hello.add("lastDeath",lastDeath.deepCopy());
+        if(lastDeath!=null)hello.add("lastDeath",deathReport());
         hello.add("itemInteractions",ItemInteractions.itemIds(interactions));
         hello.add("adapters",ModAdapters.containerIds());
         hello.add("seatAdapters",ModAdapters.seatIds());
@@ -238,6 +278,7 @@ final class ServerController implements ControlSession.Game {
         JsonObject drops=groundItems();drops.entrySet().forEach(entry->result.add(entry.getKey(),entry.getValue()));
         pickups.observation().entrySet().forEach(entry->result.add(entry.getKey(),entry.getValue()));
         if(duty!=null) result.add("guard",duty.json());
+        if(posture!=null) result.add("posture",posture.json());
         if(params.has("block")) {
             Vec3 requested=point(object(params,"block")); BlockPos block=BlockPos.containing(requested);
             JsonObject state=obj("position",position(Vec3.atLowerCornerOf(block)),"state","unloaded");
@@ -281,7 +322,60 @@ final class ServerController implements ControlSession.Game {
     }
     @Override public void clearDuty() {
         GuardDuty old=duty; duty=null;
-        if(old!=null) { try { old.stop(); } finally { if(dutyDrove) { dutyDrove=false; if(companion!=null) companion.resumeAfterGuard(); } } }
+        if(old!=null) { try { old.stop(); } finally { if(dutyDrove) { dutyDrove=false; if(posture!=null) posture.resumeAfterGuard(); } } }
+    }
+    @Override public JsonObject posture(JsonObject params) {
+        if(params.has("off")&&bool(params,"off")) { clearPosture(); JsonObject off=new JsonObject(); off.add("posture",JsonNull.INSTANCE); return off; }
+        long revision=(long)number(params,"postureRevision"); // ordered and validated by the session
+        String action=string(params,"action");
+        Posture next;
+        if(action.equals("wait")) {
+            // Sitting is already staying put: a wait keeps the seat (with the new revision).
+            next=posture!=null&&posture.kind()==Posture.Kind.SEATED?Posture.seated(posture.seat,revision,postureView()):Posture.waiting(revision,postureView());
+        } else if(action.equals("follow")) {
+            String name=string(params,"player"),expected=string(params,"expectedEntityId");
+            UUID uuid;
+            try { uuid=UUID.fromString(expected); } catch(IllegalArgumentException invalid) { throw error("INVALID_ARGUMENT","expectedEntityId must be a UUID"); }
+            if(!uuid.toString().equalsIgnoreCase(expected)) throw error("INVALID_ARGUMENT","expectedEntityId must be a complete UUID");
+            double distance=bounded(params,"distance",2.5,1.5,6);
+            if(params.has("wander")&&!(params.get("wander").isJsonPrimitive()&&params.getAsJsonPrimitive("wander").isBoolean())) throw error("INVALID_ARGUMENT","wander must be a boolean");
+            boolean wander=!params.has("wander")||bool(params,"wander");
+            ServerPlayer target=findPlayer(name);
+            if(target==null) throw error("PLAYER_NOT_VISIBLE","Player to follow is not within 32 blocks in this dimension");
+            if(!target.getUUID().equals(uuid)) throw error("STALE_TARGET","Player to follow changed identity");
+            java.util.function.BooleanSupplier permission=session.dutyPermission();
+            next=Posture.follow(FollowCompanion.create(name,uuid,distance,wander,player,permission,server),revision,postureView(permission));
+        } else throw error("INVALID_ARGUMENT","action must be follow or wait, or use off:true");
+        clearPosture();
+        posture=next;
+        return posture.json();
+    }
+    @Override public void clearPosture() {
+        Posture old=posture; posture=null; postureDrove=false;
+        if(old!=null) old.halt();
+    }
+    private Posture.View postureView(){return postureView(session.dutyPermission());}
+    /** What the posture may do with the body: bound to this lease and body session, like the guard duty. */
+    private Posture.View postureView(java.util.function.BooleanSupplier mayDrive) {
+        return new Posture.View() {
+            NativeNavigation walk;
+            public long now(){return ServerController.now();}
+            public boolean mayDrive(){return mayDrive.getAsBoolean();}
+            public boolean seated(){return NativeSeat.seated(player);}
+            public void standUp(){player.stopRiding();}
+            public boolean returnToSeat(BlockPos seat) {
+                // The same checks and right-click as the sit operation (beginSit, tickSit).
+                NativeSeat.requireCanSit(player);NativeSeat.requireFreeSeat(player,seat);
+                if(!NativeSeat.inReach(player.position(),seat)) {
+                    if(walk==null)walk=new NativeNavigation(player,mayDrive).tolerateDamage();
+                    if(!walk.tick(Vec3.atCenterOf(seat),feet->NativeSeat.inReach(feet,seat)))return false;
+                }
+                player.stopInput();
+                NativeSeat.sitDown(player,seat,ServerController.this::look,()->{});
+                return NativeSeat.seated(player);
+            }
+            public void stopSeatWalk(){if(walk!=null)walk.stop();walk=null;player.stopInput();}
+        };
     }
     /**
      * What runs now can stand aside for a fight (docs/companion_state_design.md 5.2): idle, a follow without its own
@@ -291,7 +385,6 @@ final class ServerController implements ControlSession.Game {
     private boolean dutyMayInterrupt() {
         if(!GuardDuty.bodyFree(survival!=null&&survival.busy(),nativeWriteInProgress(),player.isSleeping(),player.isUsingItem(),dutyDrove,player.containerMenu!=player.inventoryMenu)) return false;
         if(active==null) return true;
-        if(companion!=null) return !companion.ownGuard();
         GuardDuty.Pausable task=pausable();
         if(task!=null) return task.interruptible();
         // approach-player is not here: it fails once the player moves, and a fight moves everyone.
@@ -309,22 +402,34 @@ final class ServerController implements ControlSession.Game {
     }
     /** True when the duty drove the body this tick. */
     private boolean tickDuty(BodyPlayer body) {
-        // Sitting keeps the protection: when the guard would fight, the body gets up first (nothing sits it back down afterwards).
+        // Sitting keeps the protection: when the guard would fight, the body gets up first; a seated posture walks back to the seat afterwards.
         if(player.isPassenger()&&NativeSeat.standForFight(NativeSeat.seated(player),true,duty.wouldFight())) player.stopRiding();
         GuardDuty current=duty;
         boolean drove;
-        try { drove=current.tick(dutyMayInterrupt(),active==null); }
+        // Idle: nothing runs, and no follow or seat takes the body back after the fight, so the guard walks back to where it stood.
+        try { drove=current.tick(dutyMayInterrupt(),active==null&&(posture==null||posture.guardWalksBack())); }
         catch(RuntimeException fault) { drove=false; current.interrupt(); }
         if(current!=duty)return false; // A native callback may have cleared or replaced the duty.
-        if(drove) { if(!dutyDrove){dutyFrom=now();dutyPaused=active;} dutyDrove=true; if(companion!=null) companion.guardedElsewhere(); return true; }
+        if(drove) { if(!dutyDrove){dutyFrom=now();dutyPaused=active;} dutyDrove=true; if(posture!=null) posture.guarding(); return true; }
         if(dutyDrove) {
             dutyDrove=false;
-            if(companion!=null) companion.resumeAfterGuard();
-            else if(active==null) body.stopInput();
-            else resumeAfterFight(now()-dutyFrom);
+            if(active!=null) resumeAfterFight(now()-dutyFrom);
+            else { body.stopInput(); if(posture!=null) posture.resumeAfterGuard(); }
             dutyPaused=null;
         }
         return false;
+    }
+    /** True when the posture drove the body this tick; it yields to a running action unless that action keeps it. */
+    private boolean tickPosture() {
+        Posture current=posture;
+        String running=session.running().stream().filter(current::suspendedBy).findFirst().orElse(null);
+        boolean drove;
+        try { drove=current.tick(running); }
+        catch(RuntimeException fault) { drove=false; current.halt(); }
+        if(current!=posture) return false;
+        if(current.ended()) { posture=null; return false; } // the followed name belongs to someone else now
+        postureDrove=drove;
+        return drove;
     }
     private void receiveFoodFinish(LivingEntityUseItemEvent.Finish event) {
         if(player==event.getEntity()&&survival!=null)survival.receiveFoodFinish(event.getHand()==InteractionHand.MAIN_HAND,event.getItem(),event.getResultStack());
@@ -336,7 +441,9 @@ final class ServerController implements ControlSession.Game {
         for(ItemEntity item:items.subList(0,Math.min(32,items.size()))) {
             try {
                 String visibility=new FlatApproach(player).itemVisibility(item.position());
-                result.add(groundObservation(item.getUUID().toString(),position(item.position()),survival.stackValue(item.getItem()),visibility,item.onGround()));
+                JsonObject seen=groundObservation(item.getUUID().toString(),position(item.position()),survival.stackValue(item.getItem()),visibility,item.onGround());
+                if(item.getTags().contains(DEATH_DROP_TAG))seen.addProperty("deathDrop",true);
+                result.add(seen);
             }catch(Protocol.Error unsupported){truncated=true;}
         }
         return obj("groundItems",result,"groundItemsTruncated",truncated);
@@ -408,7 +515,7 @@ final class ServerController implements ControlSession.Game {
     private void recordChat(String username,String message) {
         chat.addLast(obj("seq",++chatSequence,"time",System.currentTimeMillis(),"username",username,"message",message));
         while(chat.size()>100) chat.removeFirst();
-        if(!username.equals(config.username())){speaker=server.getPlayerList().getPlayerByName(username);spokeAt=now();if(companion!=null)companion.holdStroll();}
+        if(!username.equals(config.username())){speaker=server.getPlayerList().getPlayerByName(username);spokeAt=now();if(posture!=null)posture.holdStroll();}
     }
     private void receiveDamage(net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post event){
         if(survival!=null)survival.receiveDamage(event);
@@ -418,7 +525,7 @@ final class ServerController implements ControlSession.Game {
         if(!session.mayDrive(operation)) throw error("LEASE_LOST","Body lease expired before action");
         gazeHold=now()+IdleGaze.HOLD_AFTER_ACTION_MS;
         // Started while the duty fights (between two steps of a gathering, say): it waits for the fight like a paused one and gets that time back.
-        if(dutyDrove&&!besideFollow(operation.name)){dutyPaused=operation;dutyFrom=now();}
+        if(dutyDrove&&!Posture.keeps(operation.name)){dutyPaused=operation;dutyFrom=now();}
         JsonObject args=operation.args;
         if(player.isSleeping()&&!Set.of("send-chat","wake-up").contains(operation.name)) throw error("SLEEPING","Body is asleep in a bed; call wake-up first");
         if(NativeSeat.seated(player)&&!NativeSeat.allowedWhileSeated(operation.name)) throw error("SEATED","Body is sitting; call stand-up first");
@@ -436,7 +543,12 @@ final class ServerController implements ControlSession.Game {
         if(operation.name.equals("set-appearance")) { operation.finish("succeeded","Appearance applied",BodyEmotes.setAppearance(operation.args,player,server)); return; }
         if(operation.name.equals("wake-up")) { operation.finish("succeeded","Body is awake",NativeSleep.wake(player)); return; }
         if(operation.name.equals("sleep-in-bed")) { beginSleep(operation); return; }
-        if(operation.name.equals("stand-up")) { operation.finish("succeeded","Body is standing",NativeSeat.standUp(player)); return; }
+        if(operation.name.equals("stand-up")) {
+            JsonObject result=NativeSeat.standUp(player);
+            // Getting up on purpose ends the seated posture; a guard standing the body up for a fight does not.
+            if(posture!=null&&posture.kind()==Posture.Kind.SEATED) clearPosture();
+            operation.finish("succeeded","Body is standing",result); return;
+        }
         if(operation.name.equals("sit")) { beginSit(operation); return; }
         if(survival.handles(operation.name)) { survival.begin(operation);return; }
         if(operation.name.equals("send-chat")) {
@@ -455,11 +567,6 @@ final class ServerController implements ControlSession.Game {
         if(operation.name.equals("look-at")) { look(point(args)); operation.finish("succeeded","Server view rotated",null); return; }
         if(operation.name.equals("approach-container")||operation.name.equals("approach-player")||operation.name.equals("approach-resource")) { beginApproach(operation);return; }
         if(operation.name.equals("pickup-item")) {pickup=PickupItem.create(operation,player,session,survival,resources);active=operation;pickup.tick();if(!operation.status.equals("running"))stop();return;}
-        if(operation.name.equals("follow-companion")) {
-            String followed=string(args,"player");
-            companion=FollowCompanion.create(operation,player,session,server,()->duty!=null&&duty.protects(followed));active=operation;
-            companion.tick();if(!operation.status.equals("running")) stop();return;
-        }
         if(operation.name.equals("retreat-from-entity")){beginRetreat(operation);return;}
         if(operation.name.equals("pillar-up")){requireWalkable();pillar=NativePillar.begin(operation,player,session,survival);active=operation;return;}
         if(operation.name.equals("craft-item")||operation.name.equals("smelt-item")) {
@@ -524,27 +631,22 @@ final class ServerController implements ControlSession.Game {
         }
         requireWalkable(); active=operation;navigation=new NativeNavigation(player,session,operation);actionDeadline=now()+timeout;actionGrace=new GuardDuty.Grace(timeout);
     }
-    static boolean atomicAction(String name){return (CAPABILITIES.contains(name)||ItemInteractions.capabilities().contains(name))&&!Set.of("nearby-blocks","nearby-resources","companion-pickup","companion-mining","companion-guard","survival-state","assess-tool","navigation-3d","look-around","machine-status","guard-duty-fenced","guard-duty-tasks","step-aside-stop","gift-receipts","entity-equipment","host-notice","beside-follow","last-death","assess-armour").contains(name);}
+    static boolean atomicAction(String name){return (CAPABILITIES.contains(name)||ItemInteractions.capabilities().contains(name))&&!Set.of("nearby-blocks","nearby-resources","companion-pickup","companion-mining","survival-state","assess-tool","navigation-3d","look-around","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","server-posture").contains(name);}
     @Override public boolean nativeWriteInProgress(){return SurvivalActions.nativeWriteInProgress(player);}
-    /** A momentary survival action may run beside a running follow-companion without stopping it (capability beside-follow). */
-    @Override public boolean besideFollow(String name){return companion!=null&&Set.of("select-slot","equip-item").contains(name);}
     void beforePhysics(BodyPlayer body) {
         if(body!=player) { body.stopInput(); return; }
         reconcile();
         if(lastDriveTick==server.getTickCount()){
-            if(!dutyDrove&&(active==null||!session.mayDrive(active)))body.stopInput();return;
+            if(!dutyDrove&&!postureDrove&&(active==null||!session.mayDrive(active)))body.stopInput();return;
         }
-        lastDriveTick=server.getTickCount();
+        lastDriveTick=server.getTickCount();postureDrove=false;
         if(survival!=null) survival.tick();
         emotes.tick(now());
+        // The guard first, then a running operation, then the posture (docs/server_body_protocol.md, 陪伴姿态).
         if(duty!=null&&tickDuty(body)) return;
+        if(posture!=null&&tickPosture()) return;
         if(active==null) { body.stopInput(); idleGaze(body); return; }
         if(!session.mayDrive(active)) { stop(); return; }
-        if(companion!=null) {
-            companion.tick();if(active!=null&&!active.status.equals("running")) stop();
-            else if(companion!=null&&companion.waiting())idleGaze(body);
-            return;
-        }
         if(pickup!=null){pickup.tick();if(active!=null&&!active.status.equals("running"))stop();return;}
         if(pillar!=null){
             try{pillar.tick();}
@@ -616,7 +718,7 @@ final class ServerController implements ControlSession.Game {
         } catch(Protocol.Error e) { finish("failed",e.code+": "+e.getMessage(),obj("code",e.code,"position",position(player.position()))); }
         catch(RuntimeException e) { finish("failed","Movement failed: "+e.getClass().getSimpleName()); }
     }
-    /** Head movement only while nothing aims the body: no action, or a follow standing and waiting. */
+    /** Head movement only while nothing aims the body: no action and the posture standing still. */
     private void idleGaze(BodyPlayer body){
         if(now()<gazeHold||body.isSleeping()||survival!=null&&survival.busy()||nativeWriteInProgress())return;
         gaze.tick(body,speaker,spokeAt,now());
@@ -735,6 +837,8 @@ final class ServerController implements ControlSession.Game {
         if(!NativeSeat.inReach(player.position(),seat)&&!navigation.tick(Vec3.atCenterOf(seat),feet->NativeSeat.inReach(feet,seat)))return;
         player.stopInput();
         JsonObject result=NativeSeat.sitDown(player,seat,this::look,()->{});
+        // Sitting becomes the posture: a follow or wait ends here, the guard stays (it keeps the revision of what it replaced).
+        long revision=posture==null?0:posture.revision; clearPosture(); posture=Posture.seated(seat,revision,postureView());
         finish("succeeded","Sitting on the seat",result);
     }
     private void beginRetreat(ControlSession.Operation operation) {
@@ -771,7 +875,7 @@ final class ServerController implements ControlSession.Game {
         if(active!=null) active.finish(status,summary,result);
         stop();
     }
-    @Override public void stop() { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;actionGrace=null;active=null;pillar=null;emotes.cancelGesture(player);if(station!=null)station.stop();station=null;if(job!=null)job.stop();job=null;if(travel!=null)travel.stop();travel=null;if(farm!=null)farm.stop();farm=null;if(build!=null)build.stop();build=null;if(breed!=null)breed.stop();breed=null;if(hunt!=null)hunt.stop();hunt=null;sleepBed=null;sitSeat=null;if(navigation!=null)navigation.stop();navigation=null;followedPlayer=null;retreatTarget=null;retreatOrigin=null;approachPlayer=null;approachPlayerStart=null; if(companion!=null) companion.stop();companion=null;if(pickup!=null)pickup.stop();pickup=null; if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
+    @Override public void stop() { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;actionGrace=null;active=null;pillar=null;emotes.cancelGesture(player);if(station!=null)station.stop();station=null;if(job!=null)job.stop();job=null;if(travel!=null)travel.stop();travel=null;if(farm!=null)farm.stop();farm=null;if(build!=null)build.stop();build=null;if(breed!=null)breed.stop();breed=null;if(hunt!=null)hunt.stop();hunt=null;sleepBed=null;sitSeat=null;if(navigation!=null)navigation.stop();navigation=null;followedPlayer=null;retreatTarget=null;retreatOrigin=null;approachPlayer=null;approachPlayerStart=null; if(posture!=null) posture.interrupt();if(pickup!=null)pickup.stop();pickup=null; if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
     @Override public void abort(ControlSession.Operation operation) { if(active==operation) stop();else if(survival!=null) survival.abort(operation); }
     @Override public boolean leave() {
         if(player==null)return false;
@@ -790,7 +894,7 @@ final class ServerController implements ControlSession.Game {
         if(oldSink!=null) oldSink.closeSink();
         wasConnected=false; lastDimension=null;
     }
-    void close() {try{remove();}finally{validationProtection.close();NeoForge.EVENT_BUS.unregister(foodFinishListener);NeoForge.EVENT_BUS.unregister(damageListener);NeoForge.EVENT_BUS.unregister(attackGuard);NeoForge.EVENT_BUS.unregister(incomingDamageGuard);NeoForge.EVENT_BUS.unregister(sweepGuard);NeoForge.EVENT_BUS.unregister(trampleGuard);NeoForge.EVENT_BUS.unregister(friendlyFireGuard);NeoForge.EVENT_BUS.unregister(projectileMark);NeoForge.EVENT_BUS.unregister(deathListener);}}
+    void close() {try{remove();}finally{validationProtection.close();NeoForge.EVENT_BUS.unregister(foodFinishListener);NeoForge.EVENT_BUS.unregister(damageListener);NeoForge.EVENT_BUS.unregister(attackGuard);NeoForge.EVENT_BUS.unregister(incomingDamageGuard);NeoForge.EVENT_BUS.unregister(sweepGuard);NeoForge.EVENT_BUS.unregister(trampleGuard);NeoForge.EVENT_BUS.unregister(friendlyFireGuard);NeoForge.EVENT_BUS.unregister(projectileMark);NeoForge.EVENT_BUS.unregister(deathListener);NeoForge.EVENT_BUS.unregister(dropsListener);}}
     private void look(Vec3 target) {
         Vec3 delta=target.subtract(player.getEyePosition());
         float yaw=(float)Math.toDegrees(Math.atan2(-delta.x,delta.z));

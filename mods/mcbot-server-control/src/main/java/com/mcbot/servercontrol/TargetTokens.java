@@ -35,7 +35,7 @@ final class TargetTokens {
     }
     Target require(ServerPlayer player,String token) {
         Target target=targets.get(token);
-        if(!validContext(target,session.sessionId(),session::carries,dimension(player),clock.getAsLong()))
+        if(!validContext(target,session.sessionId(),session.generation(),dimension(player),clock.getAsLong()))
             throw error("STALE_TARGET","Container target expired or control/world changed; discover again");
         requireBound(player,target);
         return target;
@@ -43,7 +43,7 @@ final class TargetTokens {
     void requireBound(ServerPlayer player,Target target) {
         // After a guarded native menu is opened, its own lifecycle retains the identity guard.
         // Discovery TTL/registry eviction cannot strand a carried stack in a valid open menu.
-        if(!Objects.equals(target.session(),session.sessionId())||!session.carries(target.generation())||!target.dimension().equals(dimension(player)))
+        if(!Objects.equals(target.session(),session.sessionId())||target.generation()!=session.generation()||!target.dimension().equals(dimension(player)))
             throw error("STALE_TARGET","Guarded menu control or dimension changed");
         List<Part> actual=parts(player,target.position());
         if(!sameParts(target.parts(),actual)) throw error("STALE_TARGET","Container block entity was replaced, reloaded or changed");
@@ -61,10 +61,8 @@ final class TargetTokens {
     static BlockState viewerless(BlockState state) {
         return state!=null&&state.hasProperty(BlockStateProperties.OPEN)?state.setValue(BlockStateProperties.OPEN,false):state;
     }
-    static boolean validContext(Target target,String session,long generation,String dimension,long now) {return validContext(target,session,issued->issued==generation,dimension,now);}
-    /** carried: whether a target issued in that generation still belongs to the current control (ControlSession.carries). */
-    static boolean validContext(Target target,String session,java.util.function.LongPredicate carried,String dimension,long now) {
-        return target!=null&&target.expiresAt()>now&&Objects.equals(target.session(),session)&&carried.test(target.generation())&&target.dimension().equals(dimension);
+    static boolean validContext(Target target,String session,long generation,String dimension,long now) {
+        return target!=null&&target.expiresAt()>now&&Objects.equals(target.session(),session)&&target.generation()==generation&&target.dimension().equals(dimension);
     }
     static boolean sameIdentities(List<?> expected,List<?> actual) {
         if(expected.size()!=actual.size()) return false;

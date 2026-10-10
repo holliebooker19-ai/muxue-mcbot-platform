@@ -50,7 +50,7 @@ final class NativeSeat {
     static boolean allowedWhileSeated(String action) {return WHILE_SEATED.contains(action);}
     /**
      * Protection keeps its duty while seated; a hostile creature close by is the only thing that makes the body get up.
-     * Nothing sits it back down afterwards.
+     * The seated posture walks it back and sits it down afterwards ({@link Posture}).
      */
     static boolean standForFight(boolean seated,boolean dutyHeld,boolean guardWouldFight) {return seated&&dutyHeld&&guardWouldFight;}
 

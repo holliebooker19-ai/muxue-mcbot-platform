@@ -9,14 +9,16 @@ import net.minecraft.world.phys.Vec3;
 import static com.mcbot.servercontrol.Protocol.*;
 
 /**
- * A standing order to protect one player, not tied to any operation: it outlives stops (a tool the follow steps aside
- * for, a reflex) and ends only when turned off, when control is revoked or released, or when the body changes. Each
- * tick it may take the body for a fight (the same {@link GuardCombat} a guarding follow uses) while what runs can be
- * interrupted and the body is within {@link #ENGAGE_RANGE} of the player; afterwards it hands the body back, and when
- * nothing else runs it walks back to the spot it left (docs/companion_state_design.md, section 5).
+ * A standing order to protect one player, not tied to any operation: it outlives ordinary stops (a reflex, a task
+ * cancelled) and ends only when turned off, when control is revoked or released, or when the body changes. Each tick it
+ * may take the body for a fight ({@link GuardCombat}) while what runs can be interrupted and the body is within
+ * {@link #ENGAGE_RANGE} of the player; afterwards it hands the body back (to the task, or to the follow or seated
+ * posture), and when nothing else takes it, it walks back to the spot it left (docs/companion_state_design.md, sections 5 and 7).
  */
 final class GuardDuty {
     static final double ENGAGE_RANGE=16,BACK_REACH=1.2;
+    /** A protected or followed player farther than this (the protocol's "visible player" range, as in findPlayer) is away. */
+    static final double PLAYER_RANGE=32;
     static final long BACK_LIMIT_MS=15_000;
     interface View {
         long now();
@@ -141,7 +143,6 @@ final class GuardDuty {
     /** True while the duty is moving the body (fighting or walking back). */
     boolean driving(){return driving;}
     boolean fighting(){return fighting;}
-    boolean protects(String name){return player.equals(name);}
     long busyMs(){return busyMs+(fighting?view.now()-fightStart:0);}
     JsonObject json() {
         JsonObject result=combat.json();
@@ -165,7 +166,7 @@ final class GuardDuty {
             public Vec3 position(){return body.position();}
             public Vec3 companion() {
                 ServerPlayer target=server.getPlayerList().getPlayer(uuid);
-                if(target==null||target==body||!target.isAlive()||target.isRemoved()||!target.getGameProfile().getName().equals(player)||target.serverLevel()!=body.serverLevel()||target.distanceToSqr(body)>32*32)return null;
+                if(target==null||target==body||!target.isAlive()||target.isRemoved()||!target.getGameProfile().getName().equals(player)||target.serverLevel()!=body.serverLevel()||target.distanceToSqr(body)>PLAYER_RANGE*PLAYER_RANGE)return null;
                 return target.position();
             }
             public boolean mayDrive(){return mayDrive.getAsBoolean();}

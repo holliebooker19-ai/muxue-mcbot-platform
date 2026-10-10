@@ -447,20 +447,20 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 ### 陪伴姿态（8m 第二步，约定，2026-10-11）
 
-**状态：这是第二步的接口约定，还没实现。** 服务端和运行端照这一节同时开工，实现完再把本节改成实际行为，并删掉被取代的旧小节（`follow-companion`、`step-aside-stop`、`beside-follow`）。设计见[陪伴状态设计](companion_state_design.md)第 7 节；只针对单人陪伴（一个真人、一个 Bot），多人问题见该文 7.9。
+**状态（2026-10-11）：服务端已按本节实现，只有离线测试（`PostureTest`、`FollowCompanionTest`、`ControlSessionTest`），没进过游戏；运行端在做。** 合并后删掉被取代的旧小节（`follow-companion`、`step-aside-stop`、`beside-follow`）。实现时补定的细节已写进下文，标“实现补定”。设计见[陪伴状态设计](companion_state_design.md)第 7 节；只针对单人陪伴（一个真人、一个 Bot），多人问题见该文 7.9。
 
 能力标记`server-posture`。跟随、等待、坐着不再是操作，而是租约上的一项常驻“姿态”，写法照常驻保护（`guard`）。同时删掉：`follow-companion`操作及其能力名，`companion-guard`的`follow-companion.guard`旧路径，`stop`的`stepAside`和能力`step-aside-stop`（`ControlSession.carries`），`beside-follow`。
 
 **方法`posture`**（要租约，校验 instance／session／lease，不看`controlGeneration`；不是操作，不占操作 ID 预算）。三选一：
 - `{action:"follow", player, expectedEntityId, distance?, wander?}`：跟随。`distance`为 1.5～6，默认 2.5；`wander`默认 true，就是原来跟随里站久了会走几步闲逛。`expectedEntityId`为玩家 UUID。玩家不在 32 格内（和保护的`PLAYER_AWAY`同一个范围）报`PLAYER_NOT_VISIBLE`，UUID 不符报`STALE_TARGET`。
-- `{action:"wait"}`：原地等。不记位置，身体空闲时由原有的待机看人接管。坐着时发`wait`，姿态保持`seated`不变，照常接受序号。
+- `{action:"wait"}`：原地等。不记位置，身体空闲时由原有的待机看人接管。姿态是`seated`时发`wait`，姿态保持`seated`（带上新的序号）；身体坐着但姿态不是`seated`时，照常变成`wait`，身体不站起来。
 - `{off:true}`：清掉姿态，包括`seated`，但不让身体站起来。
 
 所有请求都带`postureRevision`，排序规则和`guardRevision`完全一样：
 - 每份新租约从 0 开始，严格递增；
 - 序号小于或等于已接受的报`CANCELLED`；
 - 序号接受后，后面的检查即使失败也不回退。
-回执是姿态快照，形状同下面观察里的`posture`；关掉时回`{posture:null,postureRevision}`。
+回执是姿态快照，形状同下面观察里的`posture`；关掉时回`{posture:null,postureRevision}`。新设的姿态在下一个游戏刻才算出真正的`state`：有操作在跑时，回执里的`state`可能还是`following`，下一次观察变成`suspended`。
 
 **姿态和保护是同一个玩家**：运行端开跟随时，同时把保护设给这个玩家；服务端不核对两者是否一致，单人场景下不会出现不一致。
 
@@ -468,7 +468,8 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - 不由`posture`方法设，而是由`sit`操作成功后服务端设为`seated`（记下座位方块），原来的跟随或等待就此结束；
 - `stand-up`操作成功后，姿态清空；
 - 坐着时被保护叫起来（`wouldFight`）不清`seated`：打完走回座位，用和`sit`一样的原生右键坐下；
-- 座位方块不在了、被占了、走不到时，姿态改成`wait`，`reason`给出`sit`的同名码（`NO_SEAT`、`SEAT_OCCUPIED`、`NO_PATH`）；
+- 走回座位途中`state`仍是`seated`，另带`returning:true`；观察顶层的`sitting`为 false。检查和右键与`sit`操作相同（`NativeSeat.requireCanSit`、`requireFreeSeat`、`sitDown`）。
+- 座位方块不在了、被占了、走不到时，姿态改成`wait`，`reason`给出`sit`的同名码，例如`SEAT_OCCUPIED`、`EMPTY_HAND_REQUIRED`、`NO_LINE_OF_SIGHT`。方块已经不是座位（`STALE_TARGET`）报`NO_SEAT`；超过`GuardDuty.BACK_LIMIT_MS`（15 秒，和保护打完走回原位的上限同一个）还没坐回去报`NO_PATH`。实现补定；
 - `posture follow`会让身体站起来去跟。
 
 **观察**：有姿态时`observe`多一个`posture`，没有姿态时不带这个字段：
@@ -487,15 +488,17 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 | `seated` | 坐在座位上 |
 | `guarding` | 常驻保护占着身体在打；打完回到原来的状态 |
 | `suspended` | 有操作在跑，姿态让给它：`suspendedFor`是操作名。操作结束后，身体空闲满`RESUME_AFTER_MS`（3000）才接上，期间`resumeInMs`是剩余毫秒；中间来了新操作就重新计时 |
-| `away` | 跟的人下线、死了、换了维度，或离开 32 格；回来自动接上。`reason`为`PLAYER_AWAY` |
-| `blocked` | 走不到玩家身边；每隔 3 秒（`FollowCompanion.UNREACHABLE_RETRY_MS`）或玩家挪了位置就再试。`reason`为`NO_PATH`，回座位失败时见上面 |
+| `away` | 跟的人下线、死了、换了维度，或离开 32 格（`GuardDuty.PLAYER_RANGE`，保护判断玩家在不在也用它）；回来自动接上。`reason`为`PLAYER_AWAY` |
+| `blocked` | 走不到玩家身边；每隔 3 秒（`FollowCompanion.UNREACHABLE_RETRY_MS`），或玩家挪开 2 格（`UNREACHABLE_SHIFT`）就再试。`reason`是导航给的码：`NO_PATH`，或此刻不能走路时的`BLOCKED`（在岩浆里、骑着东西等）；某一刻内部出错时为`INTERNAL`，下一刻照常再试 |
 
 **每个游戏刻谁驱动身体**，按这个顺序：
 1. 常驻保护（`tickDuty`）；
 2. 正在跑的操作；
 3. 姿态。
 
-不让姿态挂起的操作：`send-chat`、`select-slot`、`equip-item`。这些操作不移动身体，也不重新计时，相当于原来`beside-follow`的名单；名单只在服务端存一份，第三步再加`look-at`、`emote`。坐着时能用的操作（见`stand-up`那一行）不会让`seated`挂起；不能用的照旧报`SEATED`。
+不让姿态挂起的操作：`send-chat`、`select-slot`、`equip-item`。这些操作不移动身体，也不重新计时，相当于原来`beside-follow`的名单。名单只在服务端存一份（`Posture.KEEPS`），第三步再加`look-at`、`emote`。坐着时能用的操作（见`stand-up`那一行）不会让`seated`挂起；不能用的照旧报`SEATED`。
+
+“有操作在跑”看的是会话里状态为 running 的操作（`ControlSession.running()`），所以进食、自卫这类生存动作也会让姿态挂起。`select-slot`、`equip-item`不再有特殊放行：别的操作在跑时它们照常报`BUSY`；没有操作在跑时，跟随不是操作，本来就不挡它们。实现补定：任何一次`stop`（包括操作结束时的收尾）之后，姿态也要等`RESUME_AFTER_MS`才再动。
 
 **跟随失败不再结束跟随**：
 - 跟随中挨打不再报`BLOCKED`：没开保护时由运行端的近身自卫处理；

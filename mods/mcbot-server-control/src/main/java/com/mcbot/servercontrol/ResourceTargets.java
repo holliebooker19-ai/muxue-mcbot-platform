@@ -45,7 +45,7 @@ final class ResourceTargets {
     }
     private Target requireContext(ServerPlayer body,String id) {
         Target target=targets.get(id);
-        if(!valid(target,session.sessionId(),session::carries,body.serverLevel(),clock.getAsLong())) throw error("STALE_TARGET","Resource reference expired or control changed");
+        if(!valid(target,session.sessionId(),session.generation(),body.serverLevel(),clock.getAsLong())) throw error("STALE_TARGET","Resource reference expired or control changed");
         var chunk=body.serverLevel().getChunkSource().getChunkNow(target.position().getX()>>4,target.position().getZ()>>4);
         if(chunk!=target.chunk())throw error("STALE_TARGET","Resource chunk unloaded or reloaded");
         return target;
@@ -59,9 +59,7 @@ final class ResourceTargets {
         if(!ResourceCatalog.drops(target.drops(),expectedItem))throw error("UNSUPPORTED","Pickup item is not an ordinary drop of the mined ore");
         target.miningGuard().validatePickup(target.position(),drop);
     }
-    static boolean valid(Target target,String session,long generation,Object dimension,long now) {return valid(target,session,issued->issued==generation,dimension,now);}
-    /** carried: whether a reference issued in that generation still belongs to the current control (ControlSession.carries). */
-    static boolean valid(Target target,String session,java.util.function.LongPredicate carried,Object dimension,long now) {
-        return target!=null&&Objects.equals(target.session(),session)&&carried.test(target.generation())&&target.dimension()==dimension&&now<target.expiresAt();
+    static boolean valid(Target target,String session,long generation,Object dimension,long now) {
+        return target!=null&&Objects.equals(target.session(),session)&&target.generation()==generation&&target.dimension()==dimension&&now<target.expiresAt();
     }
 }

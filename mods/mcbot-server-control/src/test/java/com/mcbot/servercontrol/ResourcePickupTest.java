@@ -56,8 +56,7 @@ final class ResourcePickupTest {
         Object dimension=new Object();var target=new ResourceTargets.Target("session",1,dimension,BlockPos.ZERO,null,new Object(),100,null,List.of());
         check(ResourceTargets.valid(target,"session",1,dimension,99),"resource ref live in bound epoch");
         check(!ResourceTargets.valid(target,"session",1,dimension,100)&&!ResourceTargets.valid(target,"session",2,dimension,1)&&!ResourceTargets.valid(target,"session",1,new Object(),1),"expiry stop generation and real dimension invalidate references");
-        check(ResourceTargets.valid(target,"session",g->g>=1&&g<=3,dimension,99)&&!ResourceTargets.valid(target,"session",g->g>=2&&g<=3,dimension,99),"a reference survives only step-aside stops (ControlSession.carries), not one that cut the chain");
-        check(!ResourceTargets.valid(target,"session",g->g>=1&&g<=3,dimension,100)&&!ResourceTargets.valid(target,"other",g->g>=1&&g<=3,dimension,1)&&!ResourceTargets.valid(target,"session",g->g>=1&&g<=3,new Object(),1),"expiry, session and dimension still invalidate a carried reference");
+        check(!ResourceTargets.valid(target,"other",1,dimension,1),"another body session invalidates a reference");
         JsonObject dropPosition=obj("x",3,"y",201.25,"z",3),dropStack=stack(1,99);
         JsonObject airborne=ServerController.groundObservation("drop",dropPosition,dropStack,"visible",false);
         JsonObject grounded=ServerController.groundObservation("drop",dropPosition,dropStack,"visible",true);
