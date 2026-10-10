@@ -120,7 +120,7 @@ async function relay() {
       if (request.method === 'claim' && decoded.ok) { for (const key of ['leaseId', 'stopToken']) if (decoded.result[key]) secrets.add(decoded.result[key]); report.lease = { claimedAt: new Date().toISOString(), ttlMs: decoded.result.ttlMs }; }
       report.rpc.push({ ...context, method: request.method, ...(request.method === 'act' ? { action: request.params.name, operationId: request.params.operationId } : {}), ok: decoded.ok, status: decoded.result?.status, code: decoded.error?.code, resultCode: decoded.result?.result?.code });
       if(['act','operation'].includes(request.method)&&decoded.ok&&decoded.result?.status!=='running'&&
-          ['pickup-item','move-to-position','approach-resource','approach-container','follow-companion','retreat-from-entity'].includes(decoded.result?.name))
+          ['pickup-item','move-to-position','approach-resource','approach-container','retreat-from-entity'].includes(decoded.result?.name))
         report.nativeOperations.push(safe({...context,operation:decoded.result}));
       res.writeHead(response.status, { 'content-type': 'application/json' }); res.end(bytes);
     } catch (error) { report.rpc.push({ ...context, method: request?.method, relayError: redact(error.message) }); if (!res.destroyed) { res.writeHead(502); res.end('{}'); } }
@@ -309,8 +309,8 @@ try {
       await policy({autoDefend:true,autoEat:false,armed:true});await tool('companion-mode',{action:'wait'});
       const floor=report.rpc.length;await enemy('husk');
       await until(()=>report.rpc.slice(floor),rows=>rows.some(r=>r.action==='defend-entity'&&r.ok),'自动防卫未实际受理',10000);
-      // 8h（10-08）起：自卫先暂停陪伴，打完恢复原来的等待，不再丢掉意图。
-      await until(()=>report.rpc.slice(floor),rows=>rows.some(r=>r.action==='follow-companion'||r.action==='defend-entity')&&rows.filter(r=>r.action==='defend-entity').length>=1,'自动防卫未完成',10000);
+      // 8m 第二步（10-11）起：等待是服务端姿态，自卫时自动挂起，打完 3 秒后自己回到等待，运行端不再发暂停／恢复。
+      await until(()=>report.rpc.slice(floor),rows=>rows.filter(r=>r.action==='defend-entity').length>=1,'自动防卫未完成',10000);
       await until(()=>tool('get-companion-mode'),m=>m.intent==='wait'&&m.state==='waiting','防卫后没恢复原来的等待');
       check('自动防卫暂停普通等待、打完恢复原来的等待',true,{rpc:report.rpc.slice(floor),policy:(await state()).policy});
       await tool('stop-action');const stopFloor=report.rpc.length;

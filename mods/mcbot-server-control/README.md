@@ -26,7 +26,7 @@ Mod 适配（R5）：附属模组通过公开包 `com.mcbot.servercontrol.api` �
 
 每次服务启动随机生成实例与本机 Bearer token，写同目录 `connection.json`（含 backend、endpoint、worldId、username）。此文件为本机凭据，不能公开或打印 token。HTTP 只接受本机 POST JSON /v2，拒绝 Origin、其它路径、非 JSON 与超过 64 KiB 请求；所有游戏读写在主线程执行，排队超时请求不得在后续 tick 执行。
 
-完整协议见 [ServerBody v2](../../docs/server_body_protocol.md)。当前16个原子动作：send-chat、look-at、move-to-position、follow-player、follow-companion、dig-block、place-block、open-container、click-slot、close-container、select-slot、drop-item、approach-container、approach-player、approach-resource、pickup-item，另有只读nearby-blocks／nearby-resources。Node历史交互批次28工具、持续陪伴批次30工具，有限采集批次再新增discover-resources／gather-resources／collect-items，完整能力集共**33个MCP工具**；follow-companion／approach-resource／pickup-item由任务内部调用，不直接发布给模型。按实际capabilities裁剪，不发布自动重生或长期记忆工具。ClientBody协议v1和原动作参数保持兼容。
+完整协议见 [ServerBody v2](../../docs/server_body_protocol.md)。最早一批16个原子动作：send-chat、look-at、move-to-position、follow-player、follow-companion（2026-10-11 起删掉，改为下面的姿态）、dig-block、place-block、open-container、click-slot、close-container、select-slot、drop-item、approach-container、approach-player、approach-resource、pickup-item，另有只读nearby-blocks／nearby-resources。Node历史交互批次28工具、持续陪伴批次30工具，有限采集批次再新增discover-resources／gather-resources／collect-items，完整能力集共**33个MCP工具**；approach-resource／pickup-item由任务内部调用，不直接发布给模型。按实际capabilities裁剪，不发布自动重生或长期记忆工具。ClientBody协议v1和原动作参数保持兼容。
 
 2026-10-07（第 8e 步）加了 `sleep-in-bed` 和 `wake-up`：找附近的空床走过去，用原生 `startSleepInBed` 躺下（不右键方块，下界不会炸床；重生点会设到这张床），睡着时只接受说话和起床；观察带 `sleeping` 和 `time`。细节见协议。
 
@@ -42,7 +42,7 @@ Mod 适配（R5）：附属模组通过公开包 `com.mcbot.servercontrol.api` �
 
 approach动作有同高度平地有界绕障，选择满足原版reach／LOS的交互站位，逐tick核验扫掠碰撞、整脚底支撑和危险；搜索预算有限，不保证32格内必达，不挖路、搭桥或加载未知路径。资源／容器／玩家走近与掉落物拾取的规划站位中心及水平x/z±0.2四角均须满足各自原有触及／视线条件，为小于0.15格路点容差留裕量；实际原生range／LOS／拾取碰撞范围不放宽。TargetTokens以实际BlockEntity身份和完整状态绑定容器，双箱同时核验两半，替换／卸载／控制变化拒绝旧token。任务层只给模型短期containerRef；详见[走近验证](../../docs/archive/server_approach_validation.md)。
 
-持续跟随follow-companion绑定玩家UUID与真实实体，距离默认2.5（1.5–6），进入距离且有视线时等待、玩家继续移动时跟上，没有原follow-player的有限总时长。复用安全平地绕障，动态重规划节流500ms、2.5秒无进展停止；路线失效／玩家离线／超范围／身体受伤会失败，不自动重试。每tick仍检查租约，聊天可并行，其他动作保持互斥。Node负责等待、暂停、显式恢复及单次受阻通知，stop清除意图；默认跟随仍只跟随，当前扩展可选有界拾取，不添加自动采矿／陪挖，实际闭环待本批验证。
+持续跟随、原地等待、坐着是租约上的**姿态**（2026-10-11，8m 第二步，能力 `server-posture`，协议方法 `posture`），不是操作：跟随绑定玩家名和 UUID，距离默认 2.5（1.5–6），站久了会闲逛几步。有操作在跑时姿态自动让开，身体空下来满 3 秒（`Posture.RESUME_AFTER_MS`）自己接上；玩家下线、换维度、离开 32 格时原地等他回来，走不到时隔 3 秒再试，不会自己结束。普通 stop 不清姿态，`stop` 带 `clearPosture` 才清；租约结束、身体死亡也清。坐下成功后姿态变成 seated，被保护叫起来打完会走回座位。以前的 `follow-companion` 操作、`step-aside-stop`、`beside-follow` 已删。细节见协议「陪伴姿态」一节。只有离线测试，没进过游戏。
 
 服务端库存、菜单槽位、carried、地面物品与原生拾取收据均报告完整components；非空栈另有maxStackSize，直接读实际ItemStack.getMaxStackSize()，空栈省略，不根据ID猜64或把当前数量当上限，实际值可大于64。菜单revision包含该上限变化。selectedSlot表示当前快捷栏；组件对象必须完整复制核验，不能只看ID／数量。所有组件统一经注册表感知的DataComponentMap CODEC／NbtOps输出typed-NBT，每个组件value均携原生类型；包括默认组件、CustomData和容器内嵌套物品，damage例如`{type:"int",value:1}`。long用字符串，原生浮点值用文本，数组和list／compound保留类型，具体字段见协议；原版已规范化的负零不伪称还原。存在transient／无持久codec或不能完整序列化的组件时明确UNSUPPORTED，不静默省略。未使用哈希／指纹代替字段比较。
 
