@@ -6,6 +6,8 @@
 - **第一块（10-10，离线完成）**：服务端常驻保护（`GuardDuty`、协议方法 `guard`、观察里的 `guard`），空闲、原地等待、跟随时都能保护，等待中打完走回原位；运行端改用它（跟随让开、等待都不关保护，`companion-mode stop`／`stop-action` 关）。协议见 [server_body_protocol.md](server_body_protocol.md#常驻保护8m-第一步第一块2026-10-10)。离线：Java `GuardDutyTest` 17 项、`ControlSessionTest` 和 `FollowCompanionTest` 补的检查，运行端 `companion-guard-duty.test.mjs` 5 项；没有隔离服实测、没有真实模型试玩。
 - **第二块（10-10，离线＋隔离服完成）**：5.2 表里的任务打断和期限顺延，能力`guard-duty-tasks`，协议见 [server_body_protocol.md](server_body_protocol.md#保护打断任务8m-第一步第二块2026-10-10)。和 5.2 表的出入：`emote`手势不打断（几秒就完，打断反而要多处理一个被取消的操作）；`approach-player`不打断（玩家一动它就失败）；走向床可打断。没有改“打架开始前在路上挨打就 `BLOCKED`”的规则，打完后才把受伤基线重置。隔离服`server-guard-duty-smoke`8 项通过（等待、地面建筑、垫脚柱上不打、玩家太远），没有真实模型试玩；合成界面开着时只有离线检查。
 
+**适用范围（2026-10-11 用户定）**：本文只针对**单人陪伴**，也就是服务器上一个真人玩家和一个 Bot。多人（多个真人，或多个 Bot）暂不适配，放到以后，已知的问题记在 7.9。在此之前，设计照单人的情况写：Bot 陪的就是那个玩家，跟谁就保护谁，听到的命令都当成这个玩家下的。
+
 ## 1. 现状：状态分在三层
 
 | 层 | 状态在哪 | 怎么组织 |
@@ -46,7 +48,7 @@
 | 步 | 内容 | 主要改动 | 估计 |
 | --- | --- | --- | --- |
 | 1 | **守卫解耦**：保护玩家变成服务端独立的常驻职责，在等待、做任务时都有效（第 5 节） | 服务端新职责层和协议方法；任务的可打断点和期限顺延；运行端 `GuardDuty` | 2.5～3.5 天 |
-| 2 | **姿态在服务端挂起／恢复**：跟随、等待成为服务端姿态，让开不再拆掉重建 | `FollowCompanion` 从操作改成姿态；`CompanionMode` 去掉让开、代次接纳逻辑 | 待第 1 步后评估 |
+| 2 | **姿态在服务端挂起／恢复**：跟随、等待、坐着成为服务端姿态，让开不再拆掉重建（第 7 节） | `FollowCompanion` 从操作改成姿态；`CompanionMode` 去掉让开、代次接纳逻辑 | 4～5 天（10-11 估） |
 | 3 | **小动作不打断姿态**：按 MOVE／LOOK 标志区分，`look-at`、`emote`、选格、穿装备不让开。10-11 先做了 select-slot、equip-item；emote、look-at 仍让开，待第 2 步后再做 | 工具属性表 | 0.5 天 |
 | 4 | **统一任务生命周期**：运行端单一调度器；建筑、种地、长途走被打断后续做 | 合并 6 个任务主人的公共部分；服务端可空字段改成一个任务槽 | 待评估 |
 
@@ -159,3 +161,231 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
    - 只在等待（`wait`）中开的保护，`companion-mode stop` 结束等待时也一起关。
 2. **离玩家多远还去打**：Bot 离被保护玩家 16 格以内才放下手上的事去打；超出只靠 3 格近身自卫。
 3. **打完回哪**：等待中打完回到开始打之前站的地方（在保护范围内）；跟随中打完接着跟；做任务时打完回到任务。
+
+## 7. 第二步：姿态在服务端挂起／恢复（详细设计，2026-10-11 待用户审）
+
+### 7.1 现在怎么走一遍“跟随中让 Bot 去做件事”
+
+以“跟随中砍一棵树”为例，现在要经过这几步：
+
+1. 运行端 `CompanionMode.yieldTo('gather')` 拿一张租约。
+2. 内部 `request({action:'pause'})` → `body.stop({stepAside:true})`。服务端 `ControlSession.cancel()` 把控制代次加一，`ServerController.stop()` 清掉所有字段（包括 `companion`）；`stepAside` 只是让 `carryFloor` 不动，旧的 `resourceRef` 还能用。
+3. 砍树跑完，租约 `release()` → `autoResume()`。要等：身体空闲满 `resumeDelayMs`（3 秒），而且玩家在附近。
+4. `request({action:'resume'})` 用 `adoptable()` 检查“同会话、代次只往前走”，再 `body.act('follow-companion')` 开一个**新的**跟随操作。
+5. 之后 `update()` 每轮读这个新操作的回执，靠 `accept()` 把状态抄回运行端。
+
+问题都出在第 2、4 步：跟随是一个普通操作，所以每次让开都要“停掉再重建”。代价包括：
+- **代次判断**：`adoptable`、`exactlyNext`、`internalStop` 要判断新代次还算不算自己的；
+- **补丁**：`stepAside`／`carryFloor` 保住引用，3 秒延迟防止两次工具调用之间把身体带走；
+- **陪挖、陪捡**：每捡一次东西都要内部停止两次，再重新开始跟随；
+- **坐下**：`seatedDown` 要先停掉跟随，曾经出过 BUSY 竞态；
+- **死后重连**：只能另存一份 `posture-<名>.json`，提示 Agent。
+
+### 7.2 目标
+
+**跟随、等待、坐着变成服务端的“姿态”**。它不是操作，跟保护一样：
+- **怎么开、关**：用一个协议方法开关，绑定在租约和这次登录上；
+- **有操作时怎么让**：任何操作开始时，姿态自动挂起；操作结束、身体空闲后，服务端自己接上；
+- **不打断它的事**：运行端不用重新提交，代次也不变；一般的 `stop` 只停操作，不碰姿态；
+- **怎么结束**：只有明确结束（叫停、`companion-mode stop`、换成另一个姿态、关掉控制）才结束。
+
+做完以后，运行端的 `CompanionMode` 只做三件事：
+- 把模型的请求转成姿态设置；
+- 把服务端的姿态状态翻译成事件；
+- 管陪挖、陪捡这两个子任务（第 4 步再拆）。
+
+### 7.3 服务端
+
+**协议方法 `posture`**（新能力 `server-posture`）。写法照 `guard`：要租约，不算操作，不占操作预算，用 `postureRevision` 排序。
+
+- 参数（三选一）：
+  - `{action:'follow',player,expectedEntityId,distance?,wander?}`
+  - `{action:'wait'}`
+  - `{off:true}`
+- 回执：`{action,state,player?,suspendedFor?,reason?}`。
+- `state` 的取值：
+  - `following`：在跟；
+  - `waiting`：停在玩家旁边，或者在等待；
+  - `suspended`：让给一个操作；
+  - `away`：玩家不在 32 格内或在别的维度，回来自动接上；
+  - `blocked`：走不过去，隔几秒再试，原来就有这个逻辑；
+  - `seated`：坐着。
+- 坐下：`sit` 操作成功后，姿态改成 `seated`，跟随或等待到此结束，保护不变；`stand-up` 之后姿态为空。坐下以后不再需要运行端的 `seatedDown`。
+
+**`ServerController` 里的结构**：
+- 新增字段 `Posture posture`。
+- `FollowCompanion` 从“操作”改成姿态的执行者：
+  - 不再持有 `ControlSession.Operation`；
+  - 失败不再 `finish` 一个操作，而是改姿态状态；
+  - 能否驱动身体，改用和保护一样的租约检查：`dutyPermission()` 那种“同租约、同登录”。
+- 每 tick 的顺序：保护（`tickDuty`）→ 正在跑的操作 → 姿态。也就是说：
+  - 操作在跑时，姿态是 `suspended`，`suspendedFor` 填操作名；
+  - 没有操作时，姿态驱动身体；等待时照旧原地看人、闲逛。
+- 接上的时机：
+  - 操作结束后，身体空闲满 `RESUME_AFTER_MS` 才接上。这个值沿用现在运行端的 3000：模型连着调工具时，两次调用之间常隔两三秒；
+  - 中间来了新操作就重新计时；
+  - 第 3 步再按“这个动作移不移动身体”区分：转头、做表情、换手里的东西这类不移动身体的动作，不重新计时。
+- `stop()` 分两种：
+  - **普通 `stop`**（取消任务、反射抢占、一般叫停）：只清操作，不碰 `posture`；
+  - **`stop` 带 `clearPosture:true`**：同时清姿态。玩家叫停、`companion-mode stop`、运行端结束托管都走这个，和现在的 `clearGuard` 一起发。
+  - `stepAside` 参数和 `carryFloor` 都删掉：跟随不再因为让开而停，引用自然还在。
+- 身体换了（死亡、换维度、断开）：`bodyChanged` 会撤销租约，姿态跟保护一样一起清掉。注意死亡也算：`connected()` 要求活着，死了就撤销租约，复活后运行端要重新认领控制。所以死后、重连后要不要自动恢复姿态，由运行端决定（见 7.7 问题 3）。
+- `besideFollow` 名单和 `ControlSession` 里那条 `beside&&o.name.equals("follow-companion")` 的特殊情况一起删掉，因为跟随不再占用操作位。
+
+**观察**：`observe` 多一个 `posture` 字段，内容同上面的回执。运行端只看这个，不再轮询跟随操作。
+
+### 7.4 运行端
+
+`companion-mode.ts`（约 800 行）这些可以删：
+
+| 删掉 | 原来管什么 |
+|---|---|
+| `yieldTo`、`leases`、`holdPause`、`autoResume`、`resumeTimer`、`resumeDelayMs`、`idleSince`、`awaitingPlayer` | 让开和自动接上：服务端自己会做 |
+| `adoptable`、`internalStop`、`intent.context` 里的控制代次、`accept()` 对 `follow-companion` 回执的核对 | 判断新代次还算不算自己的 |
+| `start()`（开 `follow-companion` 操作）、`seatedDown` | 改为调 `body.setPosture` |
+| `stopWork` 里“跟随在跑就不停”的特殊情况 | 普通 stop 不再碰姿态 |
+
+保留和要改的：
+- **`request()`**：`follow`、`wait`、`stop`、`guard` 改成调 `posture`／`guard` 协议方法。`pause`、`resume` 保留给模型手动用：`pause` 就是 `posture off`，同时运行端记住上一个姿态，`resume` 再设回去。
+- **陪挖、陪捡（`mineBlock`、`pickupItem`）**：
+  - 子任务本身照旧，作为普通操作跑，跑的时候姿态自动挂起；
+  - 删掉每次前后的 `internalStop` 和 `start()`；
+  - 收据游标按会话检查。现在 `generations` 集合是为了跨代次认收据，不再换代次以后可以简化成“同会话”；
+  - 把子任务拆给统一调度器留到第 4 步。
+- **`update()`**：读 `state.posture`，状态变了就发事件，内容和现在的提示一样，比如“让开去做 X，做完自动接着跟”“玩家不在附近，回来自动接上”。
+- **`mcp.ts`、`survival-reflexes.ts`、`main.ts`**：去掉 `yieldTo`／`release` 的调用（4＋2＋1 处）。工具照常 `body.act`，服务端负责挂起和接上。
+- **`posture.ts` 和 `posture-<名>.json`**：保留，只用在托管驱动器重启这种“租约没了”的情况（见 7.7 问题 3）。
+
+### 7.5 兼容
+
+打包时运行端和核心 jar 总是一起发的，WebUI 也会核对 jar 和包里的逐字节相同，所以**不保留旧的“跟随是操作”那条路**。运行端在服务端没有 `server-posture` 能力时，直接报 UNSUPPORTED，提示更新核心模组。`follow-companion` 操作本身要不要留给旧的试验脚本，看 7.7 问题 1。
+
+### 7.6 测试和验收
+
+- **Java 新增 `PostureTest`**：
+  - 开、换、关；revision 排序；
+  - 操作开始时挂起，结束 `RESUME_AFTER_MS` 后接上，中途来了新操作就重新计时；
+  - 普通 stop 不清姿态，`clearPosture` 才清；
+  - 玩家走远进入 `away`，回来自动接上；换了身份就结束；
+  - 坐下变成 `seated`，`stand-up` 后为空；
+  - 保护打完回到姿态。
+- **`ControlSessionTest`、`FollowCompanionTest`**：改成姿态写法。
+- **运行端**：`companion-*.test.mjs` 共 9 个文件、`seat`、`stop-fence`、`emote`、`sleep`、`beside-follow`，按新协议重写。“让开再接上”的测试改成断言“只发了工具调用，没发过 pause／resume”。
+- **隔离服实测**（我来跑，用现有的 smoke 改）：
+  - 跟随中砍树，砍完自己接着跟，中间没有停 3 秒再重新开始跟随；
+  - 跟随加保护，同时让它砍树；
+  - 等待中做事，做完回到等待；
+  - 陪捡；
+  - 坐下、被怪叫起来、站起；
+  - 叫停清掉姿态。
+- **真实模型验收**：顺带把第 1 步欠的“帮我砍树，同时保护我”一起做。
+
+### 7.7 要你定的（审设计时回答）
+
+1. **旧的 `follow-companion` 操作删不删**：
+   - 建议删掉：它只服务旧路径，留着就得维护两套；
+   - `scripts/` 里有十几个试验和实测脚本用它，一起改成 `posture`。
+2. **接上要等多久**：建议照旧 3 秒，只是挪到服务端，起名为常量 `RESUME_AFTER_MS`，注释写明理由。也可以改短，第 3 步区分“移动／不移动身体的动作”之后，3 秒的必要性会小很多。
+3. **死后复活、托管驱动器重启或重连后，要不要自动恢复姿态**：
+   - 现在的做法：只提示 Agent“之前在跟你”，由模型决定；
+   - 建议：玩家没叫停过就自动恢复。运行端读 `posture-<名>.json`，重新认领后直接设回去，再告诉 Agent 一声；
+   - 这一项也牵涉排在后面的“驱动器重启空档”。
+4. **谁来做**：
+   - 跨服务端和运行端、带状态机，Haiku 不适合；
+   - 建议我自己做服务端，再派一个 Sonnet high 改运行端和测试；
+   - 或者全部由我自己做，慢一些，但改动集中在一个人手里，少一次合并。
+
+**用户的回答（2026-10-11）**：
+1. 删掉 `follow-companion` 操作，`scripts/` 里的试验和实测脚本一起改成 `posture`。
+2. 接上前等 3 秒，挪到服务端，常量 `RESUME_AFTER_MS`。
+3. 自动恢复姿态，但要看情况：死亡有掉落（没开 keepInventory）时，要先考虑把装备捡回来，再恢复跟随。这一点还没设计，compact 后补：死因和死亡地点从 `last-death` 拿，掉落物会不会消失、离得多远、路上危不危险、要不要先问玩家。
+4. 主 agent 做服务端，派一个 Sonnet high 做运行端和测试。
+5. compact 后先再审一遍这份设计有没有缺陷，再动手。
+
+**审设计后补定的（2026-10-11）**：
+1. 保护在打架时，姿态状态是 `guarding`；打完回到原来的状态。
+2. 坐着时被怪叫起来，不清掉 `seated`：打完走回座位坐下。座位被拆了或被占了，就改成原地等待，并告诉模型。只有 `stand-up` 才清掉 `seated`。
+3. 等待就是停在当前的位置，**不记位置**：被叫去做事，做完就在做完的地方接着等。打完架走回原位是 10-10 定的保护规则，不受影响。
+4. 死后捡装备照 7.10 的 R5：
+   - 掉落还在、走得到、那边没在打怪，就先捡回来，再恢复姿态；
+   - 否则直接恢复姿态，并告诉模型东西掉在哪、还剩几分钟；
+   - 不先问玩家。
+5. 7.7 第 1 题说“`scripts/` 里有十几个脚本”，核对后只有 2 个：`server-body-companion-smoke`、`server-navigation-defense-smoke`。
+
+### 7.8 估计和风险
+
+- 估计：服务端 1.5 天，运行端 1.5～2 天，测试和隔离服 1 天，共 4～5 天。
+- 风险：
+  - 运行端测试改动量大，约 15 个测试文件；
+  - 陪挖、陪捡的收据和代次检查改动后，计数可能出错，要靠 `companion-mining`／`companion-pickup` 两个 smoke 兜底；
+  - 姿态和操作同时存在后，`beforePhysics` 的优先顺序是新的隐含规则，要在 `PostureTest` 里逐条写出来。
+
+### 7.9 以后再做：多人适配（2026-10-11 审设计时记下）
+
+现状：ServerBody 这条路没有“主人”的概念。除了 Bot 自己，所有玩家的聊天都会交给模型（`events.ts` 的聊天事件），由模型决定听不听；跟随要写明玩家名，并用实体 id 确认是同一个人；保护只保护一个玩家。第 2 步不为多人做额外处理，下面这些等做多人时再定：
+
+1. **跟着一个人，保护另一个人**：现在运行端在只开保护时能单独指定要保护的玩家。如果姿态是跟着 A，保护的却是 B，跟随往 A 走，打完架往 B 回，两边会拉扯。第 2 步按单人处理：有跟随时，保护的就是跟随的那个人。
+2. **别人让 Bot 做事，做完它会回去找原来的人**：跟着 A 时，B 让它砍树，砍完 3 秒后它会自动接着跟 A，B 可能以为它会留下。做多人时，“接着跟”的事件要写出名字。
+3. **别人叫停，也会清掉正在跟的人的姿态**：服务端分不出是谁叫停的。做多人时，要让模型知道发话的不是正在陪的人，或者另加权限。
+4. **死后捡装备会捡到别人的东西**：原版的死亡掉落不记是谁掉的。做多人时，服务端给 Bot 死亡时掉出来的物品打标签，只捡带标签的；被别人先捡走的，算正常结束。
+5. **陪捡会捡到别人扔的东西**：只按物品种类筛选，是老问题，和第 4 步一起处理。
+6. **多个 Bot**：每个 Bot 的姿态和保护各自独立。两个 Bot 跟同一个玩家时，会不会挤在一起、抢同一个怪，都还没看过。
+
+### 7.10 任务拆分和顺序（2026-10-11）
+
+**第 0 步：先定接口（我做，约半天）**
+
+在 `server_body_protocol.md` 里先写好这些，作为服务端和运行端共同照着做的约定，然后提交这份设计：
+- `posture` 方法：参数、回执、`state` 的 7 个取值、`suspendedFor`；
+- 能力名 `server-posture`；
+- 观察里新增的 `posture` 字段；
+- `stop` 的 `clearPosture` 参数；
+- 死亡掉落：`lastDeath.drops`，以及掉落物在观察里的标记。
+
+**第 1 步：两边同时做**
+
+服务端（我做）：
+
+| 编号 | 内容 | 测试 |
+|---|---|---|
+| S1 | 新增 `Posture`，照 `GuardDuty` 的写法：用 `View` 接口隔开游戏，状态机是纯逻辑，包括状态、`RESUME_AFTER_MS`、`postureRevision`；`FollowCompanion` 改成姿态的执行者，不再持有操作 | 新增 `PostureTest` |
+| S2 | 接进协议：`posture` 方法、观察、`stop` 的 `clearPosture`；删掉 `follow-companion` 操作、`stepAside`／`carryFloor`、`besideFollow`，以及 `ControlSession` 里的特殊情况；有跟随时，保护的就是跟随的那个人 | 改 `ControlSessionTest`、`FollowCompanionTest` |
+| S3 | 坐下：`sit` 成功后姿态变成 `seated`；被保护叫起来，打完回到座位坐下；座位没了或被占了，就改成等待 | 改 `SeatTest` |
+| S4 | 死亡掉落：Bot 死时掉出的物品打上标签 `mcbot_body_death_drop`；`lastDeath` 加上掉落数量和消失时刻（掉落后 6000 tick，即原版 `ItemEntity` 的 `LIFETIME`）；开了 keepInventory 时掉落数量为 0 | 新增几项检查 |
+
+运行端（派 Sonnet high）：
+
+| 编号 | 内容 |
+|---|---|
+| R1 | `body.ts`、`server-body.ts`：加 `setPosture`、观察 `posture`、`stop` 带 `clearPosture`、检查服务端能力；删掉 `follow-companion` 那条路 |
+| R2 | `companion-mode.ts`：按 7.4 删掉让开和接上那一套，`update()` 改成把姿态状态变化翻译成事件，包括 `guarding` 和“回到座位” |
+| R3 | `mcp.ts`、`survival-reflexes.ts`、`main.ts`：去掉 `yieldTo`、`release`、`withCompanionStepAside` |
+| R4 | 陪挖、陪捡：去掉 `internalStop` 和重新开始跟随；收据游标只按会话检查 |
+| R5 | 死后恢复：重新认领控制后看 `lastDeath`。有掉落、还没过消失时刻、离得不太远、身边没有怪，就逐个 `pickup-item` 去捡带标签的物品，捡完再按 `posture-<名>.json` 恢复姿态；否则直接恢复，并发事件告诉模型 |
+| R6 | 测试：重写 14 个测试文件（`companion-*`、`seat`、`sleep`、`emote`、`stop-fence`、`beside-follow`），新增死后恢复的测试 |
+
+运行端的 R5 要先确定几个数：
+- “离得不太远”：复用陪挖、陪捡已有的范围，或者长途走的上限，不另起新数字；
+- “身边没有怪”：复用保护的 `wouldFight` 判断。
+
+**第 2 步：合并（我做）**
+- 逐行审 worker 的代码；
+- 改 2 个 smoke 脚本；
+- 跑 `gradlew check` 和 `npm test`；
+- 更新协议文档、交付计划和 README。
+
+**第 3 步：重新打包，用户直接试玩（用户 10-11 定）**
+
+不做隔离服实测，7.6 里的“隔离服实测”一项取消。用户试玩时顺便看这几项：
+- 7.6 列的那些情况；
+- 坐着被怪叫起来，打完坐回去；
+- 死后捡回装备，再接着跟；
+- 掉落已经消失时，只恢复姿态，并告诉模型。
+
+要等用户关掉 WebUI 再打包。
+
+**估计**：
+- 第 0 步：半天；
+- 第 1 步：服务端约 2 天，运行端同时做；
+- 第 2 步：约 1 天；
+- 共约 3.5～4 天。

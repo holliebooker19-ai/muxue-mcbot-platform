@@ -23,8 +23,9 @@
 | machine-status | `{instanceId,sessionId,leaseId,x,y,z}` | 只读（8b，10-09）：不走过去、不打开界面读一台机器的内容和进度，给运行端的“放好就走、到时回来取”用，不占动作、不打断正在做的事。只认身体所在维度、水平 256 格内（OUT_OF_REACH）；区块没加载回 `state:"unloaded"`（没加载的机器不工作，时间也不走）；加载了回 `id`，以及 `supported`（这个方块的工作站适配实现了 `progress`，现在是原版熔炉、烟熏炉、高炉和酿造台）、`machine`、`inputs`、`results`、`fuel`、`working`、`ticksLeft`／`secondsLeft`（照这样一直工作还要多久）、`fuelTicks`（燃料还够烧多少 tick）、`stalled`（还有料但没在工作：没燃料或出口满了） |
 | act | `{instanceId,sessionId,leaseId,controlGeneration,operationId,name,args}` | 现有 Operation 字段，另含 controlGeneration；同 ID 同内容返回原结果，异内容拒绝。动作按原生字段比较，不哈希；结果缓存淘汰后同 ID 也不能重新执行 |
 | operation | `{instanceId,sessionId,leaseId,operationId}` | 对应当前租约的 Operation；不以查询续租 |
-| stop | `{instanceId,sessionId,leaseId,clearGuard?,guardRevision?,stepAside?}` | `{stopped:true,controlGeneration}`；取消当前操作、推进代次、角色保持在线，旧代次 act 拒绝；`guard-duty-fenced`支持`clearGuard:true`连同必填`guardRevision`在同一请求中清保护（停止本身从不因序号被拒，序号已被更新的设置超过时只停不清）；省略则保留保护意图；`step-aside-stop`支持`stepAside:true`（跟随让开，之前发现的目标继续有效，见[跟随让开、自卫失败、没武器](#跟随让开自卫失败没武器试玩反馈修正)） |
+| stop | `{instanceId,sessionId,leaseId,clearGuard?,guardRevision?,stepAside?}` | `{stopped:true,controlGeneration}`；取消当前操作、推进代次、角色保持在线，旧代次 act 拒绝；`guard-duty-fenced`支持`clearGuard:true`连同必填`guardRevision`在同一请求中清保护（停止本身从不因序号被拒，序号已被更新的设置超过时只停不清）；省略则保留保护意图；`step-aside-stop`支持`stepAside:true`（跟随让开，之前发现的目标继续有效，见[跟随让开、自卫失败、没武器](#跟随让开自卫失败没武器试玩反馈修正)）；`server-posture`支持`clearPosture:true`连同必填`postureRevision`，同一请求里清姿态，规则同`clearGuard`（8m 第二步约定，届时删掉`stepAside`） |
 | guard | `{instanceId,sessionId,leaseId,guardRevision,player?,expectedEntityId?,options?,off?}` | `guard-duty-fenced`保护配置；开启返回保护状态和`guardRevision`，关闭返回`{enabled:false,guardRevision}`；不占操作 ID 预算，见常驻保护一节 |
+| posture | `{instanceId,sessionId,leaseId,postureRevision,action?,player?,expectedEntityId?,distance?,wander?,off?}` | `server-posture`陪伴姿态（跟随／等待）；不是操作，不占操作 ID 预算，见[陪伴姿态](#陪伴姿态8m-第二步约定2026-10-11)（**约定，尚未实现**） |
 | release | `{instanceId,sessionId,leaseId}` | `{released:true}`；仅停止并放弃这一份控制权，角色保留；旧 lease 不能影响新 lease |
 | revoke | `{instanceId,sessionId,leaseId,stopToken,leave?}` | `{stopped:true,revoked:true,left}`；宿主专用，仅撤销指定租约，角色默认保留；不能接管／移动，不续租。已释放的匹配旧租约可幂等确认，但绝不影响新租约。`leave:true`（宿主退出时用）同时让角色像玩家一样下线（原版存档），只在没有别的租约时生效，`left`说明这次是否真的下线；下次 claim 在原地重新上线 |
 | watch | `{instanceId,sessionId,leaseId,stopToken}` | `{chat,chatCursor}`；宿主只读新聊天，用于 MCP 不响应时直接叫停，不续租、不创建角色。也接受同 instance/session 下最近已撤销／释放／过期的租约，前提没有不同的新有效租约；新 claim 或角色代次变化即使旧 watch 失效。chat 格式同 Observation |
@@ -443,6 +444,104 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 形式：`McbotApi`加一个`registerRangedThreat`，规则和其他适配一样——id 与别的适配共用命名空间、服务器启动后冻结（`Registered`多一项，旧构造器补空列表）、`installed()`要检查被适配模组的确切版本（`versionsMatch`）、方法抛异常当作“不知道”、先登记的优先、答“不知道”回到上面两层、`hello.adapters`列出、`registerHint`可附用法说明、WebUI 插件页的「给 AI 用」开关同样管它（见[Mod 适配](mod_adapters.md)）。这次不写代码的理由：现在没有哪个附属模组需要它，登记接口要进公开的`McbotApi`（加了就得兼容），等第一个要适配的模组（有蓄力怪或穿盾弹射物）出现，按它的实际行为定形状比现在猜稳。
 
 **验证范围**：离线——`GuardCombatTest`（决策：蓄力怪举盾、射完放下去打、没蓄力不举、隔墙不举、弹射物来得及／来不及／已举着／飞偏、关盾或没盾照旧、苦力怕优先、近战优先、对射的弓放下又拉起；弹道推算几何）和`FollowCompanionTest`（经协议`act follow-companion`带`guard`，跟随驱动真实的`GuardCombat`，视图为脚本）。**没有验证**，要真实游戏：`foes()`从真实生物读出蓄力（骷髅、流浪者、沼骸、掠夺者的弩、溺尸的三叉戟）、`incoming`读真实弹射物（箭的速度和下坠是否与推算吻合）、盾真的挡下这一箭、朝向、骷髅射击循环里举放的节奏、Bot 和玩家同时被瞄准时站着不动是否碍事。
+
+### 陪伴姿态（8m 第二步，约定，2026-10-11）
+
+**状态：这是第二步的接口约定，还没实现。** 服务端和运行端照这一节同时开工，实现完再把本节改成实际行为，并删掉被取代的旧小节（`follow-companion`、`step-aside-stop`、`beside-follow`）。设计见[陪伴状态设计](companion_state_design.md)第 7 节；只针对单人陪伴（一个真人、一个 Bot），多人问题见该文 7.9。
+
+能力标记`server-posture`。跟随、等待、坐着不再是操作，而是租约上的一项常驻“姿态”，写法照常驻保护（`guard`）。同时删掉：`follow-companion`操作及其能力名，`companion-guard`的`follow-companion.guard`旧路径，`stop`的`stepAside`和能力`step-aside-stop`（`ControlSession.carries`），`beside-follow`。
+
+**方法`posture`**（要租约，校验 instance／session／lease，不看`controlGeneration`；不是操作，不占操作 ID 预算）。三选一：
+- `{action:"follow", player, expectedEntityId, distance?, wander?}`：跟随。`distance`为 1.5～6，默认 2.5；`wander`默认 true，就是原来跟随里站久了会走几步闲逛。`expectedEntityId`为玩家 UUID。玩家不在 32 格内（和保护的`PLAYER_AWAY`同一个范围）报`PLAYER_NOT_VISIBLE`，UUID 不符报`STALE_TARGET`。
+- `{action:"wait"}`：原地等。不记位置，身体空闲时由原有的待机看人接管。坐着时发`wait`，姿态保持`seated`不变，照常接受序号。
+- `{off:true}`：清掉姿态，包括`seated`，但不让身体站起来。
+
+所有请求都带`postureRevision`，排序规则和`guardRevision`完全一样：
+- 每份新租约从 0 开始，严格递增；
+- 序号小于或等于已接受的报`CANCELLED`；
+- 序号接受后，后面的检查即使失败也不回退。
+回执是姿态快照，形状同下面观察里的`posture`；关掉时回`{posture:null,postureRevision}`。
+
+**姿态和保护是同一个玩家**：运行端开跟随时，同时把保护设给这个玩家；服务端不核对两者是否一致，单人场景下不会出现不一致。
+
+**`seated`**：
+- 不由`posture`方法设，而是由`sit`操作成功后服务端设为`seated`（记下座位方块），原来的跟随或等待就此结束；
+- `stand-up`操作成功后，姿态清空；
+- 坐着时被保护叫起来（`wouldFight`）不清`seated`：打完走回座位，用和`sit`一样的原生右键坐下；
+- 座位方块不在了、被占了、走不到时，姿态改成`wait`，`reason`给出`sit`的同名码（`NO_SEAT`、`SEAT_OCCUPIED`、`NO_PATH`）；
+- `posture follow`会让身体站起来去跟。
+
+**观察**：有姿态时`observe`多一个`posture`，没有姿态时不带这个字段：
+
+```
+{action:"follow"|"wait"|"seated", postureRevision, state, player?, entityId?, distance?, wander?,
+ arrived?, strolling?, suspendedFor?, resumeInMs?, seat?:{x,y,z}, reason?}
+```
+
+`state`的取值：
+
+| state | 意思 |
+| --- | --- |
+| `following` | 在跟。`arrived:true`表示已经站在玩家身边，`strolling:true`表示在闲逛 |
+| `waiting` | 原地等（`action:"wait"`） |
+| `seated` | 坐在座位上 |
+| `guarding` | 常驻保护占着身体在打；打完回到原来的状态 |
+| `suspended` | 有操作在跑，姿态让给它：`suspendedFor`是操作名。操作结束后，身体空闲满`RESUME_AFTER_MS`（3000）才接上，期间`resumeInMs`是剩余毫秒；中间来了新操作就重新计时 |
+| `away` | 跟的人下线、死了、换了维度，或离开 32 格；回来自动接上。`reason`为`PLAYER_AWAY` |
+| `blocked` | 走不到玩家身边；每隔 3 秒（`FollowCompanion.UNREACHABLE_RETRY_MS`）或玩家挪了位置就再试。`reason`为`NO_PATH`，回座位失败时见上面 |
+
+**每个游戏刻谁驱动身体**，按这个顺序：
+1. 常驻保护（`tickDuty`）；
+2. 正在跑的操作；
+3. 姿态。
+
+不让姿态挂起的操作：`send-chat`、`select-slot`、`equip-item`。这些操作不移动身体，也不重新计时，相当于原来`beside-follow`的名单；名单只在服务端存一份，第三步再加`look-at`、`emote`。坐着时能用的操作（见`stand-up`那一行）不会让`seated`挂起；不能用的照旧报`SEATED`。
+
+**跟随失败不再结束跟随**：
+- 跟随中挨打不再报`BLOCKED`：没开保护时由运行端的近身自卫处理；
+- 走不到报`blocked`，玩家走远或下线报`away`，都会自己接上；
+- 玩家重新登录，UUID 相同而实体换了，照常接着跟；
+- UUID 不同（名字相同但不是同一个人）才结束姿态，观察的`posture`消失，运行端从回执的上一个状态判断原因。
+
+**生命周期**：
+- 普通`stop`（取消任务、反射抢占、`stop-action`以外的停止）只停操作，不碰姿态；
+- `stop`带`clearPosture:true`和新的`postureRevision`时，在同一请求里同时清姿态。`stop-action`、玩家叫停、`companion-mode stop`、托管结束都走这条，和`clearGuard`一起发；
+- `revoke`、`release`、新的`claim`、租约过期、身体死亡、身体换维度或被移除时，姿态和保护一起清掉。死亡会让`connected()`变成 false，所以复活后要由运行端恢复，见下面“死亡掉落”。
+
+**死亡掉落**（同一能力`server-posture`，扩展`hello.lastDeath`）：
+- Bot 死亡时，原版掉出的物品实体（`LivingDropsEvent`）都打上标签`mcbot_body_death_drop`。
+- `lastDeath`多一个`drops`，开了 keepInventory、或没掉任何东西时为`{count:0}`：
+  ```
+  drops:{count, items:[{id,count}], despawnAt, remaining}
+  ```
+  - `items`：相同物品合并，最多 16 条；
+  - `despawnAt`：死亡时刻加上 300000 ms，即原版`ItemEntity.LIFETIME`的 6000 tick 乘以 50 ms。服务器卡顿时物品实际消失得更晚，所以这个时刻偏保守；
+  - `remaining`：读取时还在、且区块已加载的带标签物品数；区块没加载时为 null，表示不知道。掉进岩浆、虚空而没了的不算。
+- 观察里的地面物品，带这个标签的多一个`deathDrop:true`。
+- 捡回去仍用`pickup-item`，规则不变：物品要在 Bot 8 格内。
+
+**运行端怎么恢复**（R5，规则写在这里，供两边对照）：
+- 重新认领控制后，先看`lastDeath.drops`。满足下面所有条件，就先用`travel-to`走到死亡地点：
+  - `count>0`；
+  - `remaining`不是 0；
+  - 现在还没到`despawnAt`；
+  - 死亡地点和身体在同一维度，且在`travel-to`的 2000 格以内；
+  - `timeoutMs`取到`despawnAt`的剩余时间，并且不超过`travel-to`的上限。
+- 到了以后，逐个`pickup-item`去捡带`deathDrop`的物品。
+- 下面任一情况就停下不捡，改为恢复姿态，并告诉模型东西掉在哪、还剩几分钟：
+  - 那里有保护会打的怪：`survival-state`的`threats`里，`hostile`且有防卫资格的；
+  - 走不到；
+  - 时间到了。
+- 不满足上面的条件时，直接恢复姿态，同样告诉模型。
+- 恢复姿态用`runtime/posture-<名字>.json`：重新设`posture`和`guard`，再告诉模型一声。玩家叫停过，或者文件已经过期（原有规则）时不恢复。
+- 捡装备这段路上没有姿态，常驻保护照常：玩家在 16 格内时仍会出手。
+
+**常驻保护打完以后**：
+- 姿态是`follow`时，交还给跟随，跟随重新算路线。这和原来一样，只是不再经过`follow-companion`操作；
+- 姿态是`wait`时，走回开始打之前站的地方（10-10 定的规则）；
+- 姿态是`seated`时，走回座位坐下；
+- 没有姿态时，照旧走回原地。
+保护接管身体的条件里，“在跑的是`follow-companion`”换成“没有操作在跑、由姿态驱动”。
 
 ## 手持物品使用（2026-10-06）
 
