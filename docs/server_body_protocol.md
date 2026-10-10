@@ -498,7 +498,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 不让姿态挂起的操作：`send-chat`、`select-slot`、`equip-item`。这些操作不移动身体，也不重新计时，相当于原来`beside-follow`的名单。名单只在服务端存一份（`Posture.KEEPS`），第三步再加`look-at`、`emote`。坐着时能用的操作（见`stand-up`那一行）不会让`seated`挂起；不能用的照旧报`SEATED`。
 
-“有操作在跑”看的是会话里状态为 running 的操作（`ControlSession.running()`），所以进食、自卫这类生存动作也会让姿态挂起。`select-slot`、`equip-item`不再有特殊放行：别的操作在跑时它们照常报`BUSY`；没有操作在跑时，跟随不是操作，本来就不挡它们。实现补定：任何一次`stop`（包括操作结束时的收尾）之后，姿态也要等`RESUME_AFTER_MS`才再动。
+“有操作在跑”看的是会话里状态为 running 的操作（`ControlSession.running()`），所以进食、自卫这类生存动作也会让姿态挂起。`select-slot`、`equip-item`不再有特殊放行：别的操作在跑时它们照常报`BUSY`；没有操作在跑时，跟随不是操作，本来就不挡它们。实现补定：任何一次`stop`（包括操作结束时的收尾）之后，姿态也要等`RESUME_AFTER_MS`才再动；这段时间跟随显示`suspended`，等待和坐着本来就不动，`state`不变。
 
 **跟随失败不再结束跟随**：
 - 跟随中挨打不再报`BLOCKED`：没开保护时由运行端的近身自卫处理；
