@@ -101,14 +101,13 @@ test('stopping one task stops what runs on its lock, and leaves the others and t
   scheduler.cancelOne(undefined);
 });
 
-test('a holder lease is not the running work: current() looks past it to what runs on its lock', () => {
+test('a holder lease is not the running work: while it runs current() is undefined', () => {
   const body = fakeBody(), scheduler = Scheduler.of(body);
   const holder = scheduler.start('companion-mode', { holder: true });
+  // What runs on its token is internal (a real ServerBody keeps it out of pendingOperations), so eating and defense stop it.
   assert.equal(scheduler.current(), undefined);
   assert.throws(() => scheduler.assertIdle(), error => error.code === 'BUSY' && /companion-mode/.test(error.message), 'still busy for the model');
-  body.pending.push({ operationId: 'walk', name: 'travel-to', status: 'running' });
-  assert.deepEqual(scheduler.current(), { id: 'walk', name: 'travel-to' });
-  body.pending.length = 0; scheduler.end(holder);
+  scheduler.end(holder);
 });
 
 test('a blocked lease (unknown write) keeps the lock until an explicit stop is confirmed', () => {

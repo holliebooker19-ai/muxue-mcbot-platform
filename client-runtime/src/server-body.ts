@@ -303,6 +303,15 @@ export class ServerBody implements Body {
   fightMs(): number { return this.fights + (this.window?.from !== undefined ? this.now() - this.window.from : 0); }
   /** The interrupt window: its token, when the server opened it (absent while begin is on its way), and the release of task-lock steps waiting for it to close. */
   private window?: { token: string; from?: number; closed: Promise<void>; release: () => void };
+  /** Tokens of windows a stop ended while their work still runs: a step sent with one is CANCELLED, never sent as an ordinary one. */
+  private readonly stoppedWindows = new Set<string>();
+  /** A stop ends the window on the server: let it go here too, its time counted once, and the steps waiting for it see the stop. */
+  private retireWindow(): void {
+    const window = this.window;
+    if (!window) return;
+    if (window.from !== undefined) this.fights += this.now() - window.from;
+    this.window = undefined; this.stoppedWindows.add(window.token); window.release();
+  }
   /**
    * Eat or defend with the running task paused, not cancelled (capability task-interrupts, docs/companion_state_design.md
    * 8.4). NOT_PAUSABLE: the task cannot pause at this moment and nothing changed. While work runs its steps go out with
@@ -321,7 +330,7 @@ export class ServerBody implements Body {
     const closed = new Promise<void>(resolve => { release = resolve; });
     const window: NonNullable<ServerBody['window']> = { token: randomUUID(), closed, release };
     this.window = window;
-    const giveUp = () => { if (this.window === window) { this.window = undefined; release(); } };
+    const giveUp = () => { this.stoppedWindows.delete(window.token); if (this.window === window) { this.window = undefined; release(); } };
     let opened;
     try {
       opened = z.object({ open: z.literal(true), paused: z.object({ operationId: identifier, name: z.string().max(NAME_LIMIT) }).nullable() })
@@ -343,6 +352,8 @@ export class ServerBody implements Body {
   }
   /** Close the window (unless a stop already did) and let waiting steps go; never throws: the server closes it by itself after the lease TTL if this fails. */
   private async endInterrupt(window: NonNullable<ServerBody['window']>, revision: number, controlGeneration: number): Promise<boolean> {
+    // Its work is over: the token of a window a stop ended has nothing left to refuse.
+    this.stoppedWindows.delete(window.token);
     if (this.window !== window) return false;
     let resumed = false;
     try {
@@ -473,6 +484,7 @@ export class ServerBody implements Body {
   }
   async act<N extends ActionName>(name: N, args: ActionArguments[N], taskToken?: string): Promise<Operation> {
     this.assertActive();
+    if (taskToken !== undefined && this.stoppedWindows.has(taskToken)) throw new BodyError('CANCELLED', '打断已被叫停，这一步没有发出');
     // In an interrupt window only its own steps go out: the task-lock holder stops before its next step until it closes, anyone else is BUSY.
     const admitted = this.revision;
     while (name !== 'send-chat' && this.window && taskToken !== this.window.token) {
@@ -610,7 +622,7 @@ export class ServerBody implements Body {
     const clearPosture = options.clearPosture === true && this.hello.capabilities.includes('server-posture');
     const guardRevision = clearGuard ? ++this.guardRevision : undefined;
     const postureRevision = clearPosture ? ++this.postureRevision : undefined;
-    this.revision++;
+    this.revision++; this.retireWindow();
     const stopping = async (): Promise<{ stopped: true }> => {
       try {
         const reply = z.object({ stopped: z.literal(true), controlGeneration: generation }).parse(await this.rpc('stop', { ...this.identity(), ...(clearGuard ? { clearGuard: true, guardRevision } : {}), ...(clearPosture ? { clearPosture: true, postureRevision } : {}) }));

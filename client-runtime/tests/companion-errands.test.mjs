@@ -105,8 +105,8 @@ test('the death recovery holds the same lock: one holder at a time, a stop fence
   const f = fixture();
   const lease = f.errands.hold();
   assert.equal(f.body.owner, lease.token); assert.equal(lease.holder, true);
-  f.body.pending.push({ operationId: 'walk', name: 'travel-to', status: 'running' });
-  assert.deepEqual(f.scheduler.current(), { id: 'walk', name: 'travel-to' }, 'the walk it sends is the work eating may pause, as before');
+  // What it sends on the lock's token is internal (a real ServerBody keeps it out of pendingOperations): eating and defense stop it, as before 4c.
+  assert.equal(f.scheduler.current(), undefined, 'nothing eating or defense could pause while the recovery holds the lock');
   assert.throws(() => f.errands.hold(), { code: 'BUSY' });
   f.item(); f.errands.set(f.state, { items: ['minecraft:snowball'], radius: 3 });
   f.errands.tick(f.state, 0, true); assert.equal(f.errands.running, false, 'no child while the recovery holds the lock');
@@ -114,7 +114,6 @@ test('the death recovery holds the same lock: one holder at a time, a stop fence
   assert.throws(() => f.errands.check(lease), { code: 'CANCELLED' });
   f.errands.release(); assert.equal(f.body.owner, lease.token);
   f.errands.stopped(handle); assert.equal(f.body.owner, undefined);
-  f.body.pending.length = 0;
 });
 
 test('pickup and mining options are checked against each other and the follow distance', () => {

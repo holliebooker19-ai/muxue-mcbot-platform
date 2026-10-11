@@ -74,10 +74,45 @@ test('a stop inside the window ends it on the server: no end is sent and the wai
   body.acquireTask('gather');
   let step;
   await body.interrupt('defend', async () => {
-    step = body.act('look-at', at, 'gather');
+    // The stop releases it at once (not when the work is over), so the rejection is awaited from the start.
+    step = assert.rejects(body.act('look-at', at, 'gather'), { code: 'CANCELLED' });
     await wait(10); await body.stop();
   });
-  await assert.rejects(step, { code: 'CANCELLED' });
+  await step;
+  assert.deepEqual(sent(), ['begin', 'stop']);
+});
+
+test('a confirmed stop inside the window lets it go here too: the lock is free, the old token is CANCELLED and never sent, its time counts once', async t => {
+  const { body, tick, sent } = await serverBody(t);
+  await body.act('move-to-position', at);
+  let old;
+  await body.interrupt('eat', async window => {
+    old = window.taskToken;
+    tick(1500); await body.stop();
+    body.acquireTask('next'); body.releaseTask('next');
+    await assert.rejects(body.act('select-slot', select, window.taskToken), { code: 'CANCELLED' });
+    tick(1000); assert.equal(body.fightMs(), 1500, 'the stop ended the window: no time after it');
+  });
+  assert.equal(body.fightMs(), 1500, 'counted once, not again when the work is over');
+  assert.deepEqual(sent(), ['move-to-position', 'begin', 'stop']);
+  assert.equal((await body.act('select-slot', select, old)).status, 'succeeded', 'once the work is over its token is not remembered');
+});
+
+test('a stop while begin is on its way lets the window go at once', async t => {
+  const { body, mock, sent } = await serverBody(t);
+  const reply = gate(), handler = mock.handlers.interrupt;
+  mock.handlers.interrupt = async params => { await reply.promise; return handler(params); };
+  body.acquireTask('gather');
+  const interrupting = body.interrupt('eat', async () => assert.fail('no work after a stop'));
+  await until(() => sent().includes('begin'));
+  let released = false;
+  const step = assert.rejects(body.act('look-at', at, 'gather').finally(() => { released = true; }), { code: 'CANCELLED' });
+  await body.stop(); await step;
+  assert.equal(released, true, 'released by the stop, not by the begin reply');
+  reply.resolve();
+  await assert.rejects(interrupting, { code: 'CANCELLED' });
+  assert.equal(body.fightMs(), 0, 'the server never answered with an open window');
+  body.releaseTask('gather'); body.acquireTask('next');
   assert.deepEqual(sent(), ['begin', 'stop']);
 });
 
@@ -163,4 +198,18 @@ test('automatic defense pauses the task too, and explicit defend-self never wait
   const explicit = reflexFixture({ threat: true }); explicit.pausable = false;
   await explicit.reflexes.defendSelf();
   assert.deepEqual(explicit.calls, ['begin:defend', 'stop', 'defend:own']);
+});
+
+test('a busy survival lock found inside the window is the next tick; a BUSY after the pause was counted is a failure', async () => {
+  const f = reflexFixture(), interrupt = f.body.interrupt;
+  // Idle when room() looks, taken by the time the window's work looks (the check before anything is done).
+  f.body.interrupt = (reason, work) => { f.survivalState = 'running'; return interrupt(reason, work); };
+  assert.deepEqual(await f.round(), ['begin:eat', 'end']);
+  assert.equal(f.reflexes.read().lastReason, 'waiting-for-pause'); assert.equal(f.reflexes.read().armed, true);
+  assert.ok(!f.texts().some(text => text.includes('先暂停')), 'nothing was counted');
+  f.survivalState = 'idle'; f.body.interrupt = interrupt;
+  f.tasks.eat = async (_request, borrowed) => { f.calls.push(`eat:${borrowed?.taskToken ?? 'own'}`); throw new BodyError('BUSY', 'refused after the pause'); };
+  assert.deepEqual(await f.round(), ['begin:eat', 'eat:window', 'end']);
+  assert.match(f.texts().find(text => text.includes('先暂停')), /第 1 次/);
+  assert.equal(f.reflexes.read().armed, false, 'not swallowed as a moment that cannot pause');
 });

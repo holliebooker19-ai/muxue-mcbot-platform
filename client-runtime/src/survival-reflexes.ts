@@ -58,16 +58,17 @@ export class SurvivalReflexes {
   }
   /**
    * The meal or the defense inside an interrupt window, the task paused, then carrying on. undefined: the task cannot
-   * pause at this moment (NOT_PAUSABLE) or the survival lock was taken meanwhile; nothing was done.
+   * pause at this moment (NOT_PAUSABLE) or the survival lock was taken meanwhile; nothing was done. Once the pause is
+   * counted, BUSY or NOT_PAUSABLE is a failure of the meal or the defense and goes up like any other.
    */
   private async paused(reason: InterruptReason, room: Extract<Room, { kind: 'pause' }>, check: () => void, run: (borrowed: BorrowedSurvivalTask) => Promise<Operation>): Promise<Operation | undefined> {
     const { work, count } = room;
-    let onServer = false;
+    let onServer = false, started = false;
     try {
       const { value: operation, resumed } = await this.body.interrupt!(reason, async window => {
         check();
         if (this.tasks.read().state !== 'idle') throw new BodyError('BUSY', '生存任务正被占用');
-        onServer = !!window.paused; this.resumes = { id: work.id, count: count + 1 };
+        onServer = !!window.paused; started = true; this.resumes = { id: work.id, count: count + 1 };
         this.events.add('survival', `${reason === 'eat' ? '紧急进食' : '近距自卫'}：${work.name} 先暂停，${reason === 'eat' ? '吃完' : '打完'}接着做（第 ${count + 1} 次，同一件任务最多 ${MAX_RESUMES} 次）`);
         const result = await run({ taskToken: window.taskToken, check });
         // Unsure what the hand did: the task does not carry on with it; the stop also ends the window.
@@ -77,7 +78,7 @@ export class SurvivalReflexes {
       if (operation.status !== 'unknown' && (onServer ? resumed : this.options.running?.()?.id === work.id)) this.events.add('survival', `${work.name} 接着做了`);
       return operation;
     } catch (error) {
-      if (error instanceof BodyError && ['NOT_PAUSABLE', 'BUSY'].includes(error.code)) return undefined;
+      if (!started && error instanceof BodyError && ['NOT_PAUSABLE', 'BUSY'].includes(error.code)) return undefined;
       throw error;
     }
   }
