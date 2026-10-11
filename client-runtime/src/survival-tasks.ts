@@ -172,11 +172,12 @@ export class SurvivalTasks {
       const after = await this.state(task); task.progress.foodAfter = after.food; task.progress.saturationAfter = after.saturation;
     });
   }
-  async defend(request: DefendRequest): Promise<Operation> {
+  /** borrowed: inside an interrupt window, its steps go out with the window's token (survival-reflexes.ts). */
+  async defend(request: DefendRequest, borrowed?: BorrowedSurvivalTask): Promise<Operation> {
     const policy = request.policy;
     if (!Number.isFinite(policy.defenseRadius) || policy.defenseRadius < 1 || policy.defenseRadius > 3 || !Number.isFinite(policy.lowHealth) || policy.lowHealth < 1 || policy.lowHealth > 20
       || !Number.isInteger(policy.maxAttacks) || policy.maxAttacks < 1 || policy.maxAttacks > 3 || !Number.isInteger(policy.defenseTimeoutMs) || policy.defenseTimeoutMs < 500 || policy.defenseTimeoutMs > 5000) throw new BodyError('INVALID_ARGUMENT', '防卫策略超出有限范围');
-    return this.run('defend-self', undefined, policy.defenseTimeoutMs + 15000, async task => {
+    return this.run('defend-self', borrowed, policy.defenseTimeoutMs + 15000, async task => {
       request.check?.();
       Object.assign(task.progress, { sensedAt: request.sensedAt, stopRequestedAt: request.stopRequestedAt, stopConfirmedAt: request.stopConfirmedAt });
       if (!this.body.hello.capabilities.includes('defend-entity')) throw new BodyError('UNSUPPORTED', '身体缺少原生防卫能力');

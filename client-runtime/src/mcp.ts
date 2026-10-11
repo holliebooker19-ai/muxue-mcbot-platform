@@ -7,7 +7,7 @@ import { ContainerTasks } from './tasks.js';
 import { CompanionMode, FOLLOW_DISTANCE, hasCompanionMode, type CompanionRequest } from './companion-mode.js';
 import { GatherTasks } from './gather-tasks.js';
 import { SurvivalTasks } from './survival-tasks.js';
-import { SurvivalReflexes } from './survival-reflexes.js';
+import { SurvivalReflexes, MAX_RESUMES } from './survival-reflexes.js';
 import { createActionStop, companionReflexHooks, type StopCurrent } from './action-stop.js';
 import { PillarTasks } from './pillar.js';
 import { equipItem, interactBlock, interactBlockRepeated, useItem } from './interactions.js';
@@ -16,7 +16,7 @@ import { PlaceBook } from './places.js';
 import type { MachineWatch } from './machines.js';
 import { BlueprintShelf, resolveCells, type Rotation, type Shape } from './blueprints.js';
 import { pluginNotes } from './plugins.js';
-import { toolInfo, looksOnly } from './tool-registry.js';
+import { toolInfo, looksOnly, TOOLS } from './tool-registry.js';
 import { bodyWork, type BodyWork } from './work.js';
 
 const coordinate = z.coerce.number().finite();
@@ -124,12 +124,16 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     const state = reflexes?.read(); const assessment = await body.assessTool!({ policy: state?.toolPolicy, minRemainingDurability: state?.minRemainingDurability, ...args });
     return { ...assessment, candidates: assessment.candidates.map(({ components: _components, ...candidate }) => ({ ...candidate, componentsOmitted: candidate.componentsComplete !== false })) };
   });
+  // Interrupt windows (task-interrupts, docs/companion_state_design.md 8.4): which tasks eating and defense pause rather than stop.
+  const pauseNote = body.hello.capabilities.includes('task-interrupts')
+    ? ` Exception: while ${[...TOOLS].filter(([, tool]) => tool.resumable).map(([name]) => name).join(', ')} runs, automatic eating and defense (and defend-self) pause it and it carries on by itself afterwards, at most ${MAX_RESUMES} times per task (events say so); if it cannot pause at that moment (scaffold, mid-dig, swimming) automatic ones wait, unless health is at the low line.`
+    : '';
   if (survival) {
     register('prepare-item', 'Guardedly prepare the item currently in inventory slot 0..35 for use. Whole-stack native swap into hotbar, then select. Defaults to an empty hotbar slot; targetSlot explicitly permits swapping an occupied hotbar slot. Never discards or silently restores items.', { slot: z.number().int().min(0).max(35), targetSlot: z.number().int().min(0).max(8).optional() }, async args => operationResult(await survival.prepareItem(args)));
     register('eat-food', 'Consume exactly one safe food using native use duration and authoritative consumption confirmation. Optional slot refers to whole main inventory; otherwise choose food by hunger, saturation and protection policy. Unknown never retries. Auto food skips precious food (golden apple, enchanted golden apple) unless health is at the low line and no ordinary food exists; naming a slot may eat it. Precious food: eat only when the player agrees or you are about to die. Code ONLY_PRECIOUS_FOOD means only precious food is left and it is not an emergency: ask the player.', { slot: z.number().int().min(0).max(35).optional(), timeoutMs }, async args => operationResult(await survival.eat({ ...args, policy: reflexes?.read() })));
   }
-  if (reflexes && body.hello.capabilities.includes('defend-entity')) register('defend-self', 'One finite native defense using the same threat selection, policy, preparation and shared writer as automatic defense. Optional entityId restricts the current eligible hostile target; players, friendly, neutral and unknown targets are excluded. Stops ordinary work first, never pursues or resumes it. Low health and explosion preparation require safe retreat. Unknown remains blocked.', { entityId: z.string().uuid().optional() }, async ({ entityId }) => operationResult(await reflexes.defendSelf(entityId)));
-  if (reflexes) register('set-reflexes', 'Change effective program policy with the current policy revision from get-survival-state. autoEat and supported autoDefend default on. armed:false disarms automatic behavior; armed:true explicitly rearms it. Hard stop disarms too. Reconfiguration first stops active tasks, so old policy cannot keep writing; it does not resume them. Defense takes priority over meals; each native action is bounded.', {
+  if (reflexes && body.hello.capabilities.includes('defend-entity')) register('defend-self', `One finite native defense using the same threat selection, policy, preparation and shared writer as automatic defense. Optional entityId restricts the current eligible hostile target; players, friendly, neutral and unknown targets are excluded. Stops ordinary work first, never pursues or resumes it. Low health and explosion preparation require safe retreat. Unknown remains blocked.${pauseNote}`, { entityId: z.string().uuid().optional() }, async ({ entityId }) => operationResult(await reflexes.defendSelf(entityId)));
+  if (reflexes) register('set-reflexes', `Change effective program policy with the current policy revision from get-survival-state. autoEat and supported autoDefend default on. armed:false disarms automatic behavior; armed:true explicitly rearms it. Hard stop disarms too. Reconfiguration first stops active tasks, so old policy cannot keep writing; it does not resume them. Defense takes priority over meals; each native action is bounded.${pauseNote}`, {
     expectedRevision: z.number().int().positive(), autoEat: z.boolean().optional(), armed: z.boolean().optional(), urgentFood: z.number().int().min(0).max(20).optional(), protectedItems: z.array(registryId).max(64).optional(), toolPolicy: z.enum(['fastest_valid', 'conserve_durability']).optional(), minRemainingDurability: z.number().int().min(0).max(10000).optional(),
     ...(body.hello.capabilities.includes('defend-entity') ? { autoDefend: z.boolean().optional(), defenseRadius: z.number().finite().min(1).max(3).optional(), lowHealth: z.number().finite().min(1).max(20).optional(), excludedEntityIds: z.array(z.string().uuid()).max(64).optional(), maxAttacks: z.number().int().min(1).max(3).optional(), defenseTimeoutMs: z.number().int().min(500).max(5000).optional() } : {}),
   }, args => reflexes.configure(args));

@@ -40,6 +40,12 @@ final class ControlSession {
         default void clearPosture() {}
         /** Short plain host message shown to players; rate limited by the session (docs/server_body_protocol.md). */
         default void notice(String text){throw error("UNSUPPORTED","Host notice is not available");}
+        /** Open or close an interrupt window ({action:"begin",reason} / {action:"end"}); not an operation (docs/server_body_protocol.md, 打断窗口). */
+        default JsonObject interrupt(JsonObject params){throw error("UNSUPPORTED","Task interrupts are not available");}
+        /** Whether an interrupt window is open: only its steps may start beside the paused operation. */
+        default boolean interruptOpen(){return false;}
+        /** The operation an open window paused (still running, not driven); null when none is. */
+        default Operation interruptPaused(){return null;}
     }
     static final class Operation {
         final String id, sessionId, name;
@@ -78,6 +84,15 @@ final class ControlSession {
     long generation() { return generation; }
     /** Names of the operations running now (the posture yields to them). */
     List<String> running() { return history.values().stream().filter(o->o.status.equals("running")).map(o->o.name).toList(); }
+    /** Whether anything but chat and the paused operation runs: an eating or defense step inside an interrupt window. */
+    boolean stepsRunning(Operation paused) { return history.values().stream().anyMatch(o->step(o,paused)); }
+    /** The window closes while a step still runs: that step ends as cancelled, the paused operation stays. True when one did. */
+    boolean cancelSteps(Operation paused,String reason) {
+        boolean any=false;
+        for(Operation o:history.values()) if(step(o,paused)) { o.finish("cancelled",reason,o.result); any=true; }
+        return any;
+    }
+    private static boolean step(Operation o,Operation paused) { return o.status.equals("running")&&!o.name.equals("send-chat")&&o!=paused; }
     void bodyChanged() {
         revokeCurrent("Body died, changed dimension, or was removed");
         sessionId=UUID.randomUUID().toString();
@@ -269,6 +284,13 @@ final class ControlSession {
                 requireNativeStopped();result.addProperty("postureRevision",postureRevision);
                 return withOperationBudget(result);
             }
+            case "interrupt": {
+                if(!game.hello().getAsJsonArray("capabilities").contains(JSON.toJsonTree("task-interrupts"))) throw error("UNSUPPORTED","Task interrupts are not available");
+                // Fenced like act: a begin sent before a stop must not pause what runs after it.
+                if(Protocol.generation(p)!=generation) throw error("STALE_CONTROL","Control generation changed");
+                if(string(p,"action").equals("begin")) requireNativeStopped();
+                return withOperationBudget(game.interrupt(p));
+            }
             case "operation", "act": return operation(method,p);
             default: throw error("INVALID_ARGUMENT","Unknown protocol method");
         }
@@ -309,7 +331,10 @@ final class ControlSession {
         if(seenIds.contains(id)) throw error("UNKNOWN_OPERATION","Result evicted; never replay this ID");
         if(seenIds.size()>=ID_LIMIT) throw error("OPERATION_LIMIT","All "+ID_LIMIT+" lease operation IDs are used; stop and observation remain available; release and explicitly claim again for a new budget");
         if(!name.equals("send-chat")&&game.nativeWriteInProgress())throw error("BUSY","A synchronous native write must return before another action may start");
-        if(!name.equals("send-chat")&&history.values().stream().anyMatch(o->o.status.equals("running")&&!o.name.equals("send-chat"))) throw error("BUSY","Stop the current operation first");
+        // Inside an interrupt window the paused operation does not count, and only its eating and defense steps may start, one at a time.
+        boolean window=game.interruptOpen();
+        if(!name.equals("send-chat")&&window&&!TaskInterrupt.STEPS.contains(name)) throw error("BUSY","A task is paused for eating or defense; only those steps run until it resumes");
+        if(!name.equals("send-chat")&&stepsRunning(window?game.interruptPaused():null)) throw error("BUSY","Stop the current operation first");
         Operation operation=new Operation(id,sessionId,generation,name,args);
         history.put(id,operation); seenIds.add(id);
         while(history.size()>HISTORY_LIMIT) {

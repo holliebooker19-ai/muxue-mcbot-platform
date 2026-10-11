@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
 import { applyPluginPolicy, pluginRefusal, type PluginPolicy } from './plugins.js';
-import { BodyError, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type PostureRequest, type PostureState, type StopOptions, TRAVEL_TIMEOUT_MS, PICKUP_TIMEOUT_MS } from './body.js';
+import { BodyError, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type PostureRequest, type PostureState, type StopOptions, type InterruptReason, type InterruptWindow, TRAVEL_TIMEOUT_MS, PICKUP_TIMEOUT_MS } from './body.js';
 import { serverDetail } from './claim-failure.js';
 
 const identifier = z.string().min(1);
@@ -127,7 +127,7 @@ interface ServerOptions {
 }
 export interface RespawnResult { respawned: true; connected: true; instanceId: string; sessionId: string; controlGeneration: number }
 const implementedActions: ActionName[] = ['send-chat', 'look-at', 'move-to-position', 'follow-player', 'approach-container', 'approach-player', 'approach-resource', 'pickup-item', 'dig-block', 'place-block', 'open-container', 'click-slot', 'close-container', 'select-slot', 'drop-item', 'swap-inventory', 'eat-item', 'equip-item', 'defend-entity', 'retreat-from-entity', 'use-item-on-block', 'use-item', 'pillar-up', 'sleep-in-bed', 'wake-up', 'sit', 'stand-up', 'craft-item', 'smelt-item', 'travel-to', 'workstation-options', 'produce-item', 'modify-item', 'tend-crops', 'breed-animals', 'hunt', 'use-bucket', 'machine-items', 'emote', 'set-appearance', 'build'];
-const recoverable = new Set(['BUSY', 'INVALID_ARGUMENT', 'OUT_OF_REACH', 'UNSUPPORTED', 'UNLOADED', 'STALE_BLOCK', 'BLOCK_CHANGED', 'WRONG_CONTAINER', 'ITEM_CHANGED', 'UNKNOWN_OPERATION', 'OPERATION_CONFLICT', 'OPERATION_LIMIT', 'CONTAINER_CHANGED', 'REVISION_CHANGED', 'PROTECTED', 'CANCELLED', 'OBSTRUCTED', 'STALE_TARGET', 'BLOCKED', 'NO_PATH', 'PATH_BUDGET', 'TARGET_MOVED', 'NO_LINE_OF_SIGHT', 'PLAYER_NOT_VISIBLE', 'COMPANION_OUT_OF_RANGE', 'STALE_COMPANION', 'COMPANION_PROTECTED', 'COMPANION_MINING_CONFLICT', 'GAME_PAUSED']);
+const recoverable = new Set(['BUSY', 'NOT_PAUSABLE','INVALID_ARGUMENT', 'OUT_OF_REACH', 'UNSUPPORTED', 'UNLOADED', 'STALE_BLOCK', 'BLOCK_CHANGED', 'WRONG_CONTAINER', 'ITEM_CHANGED', 'UNKNOWN_OPERATION', 'OPERATION_CONFLICT', 'OPERATION_LIMIT', 'CONTAINER_CHANGED', 'REVISION_CHANGED', 'PROTECTED', 'CANCELLED', 'OBSTRUCTED', 'STALE_TARGET', 'BLOCKED', 'NO_PATH', 'PATH_BUDGET', 'TARGET_MOVED', 'NO_LINE_OF_SIGHT', 'PLAYER_NOT_VISIBLE', 'COMPANION_OUT_OF_RANGE', 'STALE_COMPANION', 'COMPANION_PROTECTED', 'COMPANION_MINING_CONFLICT', 'GAME_PAUSED']);
 /** One explicit server lease. No implicit claim, mutation retry or generation synchronization. */
 export class ServerBody implements Body {
   hello!: BodyHello;
@@ -181,7 +181,7 @@ export class ServerBody implements Body {
   private async connect(): Promise<void> {
     // The single plugin filter: everything below (and every tool registered from this.hello) sees the filtered hello.
     const hello = applyPluginPolicy(await this.readHello(), this.options.plugins);
-    const capabilities = hello.capabilities.filter(name => implementedActions.includes(name as ActionName) || ['nearby-blocks', 'nearby-resources', 'look-around', 'companion-pickup', 'companion-mining', 'survival-state', 'assess-tool', 'navigation-3d', 'machine-status', 'guard-duty-fenced', 'guard-duty-tasks', 'server-posture', 'gift-receipts', 'entity-equipment', 'assess-armour'].includes(name));
+    const capabilities = hello.capabilities.filter(name => implementedActions.includes(name as ActionName) || ['nearby-blocks', 'nearby-resources', 'look-around', 'companion-pickup', 'companion-mining', 'survival-state', 'assess-tool', 'navigation-3d', 'machine-status', 'guard-duty-fenced', 'guard-duty-tasks', 'server-posture', 'gift-receipts', 'entity-equipment', 'assess-armour', 'task-interrupts'].includes(name));
     // Interaction actions are only usable together with the IDs the server actually registered.
     const interactions = [...new Set(hello.interactions ?? [])];
     this.hello = { ...hello, interactions, capabilities: interactions.length ? capabilities : capabilities.filter(name => name !== 'use-item-on-block' && name !== 'use-item') };
@@ -250,7 +250,7 @@ export class ServerBody implements Body {
   }
   private lose(error: BodyError): void {
     if (this.state === 'lost' || this.state === 'closed') return;
-    this.state = 'lost'; this.lostReason = error; clearTimeout(this.timer); this.exclusive = undefined;
+    this.state = 'lost'; this.lostReason = error; clearTimeout(this.timer); this.exclusive = undefined; this.window?.release();
     if (this.lease) void this.rpc('release', this.identity()).catch(() => {});
     this.options.onLost?.(error);
   }
@@ -300,7 +300,58 @@ export class ServerBody implements Body {
     this.fights += busyMs >= this.dutyBusy ? busyMs - this.dutyBusy : busyMs;
     this.dutyBusy = busyMs;
   }
-  fightMs(): number { return this.fights; }
+  fightMs(): number { return this.fights + (this.window ? this.now() - this.window.from : 0); }
+  /** The open interrupt window: its token, when it opened, and the release of task-lock steps waiting for it to close. */
+  private window?: { token: string; from: number; closed: Promise<void>; release: () => void };
+  /**
+   * Eat or defend with the running task paused, not cancelled (capability task-interrupts, docs/companion_state_design.md
+   * 8.4). NOT_PAUSABLE: the task cannot pause at this moment and nothing changed. While work runs its steps go out with
+   * window.taskToken; the holder of the task lock (a gathering stepping on this side) waits in act() until the window
+   * closes, so it stops before its next step. Then the window closes and the paused task carries on; the time counts
+   * into fightMs, so tasks timed here get it added to their limits too. resumed: the server gave a paused operation
+   * the body back.
+   */
+  async interrupt<T>(reason: InterruptReason, work: (window: InterruptWindow) => Promise<T>): Promise<{ value: T; resumed: boolean }> {
+    this.assertActive();
+    if (!this.hello.capabilities.includes('task-interrupts')) throw new BodyError('UNSUPPORTED', '身体不支持暂停任务去进食或自卫（task-interrupts）');
+    if (this.window || this.stopping) throw new BodyError('BUSY', '已有打断在进行或正在停止');
+    const revision = this.revision, controlGeneration = this.controlGeneration;
+    let opened;
+    try {
+      opened = z.object({ open: z.literal(true), paused: z.object({ operationId: identifier, name: z.string().max(NAME_LIMIT) }).nullable() })
+        .parse(await this.rpc('interrupt', { ...this.identity(), controlGeneration, action: 'begin', reason }));
+      this.assertActive();
+    } catch (error) {
+      // A begin fenced by our own stop is expected, not lease loss (as in act).
+      if (revision !== this.revision && error instanceof BodyError && error.code === 'STALE_CONTROL' && this.state === 'active') throw new BodyError('CANCELLED', '停止前的打断已被代次屏障拒绝');
+      throw this.invalidate(error);
+    }
+    // A stop between: it ended the window on the server too.
+    if (revision !== this.revision) throw new BodyError('CANCELLED', '打断开始后已被停止');
+    let release!: () => void;
+    const closed = new Promise<void>(resolve => { release = resolve; });
+    const window = { token: randomUUID(), from: this.now(), closed, release };
+    this.window = window;
+    let value: T;
+    try { value = await work({ taskToken: window.token, ...(opened.paused ? { paused: opened.paused } : {}) }); }
+    catch (error) { await this.endInterrupt(window, revision, controlGeneration); throw error; }
+    return { value, resumed: await this.endInterrupt(window, revision, controlGeneration) };
+  }
+  /** Close the window (unless a stop already did) and let waiting steps go; never throws: the server closes it by itself after the lease TTL if this fails. */
+  private async endInterrupt(window: NonNullable<ServerBody['window']>, revision: number, controlGeneration: number): Promise<boolean> {
+    if (this.window !== window) return false;
+    let resumed = false;
+    try {
+      if (revision === this.revision && this.state === 'active') {
+        resumed = z.object({ resumed: z.boolean() }).parse(await this.rpc('interrupt', { ...this.identity(), controlGeneration, action: 'end' })).resumed;
+      }
+    } catch (error) { this.invalidate(error); }
+    finally {
+      this.fights += this.now() - window.from;
+      this.window = undefined; window.release();
+    }
+    return resumed;
+  }
   private guardRevision = 0;
   async setGuard(request: GuardDutyRequest): Promise<GuardDutyState | { enabled: false }> {
     this.assertActive();
@@ -334,7 +385,7 @@ export class ServerBody implements Body {
   }
   acquireTask(taskToken: string): void {
     this.assertActive();
-    if (this.taskOwner || this.exclusive || this.stopping) throw new BodyError('BUSY', '已有动作或任务运行');
+    if (this.taskOwner || this.exclusive || this.stopping || this.window) throw new BodyError('BUSY', '已有动作或任务运行');
     this.taskOwner = taskToken;
   }
   releaseTask(taskToken: string): void { if (this.taskOwner === taskToken) this.taskOwner = undefined; }
@@ -418,18 +469,28 @@ export class ServerBody implements Body {
   }
   async act<N extends ActionName>(name: N, args: ActionArguments[N], taskToken?: string): Promise<Operation> {
     this.assertActive();
+    // In an interrupt window only its own steps go out: the task-lock holder stops before its next step until it closes, anyone else is BUSY.
+    const admitted = this.revision;
+    while (name !== 'send-chat' && this.window && taskToken !== this.window.token) {
+      if (!this.taskOwner || taskToken !== this.taskOwner) throw new BodyError('BUSY', '正在暂停任务去进食或自卫；可聊天、查询或叫停');
+      await this.window.closed; this.assertActive();
+      // The task checked itself before calling; a stop while it waited must not let this step out under the new generation.
+      if (this.revision !== admitted) throw new BodyError('CANCELLED', '等打断结束时已被停止，这一步没有发出');
+    }
+    const interrupting = taskToken !== undefined && taskToken === this.window?.token;
     // Which operations leave the companion posture alone (select-slot, equip-item, send-chat) is the server's call alone; this side has no list of them.
-    if (name !== 'send-chat' && this.taskOwner && taskToken !== this.taskOwner) throw new BodyError('BUSY', '任务正在运行，原子动作不能绕过任务锁');
+    if (name !== 'send-chat' && this.taskOwner && taskToken !== this.taskOwner && !interrupting) throw new BodyError('BUSY', '任务正在运行，原子动作不能绕过任务锁');
     if (!this.hello.capabilities.includes(name)) throw new BodyError('UNSUPPORTED', `ServerBody 当前未实现 ${name}`);
     const refusal = pluginRefusal(name, args, this.options.plugins);
     if (refusal) throw new BodyError('UNSUPPORTED', refusal);
     if (this.stopping) throw new BodyError('BUSY', '正在停止，请等待确认后发送明确新动作');
     if (name === 'send-chat' && args && 'message' in args && (args.message.startsWith('/') || /[\r\n]/.test(args.message))) throw new BodyError('INVALID_ARGUMENT', 'send-chat 只允许普通单行聊天');
     this.validateSurvivalArguments(name, args);
-    const exclusive = name !== 'send-chat';
+    // A window's steps run beside the paused operation, which keeps its place as the one exclusive action.
+    const exclusive = name !== 'send-chat' && !interrupting;
     if (exclusive && this.exclusive) throw new BodyError('BUSY', '已有身体动作运行；先查询或停止');
     const operationId = randomUUID();
-    if (this.taskOwner && taskToken === this.taskOwner) this.internalOperations.add(operationId);
+    if (this.taskOwner && taskToken === this.taskOwner || interrupting) this.internalOperations.add(operationId);
     const controlGeneration = this.controlGeneration;
     const revision = this.revision;
     if (exclusive) this.exclusive = operationId;
@@ -535,7 +596,7 @@ export class ServerBody implements Body {
     } catch (error) { throw this.invalidate(error); }
   }
   pendingOperations(): readonly Operation[] { return [...this.operations.values()].filter(op => op.status === 'running' && !this.internalOperations.has(op.operationId)); }
-  isBusy(): boolean { return !!(this.taskOwner || this.exclusive || this.stopping); }
+  isBusy(): boolean { return !!(this.taskOwner || this.exclusive || this.stopping || this.window); }
   stop(options: StopOptions = {}): Promise<{ stopped: true }> {
     // A stronger stop arriving during an ordinary stop must also clear protection and the posture, so it runs on its own after it.
     if (this.stopping) return options.clearGuard || options.clearPosture ? this.stopping.then(() => this.stop(options)) : this.stopping;

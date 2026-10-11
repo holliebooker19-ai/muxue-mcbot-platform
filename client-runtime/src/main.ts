@@ -23,7 +23,7 @@ import { recoverAfterDeath } from './death-recovery.js';
 import { logClaimFailure } from './claim-failure.js';
 import { useGiftGear } from './gift-gear.js';
 import { loadPluginPolicy } from './plugins.js';
-import { bodyWork } from './work.js';
+import { bodyWork, runningWork } from './work.js';
 import { fileURLToPath } from 'node:url';
 
 async function main(): Promise<void> {
@@ -136,7 +136,7 @@ async function main(): Promise<void> {
     const work = bodyWork(body, tasks, gather, survival, companion);
     // Better armour a player throws is put on by itself unless the body is working (gift-gear.ts); following or waiting is not working.
     useGiftGear(events, body, work.busy);
-    const reflexes = survival ? new SurvivalReflexes(body, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: work.busy }) : undefined;
+    const reflexes = survival ? new SurvivalReflexes(body, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: work.busy, running: () => runningWork(body!, gather) }) : undefined;
     if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
     server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, work, places, machines, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
     monitor = new RuntimeMonitor(body, events, {

@@ -44,6 +44,8 @@ approach动作有同高度平地有界绕障，选择满足原版reach／LOS的�
 
 持续跟随、原地等待、坐着是租约上的**姿态**（2026-10-11，8m 第二步，能力 `server-posture`，协议方法 `posture`），不是操作：跟随绑定玩家名和 UUID，距离默认 2.5（1.5–6），站久了会闲逛几步。有操作在跑时姿态自动让开，身体空下来满 3 秒（`Posture.RESUME_AFTER_MS`）自己接上；聊天、选格、穿装备、`look-at` 不让开，内置手势（`emote` 不带 `source`）播放时只站住、播完马上接着跟（8m 第三步）；玩家下线、换维度、离开 32 格时原地等他回来，走不到时隔 3 秒再试，不会自己结束。普通 stop 不清姿态，`stop` 带 `clearPosture` 才清；租约结束、身体死亡也清。坐下成功后姿态变成 seated，被保护叫起来打完会走回座位。以前的 `follow-companion` 操作、`step-aside-stop`、`beside-follow` 已删。细节见协议「陪伴姿态」一节。只有离线测试，没进过游戏。
 
+进食和自卫可以暂停任务（2026-10-11，8m 第四步 4a，能力 `task-interrupts`，协议方法 `interrupt`）：运行端开一个“打断窗口”，正在跑的任务在保护也能打断它的时刻暂停（操作仍是 running），窗口里只放行选格、换格、进食、自卫、后撤这几步；关窗口后任务从身体所在处重新寻路接着做，暂停时长和保护打架共用期限顺延额度。此刻不能暂停报 `NOT_PAUSABLE`；10 秒没有打断步骤时服务端自己关窗口。细节见协议「打断窗口」一节。只有离线测试，没进过游戏。
+
 服务端库存、菜单槽位、carried、地面物品与原生拾取收据均报告完整components；非空栈另有maxStackSize，直接读实际ItemStack.getMaxStackSize()，空栈省略，不根据ID猜64或把当前数量当上限，实际值可大于64。菜单revision包含该上限变化。selectedSlot表示当前快捷栏；组件对象必须完整复制核验，不能只看ID／数量。所有组件统一经注册表感知的DataComponentMap CODEC／NbtOps输出typed-NBT，每个组件value均携原生类型；包括默认组件、CustomData和容器内嵌套物品，damage例如`{type:"int",value:1}`。long用字符串，原生浮点值用文本，数组和list／compound保留类型，具体字段见协议；原版已规范化的负零不伪称还原。存在transient／无持久codec或不能完整序列化的组件时明确UNSUPPORTED，不静默省略。未使用哈希／指纹代替字段比较。
 
 dig／place／open 必须携完整 expectedProperties；place 另携当前物品数量和 expectedComponents。菜单 id 包含 session／菜单代次／原生窗口 ID，revision 跟踪 slots／carried／原生状态；click 与 close 必须带 expectedRevision，click 还须匹配槽位和 carried 的完整 ID／数量／components。每次点击后先重读，旧窗口和旧版本拒绝。

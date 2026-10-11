@@ -1,7 +1,14 @@
-import { BodyError, type Body, type SurvivalState, type Threat, type Operation, type StopOptions } from './body.js';
+import { BodyError, type Body, type SurvivalState, type Threat, type Operation, type StopOptions, type InterruptReason } from './body.js';
 import type { EventJournal } from './events.js';
 import { gearLabel } from './model-view.js';
-import { selectFood, selectThreat, threatRefusal, type DefensePolicy, type SurvivalTasks } from './survival-tasks.js';
+import { selectFood, selectThreat, threatRefusal, type BorrowedSurvivalTask, type DefensePolicy, type SurvivalTasks } from './survival-tasks.js';
+import { TOOLS } from './tool-registry.js';
+
+/** How often one task may be paused for eating or defense and carry on; the next interrupt stops it as before (docs/companion_state_design.md 8.4). */
+export const MAX_RESUMES = 2;
+/** What runs now that eating or defense has to make room beside: a server operation or a gathering, by its id and tool name. */
+export interface RunningWork { id: string; name: string }
+type Room = { kind: 'pause'; work: RunningWork; count: number } | { kind: 'wait' } | { kind: 'stop'; note?: string };
 
 export interface SurvivalPolicy extends DefensePolicy {
   autoEat: boolean; urgentFood: number; protectedItems: string[];
@@ -31,7 +38,50 @@ export class SurvivalReflexes {
     stopCurrent: (options?: StopOptions) => Promise<{ stopped: true }>; ordinaryBusy: () => boolean;
     /** The server guard is fighting for the followed player; the 3-block self-defense stays out of its way. */
     guarding?: () => boolean;
+    /** The one task running now that could pause for eating or defense (a server operation or a gathering); undefined when there is none. */
+    running?: () => RunningWork | undefined;
   }) {}
+  /** The task paused most recently and how often; one task runs at a time, so another id starts again from zero. */
+  private resumes?: { id: string; count: number };
+  /**
+   * How eating or defense makes room while something runs (8.4): pause a task that can carry on afterwards (tool-registry
+   * resumable, fewer than MAX_RESUMES times so far), wait while the survival lock is taken by that task's own step, or
+   * stop it as before.
+   */
+  private room(): Room {
+    if (!this.body.interrupt || !this.body.hello.capabilities.includes('task-interrupts')) return { kind: 'stop' };
+    const work = this.options.running?.();
+    if (!work || TOOLS.get(work.name)?.resumable !== true) return { kind: 'stop' };
+    const count = this.resumes?.id === work.id ? this.resumes.count : 0;
+    if (count >= MAX_RESUMES) return { kind: 'stop', note: `${work.name} 已经暂停后接着做过 ${MAX_RESUMES} 次，这次停下` };
+    if (this.tasks.read().state !== 'idle') return { kind: 'wait' };
+    return { kind: 'pause', work, count };
+  }
+  /**
+   * The meal or the defense inside an interrupt window, the task paused, then carrying on. undefined: the task cannot
+   * pause at this moment (NOT_PAUSABLE) or the survival lock was taken meanwhile; nothing was done.
+   */
+  private async paused(reason: InterruptReason, room: Extract<Room, { kind: 'pause' }>, check: () => void, run: (borrowed: BorrowedSurvivalTask) => Promise<Operation>): Promise<Operation | undefined> {
+    const { work, count } = room;
+    let onServer = false;
+    try {
+      const { value: operation, resumed } = await this.body.interrupt!(reason, async window => {
+        check();
+        if (this.tasks.read().state !== 'idle') throw new BodyError('BUSY', '生存任务正被占用');
+        onServer = !!window.paused; this.resumes = { id: work.id, count: count + 1 };
+        this.events.add('survival', `${reason === 'eat' ? '紧急进食' : '近距自卫'}：${work.name} 先暂停，${reason === 'eat' ? '吃完' : '打完'}接着做（第 ${count + 1} 次，同一件任务最多 ${MAX_RESUMES} 次）`);
+        const result = await run({ taskToken: window.taskToken, check });
+        // Unsure what the hand did: the task does not carry on with it; the stop also ends the window.
+        if (result.status === 'unknown') await this.options.stopCurrent();
+        return result;
+      });
+      if (operation.status !== 'unknown' && (onServer ? resumed : this.options.running?.()?.id === work.id)) this.events.add('survival', `${work.name} 接着做了`);
+      return operation;
+    } catch (error) {
+      if (error instanceof BodyError && ['NOT_PAUSABLE', 'BUSY'].includes(error.code)) return undefined;
+      throw error;
+    }
+  }
   read() {
     const { threats, dangers: _dangers, ...compactSensed } = this.sensed ?? {};
     return structuredClone({ revision: this.revision, armed: this.armed, phase: this.phase, ...this.policy, autoDefend: this.policy.autoDefend && this.defenseSupported(), defenseSupported: this.defenseSupported(), defendingEntityId: this.defenseTarget,
@@ -107,11 +157,14 @@ export class SurvivalReflexes {
         for (const [id, until] of this.cooling) if (until <= Date.now()) this.cooling.delete(id);
         const threat = selectThreat(state, this.cooling.size ? { ...this.policy, excludedEntityIds: [...this.policy.excludedEntityIds, ...this.cooling.keys()] } : this.policy);
         if (threat && Date.now() - (this.lastDefense?.endedAt ?? 0) >= 500) {
-          const busy = this.phase === 'eating' || this.options.ordinaryBusy();
+          // A meal of its own is cut short as before; any other work is paused when it can carry on afterwards (8.4).
+          const eating = this.phase === 'eating', busy = eating || this.options.ordinaryBusy();
+          const room: Room | undefined = !busy ? undefined : eating ? { kind: 'stop' } : this.room();
+          if (room?.kind === 'wait' && state.health > this.policy.lowHealth) { this.lastReason = 'waiting-for-pause'; return; }
           // Fence the old meal runner before cancel/stop, so a late result cannot change this defense.
           const defenseEpoch = ++this.epoch; this.phase = 'defending'; this.defenseTarget = threat.entityId;
-          this.lastReason = busy ? 'defense-preemption' : 'auto-defend';
-          void this.defend(defenseEpoch, threat, busy);
+          this.lastReason = room?.kind === 'pause' ? 'defense-pause' : busy ? 'defense-preemption' : 'auto-defend';
+          void this.defend(defenseEpoch, threat, room, state.health);
           return;
         }
       }
@@ -125,9 +178,11 @@ export class SurvivalReflexes {
       this.urgentReason = undefined;
       const busy = this.options.ordinaryBusy();
       if (busy && !choice.urgent) { this.lastReason = 'waiting-for-task-gap'; return; }
-      this.phase = 'eating'; this.lastReason = busy ? 'urgent-preemption' : 'auto-eat';
+      const room = busy ? this.room() : undefined;
+      if (room?.kind === 'wait' && state.health > this.policy.lowHealth) { this.lastReason = 'waiting-for-pause'; return; }
+      this.phase = 'eating'; this.lastReason = room?.kind === 'pause' ? 'urgent-pause' : busy ? 'urgent-preemption' : 'auto-eat';
       // Synchronous phase reservation blocks ordinary MCP writes before the first await.
-      void this.eat(epoch, busy);
+      void this.eat(epoch, room, state.health);
     } catch (error) {
       if (!(error instanceof BodyError) || !['CANCELLED', 'BUSY'].includes(error.code)) throw error;
     } finally { this.sensing = false; }
@@ -165,26 +220,42 @@ export class SurvivalReflexes {
     this.assertWritable();
     if (!this.defenseSupported()) throw new BodyError('UNSUPPORTED', '身体未声明原生自卫能力');
     this.authorizeAction(); const epoch = ++this.epoch; this.phase = 'defending';
-    try { return await this.defend(epoch, undefined, this.options.ordinaryBusy(), entityId); }
+    // Asked for now: a task that cannot pause at this moment is stopped as before, not waited for.
+    try { return await this.defend(epoch, undefined, this.options.ordinaryBusy() ? this.room() : undefined, Number.NEGATIVE_INFINITY, entityId); }
     finally { if (epoch === this.epoch && this.phase === 'defending') this.phase = 'idle'; }
   }
-  private async defend(epoch: number, threat?: Threat, preempt = false, entityId?: string): Promise<Operation> {
-    const sensedAt = this.sensed?.receivedAt, stopRequestedAt = preempt ? Date.now() : undefined;
-    let stopConfirmedAt: number | undefined;
+  /**
+   * room: what to do with the work running now (undefined: nothing runs). A paused task carries on afterwards; when it
+   * cannot pause at this moment, an automatic defense waits for the next tick while health is above the low line.
+   */
+  private async defend(epoch: number, threat: Threat | undefined, room: Room | undefined, health: number, entityId?: string): Promise<Operation> {
+    const sensedAt = this.sensed?.receivedAt;
+    let stopRequestedAt: number | undefined, stopConfirmedAt: number | undefined;
     const check = () => { if (epoch !== this.epoch || !this.armed) throw new BodyError('CANCELLED', '防卫被更新的策略或人工停止取消'); };
+    const request = () => ({ entityId: threat?.entityId ?? entityId, previouslyObserved: !!threat, policy: structuredClone(this.policy), check, sensedAt, stopRequestedAt, stopConfirmedAt });
     try {
-      if (preempt) {
-        // A plain stop: the work ends, the companion posture and protection stay and carry on by themselves.
-        await this.options.stopCurrent();
-        check(); stopConfirmedAt = Date.now();
-        this.events.add('survival', '近距自卫已停止原任务；保留已确认进度，结束后不会重放旧任务');
+      let operation = room?.kind === 'pause' ? await this.paused('defend', room, check, borrowed => this.tasks.defend(request(), borrowed)) : undefined;
+      if (!operation && room?.kind === 'pause' && threat && health > this.policy.lowHealth) {
+        this.lastReason = 'waiting-for-pause';
+        return { operationId: '', sessionId: this.body.hello?.sessionId ?? '', name: 'defend-self', status: 'cancelled', summary: '任务此刻不能暂停，下一拍再试' };
       }
-      check();
-      const operation = await this.tasks.defend({ entityId: threat?.entityId ?? entityId, previouslyObserved: !!threat, policy: structuredClone(this.policy), check, sensedAt, stopRequestedAt, stopConfirmedAt });
+      if (!operation) {
+        if (room) {
+          // A plain stop: the work ends, the companion posture and protection stay and carry on by themselves.
+          stopRequestedAt = Date.now();
+          await this.options.stopCurrent();
+          check(); stopConfirmedAt = Date.now();
+          this.events.add('survival', `近距自卫已停止原任务${room.kind === 'stop' && room.note ? `（${room.note}）` : ''}；保留已确认进度，结束后不会重放旧任务`);
+        }
+        check();
+        operation = await this.tasks.defend(request());
+      }
       if (epoch !== this.epoch) return operation;
       this.handledResult = operation.operationId; this.lastDefense = { entityId: threat?.entityId ?? entityId, endedAt: Date.now(), operation };
-      const repeated = this.defenseEvent?.entityId === (threat?.entityId ?? entityId) && Date.now() - this.defenseEvent!.at < 10000
-        && (operation.status === 'succeeded' || this.defenseEvent!.summary === operation.summary);
+      // No earlier event yet: an explicit defense without entityId would otherwise match the missing record's undefined id.
+      const last = this.defenseEvent;
+      const repeated = !!last && last.entityId === (threat?.entityId ?? entityId) && Date.now() - last.at < 10000
+        && (operation.status === 'succeeded' || last.summary === operation.summary);
       if (!threat || !repeated) {
         this.events.notifyOperation(operation); this.defenseEvent = { entityId: threat?.entityId ?? entityId, at: Date.now(), summary: operation.summary };
       }
@@ -210,16 +281,23 @@ export class SurvivalReflexes {
       if (epoch === this.epoch) { this.defenseTarget = undefined; if (this.phase === 'defending') this.phase = 'idle'; }
     }
   }
-  private async eat(epoch: number, preempt: boolean): Promise<void> {
+  /** room as in defend; an urgent meal also waits for a pausable moment while health is above the low line. */
+  private async eat(epoch: number, room: Room | undefined, health: number): Promise<void> {
+    const preempt = !!room;
+    const check = () => { if (epoch !== this.epoch || !this.armed) throw new BodyError('CANCELLED', '进食被更新的策略或人工停止取消'); };
     try {
-      if (preempt) {
-        // A plain stop: the work ends, the companion posture and protection stay and carry on by themselves.
-        await this.options.stopCurrent();
+      let operation = room?.kind === 'pause' ? await this.paused('eat', room, check, borrowed => this.tasks.eat({ policy: this.policy }, borrowed)) : undefined;
+      if (!operation && room?.kind === 'pause' && health > this.policy.lowHealth) { this.lastReason = 'waiting-for-pause'; return; }
+      if (!operation) {
+        if (room) {
+          // A plain stop: the work ends, the companion posture and protection stay and carry on by themselves.
+          await this.options.stopCurrent();
+          if (epoch !== this.epoch || !this.armed) return;
+          this.events.add('survival', `紧急进食已停止原任务${room.kind === 'stop' && room.note ? `（${room.note}）` : ''}；保留其已确认结果，吃完不会自动重放旧任务`);
+        }
         if (epoch !== this.epoch || !this.armed) return;
-        this.events.add('survival', '紧急进食已停止原任务；保留其已确认结果，吃完不会自动重放旧任务');
+        operation = await this.tasks.eat({ policy: this.policy });
       }
-      if (epoch !== this.epoch || !this.armed) return;
-      const operation = await this.tasks.eat({ policy: this.policy });
       if (epoch !== this.epoch) return;
       this.handledResult = operation.operationId;
       if (preempt || operation.status !== 'succeeded') this.events.notifyOperation(operation);

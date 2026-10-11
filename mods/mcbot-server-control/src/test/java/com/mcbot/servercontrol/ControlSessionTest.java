@@ -12,7 +12,8 @@ public final class ControlSessionTest {
         boolean exists,dead,savedDead;
         int creations,starts,stops,respawns;
         boolean immediate=true,postureCap;
-        boolean crashChat,crashStop,nearby,guardDuty;
+        boolean crashChat,crashStop,nearby,guardDuty,interrupts,window;
+        ControlSession.Operation paused;
         JsonObject guarding,posturing;int dutyClears,postureClears;
         int discoveries;
         final List<String> notices=new ArrayList<>();
@@ -24,7 +25,13 @@ public final class ControlSessionTest {
             exists=true;dead=false;savedDead=false;respawns++;
         }
         @Override public boolean leave() { if(!exists)return false;exists=false;dead=false;return true; }
-        @Override public JsonObject hello() { List<String> caps=new ArrayList<>(List.of("send-chat"));if(nearby)caps.add("nearby-blocks");if(guardDuty)caps.add("guard-duty-fenced");if(postureCap)caps.add("server-posture");return obj("capabilities",caps); }
+        @Override public JsonObject hello() { List<String> caps=new ArrayList<>(List.of("send-chat"));if(nearby)caps.add("nearby-blocks");if(guardDuty)caps.add("guard-duty-fenced");if(postureCap)caps.add("server-posture");if(interrupts)caps.add("task-interrupts");return obj("capabilities",caps); }
+        @Override public JsonObject interrupt(JsonObject p) {
+            if(string(p,"action").equals("begin")){window=true;paused=active;active=null;return obj("open",true);}
+            window=false;active=paused;paused=null;return obj("open",false);
+        }
+        @Override public boolean interruptOpen() { return window; }
+        @Override public ControlSession.Operation interruptPaused() { return paused; }
         @Override public JsonObject guard(JsonObject p) { guarding=p.has("off")?null:p;return obj("enabled",guarding!=null); }
         @Override public void clearDuty() { dutyClears++;guarding=null; }
         @Override public JsonObject posture(JsonObject p) { posturing=p.has("off")?null:p;return obj("state","following"); }
@@ -40,7 +47,7 @@ public final class ControlSessionTest {
             if(immediate)o.finish("succeeded","Done",null);else active=o;
         }
         @Override public void abort(ControlSession.Operation o) {if(active==o)stop();}
-        @Override public void stop() {stops++;if(crashStop)throw new IllegalStateException("Injected native cleanup failure");active=null;}
+        @Override public void stop() {stops++;if(crashStop)throw new IllegalStateException("Injected native cleanup failure");active=null;window=false;paused=null;}
     }
     private static final class Fixture {
         final FakeGame game=new FakeGame();
@@ -99,6 +106,33 @@ public final class ControlSessionTest {
         JsonObject again=f.claim("b");
         JsonObject fresh=f.auth(again);fresh.addProperty("postureRevision",1);fresh.addProperty("action","wait");
         check(f.session.call("posture",fresh).get("postureRevision").getAsLong()==1,"a new lease counts posture revisions from zero again");
+    }
+    /** The interrupt window (8.4): fenced by the generation, no operation ID; beside the paused operation only eating and defense steps start, one at a time. */
+    private static void interrupts() {
+        Fixture f=new Fixture();JsonObject claim=f.claim("a");f.game.immediate=false;
+        JsonObject move=f.act(claim,UUID.randomUUID().toString(),"move-to-position");
+        f.session.call("act",move);ControlSession.Operation walking=f.game.active;
+        JsonObject begin=f.auth(claim);begin.add("controlGeneration",claim.get("controlGeneration"));begin.addProperty("action","begin");begin.addProperty("reason","eat");
+        errorCode("UNSUPPORTED",()->f.session.call("interrupt",begin));
+        f.game.interrupts=true;
+        JsonObject stale=begin.deepCopy();stale.addProperty("controlGeneration",f.session.generation()+1);
+        errorCode("STALE_CONTROL",()->f.session.call("interrupt",stale));
+        budget(f.session.call("interrupt",begin),1,"opening a window uses no operation ID");
+        check(f.game.paused==walking&&walking.status.equals("running"),"the paused operation keeps running");
+        errorCode("BUSY",()->f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"dig-block")));
+        JsonObject select=f.act(claim,UUID.randomUUID().toString(),"select-slot");
+        check(f.session.call("act",select).get("status").getAsString().equals("running"),"an eating step starts beside the paused operation");
+        errorCode("BUSY",()->f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"eat-item")));
+        check(f.session.call("act",f.act(claim,UUID.randomUUID().toString())).get("status").getAsString().equals("running"),"chat still goes out inside a window");
+        check(f.session.stepsRunning(walking)&&f.session.cancelSteps(walking,"closed"),"a step left running is found and cancelled");
+        check(!f.session.stepsRunning(walking)&&walking.status.equals("running")&&f.session.running().contains("move-to-position"),"cancelling steps leaves the paused operation running");
+        JsonObject end=f.auth(claim);end.add("controlGeneration",claim.get("controlGeneration"));end.addProperty("action","end");
+        f.session.call("interrupt",end);
+        errorCode("BUSY",()->f.session.call("act",f.act(claim,UUID.randomUUID().toString(),"select-slot")));
+        f.session.call("interrupt",begin);
+        long before=f.session.generation();f.session.call("stop",f.auth(claim));
+        check(!f.game.window&&walking.status.equals("cancelled")&&f.session.generation()==before+1,"a stop ends the window and the paused operation with it");
+        errorCode("STALE_CONTROL",()->f.session.call("interrupt",begin));
     }
     public static void main(String[] ignored) throws Exception {
         Fixture f=new Fixture();
@@ -301,13 +335,14 @@ public final class ControlSessionTest {
         check(TargetTokens.validContext(container,"s",4,"minecraft:overworld",1)&&!TargetTokens.validContext(container,"s",5,"minecraft:overworld",1),"container tokens hold for their own generation only");
         check(!TargetTokens.validContext(container,"other",4,"minecraft:overworld",1)&&!TargetTokens.validContext(container,"s",4,"minecraft:the_nether",1)&&!TargetTokens.validContext(container,"s",4,"minecraft:overworld",100),"session, dimension and expiry invalidate container tokens");
         posture();
+        interrupts();
         System.out.println("ControlSessionTest: "+checks+" checks passed");
         LocalHttpBridgeTest.run();
         ExactNbtTest.run();
         InteractionObservationTest.run();
         ApproachSafetyTest.run();
         SlotClickRulesTest.run();
-        FollowCompanionTest.run();PostureTest.run();BodyTaskTest.run();
+        FollowCompanionTest.run();PostureTest.run();BodyTaskTest.run();TaskInterruptTest.run();
         ResourcePickupTest.run();
         CompanionMiningTest.run();
         CompanionPickupTest.run();

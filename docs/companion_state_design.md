@@ -487,7 +487,7 @@ interface BodyTask extends GuardDuty.Pausable {
   - 停止时，拾取任务的 `stop()` 挪到了 `posture.interrupt()` 之前，两者互不依赖。
   - 有操作在跑、却既没有任务也没有手势时（实际走不到这里），改为直接以 failed 收尾。原来会落进走路代码，因空指针以 failed 收尾。
 
-### 8.4 4a：进食／自卫打断后续做（服务端暂停，约 2 天）
+### 8.4 4a：进食／自卫打断后续做（服务端暂停，约 2 天；10-11 完成，见本节末尾）
 
 **规则**：自动自卫、紧急进食、`defend-self` 打断一件可续做的任务时：
 - 任务**暂停**，不取消；
@@ -541,6 +541,17 @@ interface BodyTask extends GuardDuty.Pausable {
   - 采集在下一步之前停住、期限顺延；
   - `unknown` 时取消；
   - 叫停时窗口一起取消。
+
+**2026-10-11 完成（离线）**。Java `gradlew check assemble` 全过（新增 `TaskInterruptTest` 12 项，`ControlSessionTest` 加窗口用例）；运行端 491 项（新增 `task-interrupts.test.mjs` 11 项）、`mcp-server` 726 项（另有 1 项跳过）通过。没有跑隔离服，也没有进游戏。协议写在[打断窗口](server_body_protocol.md#打断窗口8m-第四步-4a2026-10-11)。和上面设计的出入：
+- 服务端新增 `TaskInterrupt`（窗口的纯逻辑：能不能开、步骤名单、超时）。窗口开着时，被暂停的操作和任务从任务槽搬进窗口，任务槽空出来给打断步骤用（`retreat-from-entity` 要占槽）；关窗口时再搬回来。所以“在槽上加一个 `paused` 标记”变成了“槽搬进窗口”。
+- `ControlSession` 的 BUSY 规则改成：不算被暂停的那个操作；窗口开着时只放行 `TaskInterrupt.STEPS`。`interrupt` 方法也要 `controlGeneration`，叫停前发出的 `begin` 不会暂停叫停后的任务。
+- 只有 `ServerController.stop()`（会话取消时调用）连窗口一起清；操作自己结束、`abort` 改用 `stopBody`，不动窗口。
+- 运行端 `Body.interrupt` 返回 `{value, resumed}`；`resumed` 是服务端有没有把被暂停的操作接上，用来决定发不发“接着做了”。窗口时长直接计入 `fightMs()`（窗口开着时实时增长），`FightGrace` 不用改。
+- 运行端多了一种“等”：采集自己的生存步骤（换工具、两块之间吃东西）占着生存锁时，不开窗口，下一拍再试；低血线规则同 `NOT_PAUSABLE`。
+- 明确的 `defend-self` 遇到 `NOT_PAUSABLE` 不等，照旧取消再打：这是模型或玩家现在就要的。
+- 正在自动进食（可能就在窗口里）时来了怪，自卫照旧 `stop` 抢先，被暂停的任务也一起取消。这种情况少见，没有为它做“窗口里先吃后打”。
+- 工具说明只改了 `defend-self`、`set-reflexes`（按能力加一句，列出的任务名从 `tool-registry.json` 取）；建筑、种地等任务的说明里本来就没写“会被取消”，没动。游戏指令（`scripts/companion.mjs`）那一行改成先暂停、最多两次。
+- 顺手修了一个旧错误：`defend-self` 不带 `entityId`、而且之前从没发过自卫事件时，读 `this.defenseEvent!.at` 会抛 `TypeError`，自卫被当成失败并停用本能。
 
 ### 8.5 4d 运行端：一个调度器（约 2～3 天）
 

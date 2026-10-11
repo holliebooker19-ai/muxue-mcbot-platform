@@ -76,6 +76,8 @@ export class GatherTasks {
   useSurvival(tasks: SurvivalTasks, policy: () => SurvivalPolicy & { armed: boolean; revision: number }): void { this.survival = tasks; this.survivalPolicy = policy; }
   operation(id: string): Operation | undefined { const op = this.operations.get(id); return op && structuredClone(op); }
   assertIdle(): void { if (this.active) throw new BodyError('BUSY', '有限采集任务正在运行，请先完成或叫停'); }
+  /** The gathering running now on its own lock (not a companion errand's child), by its id and tool name; undefined otherwise. */
+  current(): { id: string; name: Name } | undefined { return this.active && !this.active.borrowed && !this.active.cancelled ? { id: this.active.id, name: this.active.name } : undefined; }
   cancel(): void { ++this.epoch; this.references.clear(); if (this.active) { this.active.cancelled = true; this.active.stopPending = true; } }
   /** Only release the shared write token after the independent body stop was confirmed. */
   stopped(): void {

@@ -26,6 +26,7 @@
 | stop | `{instanceId,sessionId,leaseId,clearGuard?,guardRevision?,stepAside?}` | `{stopped:true,controlGeneration}`；取消当前操作、推进代次、角色保持在线，旧代次 act 拒绝；`guard-duty-fenced`支持`clearGuard:true`连同必填`guardRevision`在同一请求中清保护（停止本身从不因序号被拒，序号已被更新的设置超过时只停不清）；省略则保留保护意图；`step-aside-stop`支持`stepAside:true`（跟随让开，之前发现的目标继续有效，见[跟随让开、自卫失败、没武器](#跟随让开自卫失败没武器试玩反馈修正)）；`server-posture`支持`clearPosture:true`连同必填`postureRevision`，同一请求里清姿态，规则同`clearGuard`（8m 第二步约定，届时删掉`stepAside`） |
 | guard | `{instanceId,sessionId,leaseId,guardRevision,player?,expectedEntityId?,options?,off?}` | `guard-duty-fenced`保护配置；开启返回保护状态和`guardRevision`，关闭返回`{enabled:false,guardRevision}`；不占操作 ID 预算，见常驻保护一节 |
 | posture | `{instanceId,sessionId,leaseId,postureRevision,action?,player?,expectedEntityId?,distance?,wander?,off?}` | `server-posture`陪伴姿态（跟随／等待）；不是操作，不占操作 ID 预算，见[陪伴姿态](#陪伴姿态8m-第二步约定2026-10-11)（**约定，尚未实现**） |
+| interrupt | `{instanceId,sessionId,leaseId,controlGeneration,action:"begin"\|"end",reason?}` | `task-interrupts`打断窗口：`begin`（`reason`为`eat`或`defend`）暂停正在跑的任务去进食或自卫，回`{open:true,reason,paused:{operationId,name}\|null}`，此刻不能暂停报`NOT_PAUSABLE`；`end`让任务接着做，回`{open:false,resumed,pausedMs?,operationId?}`。不是操作，不占操作 ID 预算，见[打断窗口](#打断窗口8m-第四步-4a2026-10-11) |
 | release | `{instanceId,sessionId,leaseId}` | `{released:true}`；仅停止并放弃这一份控制权，角色保留；旧 lease 不能影响新 lease |
 | revoke | `{instanceId,sessionId,leaseId,stopToken,leave?}` | `{stopped:true,revoked:true,left}`；宿主专用，仅撤销指定租约，角色默认保留；不能接管／移动，不续租。已释放的匹配旧租约可幂等确认，但绝不影响新租约。`leave:true`（宿主退出时用）同时让角色像玩家一样下线（原版存档），只在没有别的租约时生效，`left`说明这次是否真的下线；下次 claim 在原地重新上线 |
 | watch | `{instanceId,sessionId,leaseId,stopToken}` | `{chat,chatCursor}`；宿主只读新聊天，用于 MCP 不响应时直接叫停，不续租、不创建角色。也接受同 instance/session 下最近已撤销／释放／过期的租约，前提没有不同的新有效租约；新 claim 或角色代次变化即使旧 watch 失效。chat 格式同 Observation |
@@ -547,6 +548,30 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - 姿态是`seated`时，走回座位坐下；
 - 没有姿态时，照旧走回原地。
 保护接管身体的条件里，“在跑的是`follow-companion`”换成“没有操作在跑、由姿态驱动”。
+
+### 打断窗口（8m 第四步 4a，2026-10-11）
+
+能力标记`task-interrupts`。设计见[陪伴状态设计](companion_state_design.md) 8.4。自动进食、近身自卫、`defend-self`以前要先`stop`取消正在跑的任务；有了这个能力，可续做的任务改为**暂停**，吃完或打完接着做，模型那次工具调用照常等它的结果。
+
+**方法`interrupt`**（要租约，校验 instance／session／lease，并且`controlGeneration`必须是当前代次，否则`STALE_CONTROL`；不是操作，不占操作 ID 预算）：
+- `{action:"begin", reason:"eat"|"defend"}`：开窗口。能开的时刻和常驻保护接管身体的时刻完全一样（`ServerController.dutyMayInterrupt`）：没有生存动作（进食、挖掘、自卫）、原生写入、睡觉、打开的界面、使用中的物品，并且身体空着，或者正在跑的任务此刻能停（见上面「保护打断任务」的表）。保护正在打或正在走回原位时也不能开。开不了报`NOT_PAUSABLE`，消息说明原因，什么都没改。已经开着时报`BUSY`。
+  - 回执`{open:true, reason, paused}`：`paused`是被暂停的操作`{operationId, name}`，身体空着时为 null。
+- `{action:"end"}`：关窗口。还有打断步骤在跑时先把它取消（`cancelled`），再让被暂停的任务从身体所在处重新寻路、接着做；暂停的时长加到它的期限上，和保护打架共用同一份顺延额度（合起来最多再加一倍原期限）。被暂停的操作已经结束（例如被取消）时不接着做。回执`{open:false, resumed, pausedMs, operationId?}`；窗口已经关了时回`{open:false, resumed:false}`。
+
+**窗口开着时**：
+- 被暂停的操作仍是`running`，`operation`查询照常；任务不 tick，身体停下。姿态照旧让开（仍有操作在跑）。
+- 会话只放行打断用的几步，一次一步：`select-slot`、`swap-inventory`、`eat-item`、`defend-entity`、`retreat-from-entity`（`TaskInterrupt.STEPS`，就是运行端吃东西和自卫时实际发的）；别的操作报`BUSY`，`send-chat`照常。
+- 常驻保护不在窗口里开打，等窗口关了再说（和它等吃完饭一样）。
+- `stop`（任何一次）、租约结束连同窗口和被暂停的任务一起取消。
+- 超过`ControlSession.TTL_MS`（10 秒，和租约“控制者失联”同一个时长）没有任何打断步骤在跑时（运行端出了问题），服务端自己关窗口，让任务接着做。
+
+**运行端**（`ServerBody.interrupt(reason, work)`）：先发`begin`，再用窗口令牌跑`work`（吃或打的那几步带这个令牌，绕过被暂停的操作和任务锁），最后发`end`。持有任务锁的那件任务（运行端一步一步发操作的采集）在`act()`里等窗口关了再发下一步，不报错；等的时候被叫停，这一步不发（`CANCELLED`）。窗口时长计入`Body.fightMs()`，所以采集的期限同样顺延。`NOT_PAUSABLE`是可恢复的错误，不丢租约。
+- `SurvivalReflexes`决定暂停还是取消：正在跑的是可续做的任务（`tool-registry.json`里`resumable`：`build`、`tend-crops`、`breed-animals`、`hunt`、`travel-to`、`go-to-place`、`gather-resources`、`collect-items`），并且这件任务还没续做满 2 次（`MAX_RESUMES`，运行端按服务端操作的`operationId`或采集任务 id 记）时走窗口，事件里说“先暂停，吃完／打完接着做（第 n 次）”，接着做了再发一条。
+- 此刻不能暂停（`NOT_PAUSABLE`），或采集自己的生存步骤（换工具、两块之间吃东西）正占着生存锁：自动进食和自卫这一拍先不做，下一拍再试；血量降到`lowHealth`（自卫的低血线）还在等时，照旧`stop`取消任务再处理。明确的`defend-self`不等，照旧取消。
+- 不可续做的任务、已经续做满 2 次的、陪挖陪捡的子任务、容器任务等：照旧`stop`取消，事件里说明。正在自动进食时来了怪，自卫照旧`stop`抢先（连同被暂停的任务一起取消）。
+- 窗口里吃或打的结果是`unknown`：先`stop`取消任务（窗口随之关闭，任务不会接着做），再像原来一样停用本能。
+
+**验证范围**：离线——Java `TaskInterruptTest`（能开／不能开、窗口步骤名单、超时自关、和保护共用顺延额度）、`ControlSessionTest`（代次屏障、不占操作 ID、窗口里只放行打断步骤且一次一步、取消残留步骤、`stop`连窗口一起结束）；运行端`task-interrupts.test.mjs`（协议、令牌、任务锁持有者等窗口、窗口里叫停、暂停续做和第 3 次取消、不可续做照旧取消、`NOT_PAUSABLE`等待和低血取消、`unknown`先停）。**没有**隔离服或真实游戏验证：真实任务被暂停后从身体所在处重新寻路、`ServerController`的暂停和恢复（任务槽搬进窗口再搬回来）、窗口里`retreat-from-entity`占用任务槽，只经过编译和上述逻辑测试。
 
 ## 手持物品使用（2026-10-06）
 

@@ -210,6 +210,9 @@ export const PICKUP_TIMEOUT_MS = { min: 500, max: 30000 } as const;
 /** assess-armour: per candidate stack in the main inventory, whether wearing it improves on what is worn (decided server-side). */
 export interface ArmourCandidate { slot: number; item: string; count: number; part: 'head' | 'chest' | 'legs' | 'feet' | 'offhand'; verdict: 'better' | 'not-better' | 'blocked'; reason: string; wearing?: string }
 export interface ArmourAssessment { candidates: ArmourCandidate[] }
+export type InterruptReason = 'eat' | 'defend';
+/** An open interrupt window: its steps go out with taskToken; paused is the server operation it paused, absent when none was running. */
+export interface InterruptWindow { taskToken: string; paused?: { operationId: string; name: string } }
 export interface Body {
   readonly hello: BodyHello;
   observe(block?: Position): Promise<Observation>;
@@ -225,8 +228,13 @@ export interface Body {
   setGuard?(request: GuardDutyRequest): Promise<GuardDutyState | { enabled: false }>;
   /** Set the standing companion posture (follow, wait) or clear it (capability server-posture). Not an operation; a plain stop keeps it, an operation makes it give way by itself. */
   setPosture?(request: PostureRequest): Promise<PostureState | { posture: null }>;
-  /** ServerBody: total milliseconds guard duties held the body for fights so far, as of the last observation (only grows). */
+  /**
+   * ServerBody: total milliseconds the body was away from its tasks so far (only grows): guard fights as of the last
+   * observation, plus interrupt windows (task-interrupts) as they pass.
+   */
   fightMs?(): number;
+  /** ServerBody (task-interrupts): eat or defend with the running task paused, not cancelled; see ServerBody.interrupt. */
+  interrupt?<T>(reason: InterruptReason, work: (window: InterruptWindow) => Promise<T>): Promise<{ value: T; resumed: boolean }>;
   acquireTask?(taskToken: string): void;
   releaseTask?(taskToken: string): void;
   operation(operationId: string): Promise<Operation>;

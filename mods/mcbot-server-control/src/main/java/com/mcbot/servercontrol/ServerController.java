@@ -30,7 +30,7 @@ import java.util.function.Consumer;
 import static com.mcbot.servercontrol.Protocol.*;
 
 final class ServerController implements ControlSession.Game {
-    static final List<String> CAPABILITIES=List.of("send-chat","look-at","move-to-position","follow-player","dig-block","place-block","open-container","click-slot","close-container","select-slot","drop-item","nearby-blocks","nearby-resources","approach-container","approach-player","approach-resource","pickup-item","companion-pickup","companion-mining","swap-inventory","eat-item","equip-item","survival-state","assess-tool","defend-entity","retreat-from-entity","navigation-3d","look-around","pillar-up","sleep-in-bed","wake-up","craft-item","smelt-item","travel-to","workstation-options","produce-item","modify-item","tend-crops","breed-animals","hunt","use-bucket","emote","set-appearance","build","machine-items","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","sit","stand-up","server-posture");
+    static final List<String> CAPABILITIES=List.of("send-chat","look-at","move-to-position","follow-player","dig-block","place-block","open-container","click-slot","close-container","select-slot","drop-item","nearby-blocks","nearby-resources","approach-container","approach-player","approach-resource","pickup-item","companion-pickup","companion-mining","swap-inventory","eat-item","equip-item","survival-state","assess-tool","defend-entity","retreat-from-entity","navigation-3d","look-around","pillar-up","sleep-in-bed","wake-up","craft-item","smelt-item","travel-to","workstation-options","produce-item","modify-item","tend-crops","breed-animals","hunt","use-bucket","emote","set-appearance","build","machine-items","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","sit","stand-up","server-posture","task-interrupts");
     private final MinecraftServer server;
     private final ServerConfig config;
     final ControlSession session;
@@ -58,6 +58,8 @@ final class ServerController implements ControlSession.Game {
      * null for an emote gesture (BodyEmotes drives it) and for the native actions SurvivalActions runs.
      */
     private BodyTask task;
+    /** An open interrupt window: the paused operation and task wait in it while eating or defense steps use the slot (8.4). */
+    private TaskInterrupt window;
     private final SubjectRefs subjectRefs=new SubjectRefs();
     private int lastDriveTick=Integer.MIN_VALUE;
     private final Consumer<net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post> damageListener=this::receiveDamage;
@@ -357,9 +359,48 @@ final class ServerController implements ControlSession.Game {
      * done). Eating, digging, an open menu, a scaffold, a bed, a gesture or a retreat keep the body until they end.
      */
     private boolean dutyMayInterrupt() {
-        if(!GuardDuty.bodyFree(survival!=null&&survival.busy(),nativeWriteInProgress(),player.isSleeping(),player.isUsingItem(),dutyDrove,player.containerMenu!=player.inventoryMenu)) return false;
+        // Eating or defending in an interrupt window comes first, as with any meal; the guard waits for the window to close.
+        if(window!=null||!bodyFree()) return false;
         if(active==null) return true;
         return task!=null&&task.interruptible();
+    }
+    private boolean bodyFree(){return GuardDuty.bodyFree(survival!=null&&survival.busy(),nativeWriteInProgress(),player.isSleeping(),player.isUsingItem(),dutyDrove,player.containerMenu!=player.inventoryMenu);}
+    @Override public boolean interruptOpen(){return window!=null;}
+    @Override public ControlSession.Operation interruptPaused(){return window==null?null:window.paused;}
+    /**
+     * begin: pause what runs for eating or defense, at the same moments the guard may take the body (else NOT_PAUSABLE);
+     * the operation stays running and the slot is free for the steps. end: give it the body back.
+     */
+    @Override public JsonObject interrupt(JsonObject params) {
+        String action=string(params,"action");
+        if(action.equals("end")) return closeInterrupt("Interrupt window closed");
+        if(!action.equals("begin")) throw error("INVALID_ARGUMENT","action must be begin or end");
+        String reason=string(params,"reason");
+        if(!TaskInterrupt.REASONS.contains(reason)) throw error("INVALID_ARGUMENT","reason must be eat or defend");
+        if(window!=null) throw error("BUSY","An interrupt window is already open");
+        String refusal=TaskInterrupt.refusal(dutyDrove,bodyFree(),active!=null,task!=null&&task.interruptible());
+        if(refusal!=null) throw error("NOT_PAUSABLE",refusal);
+        window=new TaskInterrupt(reason,active,task,now());
+        active=null;task=null;player.stopInput();
+        JsonObject paused=window.paused==null?null:obj("operationId",window.paused.id,"name",window.paused.name);
+        return obj("open",true,"reason",reason,"paused",paused);
+    }
+    /**
+     * The window ends (end, or no step for the lease TTL): a step still running is cancelled first, then the paused task
+     * plans its way again and gets the paused time added to its limit, unless its operation ended meanwhile.
+     */
+    private JsonObject closeInterrupt(String why) {
+        TaskInterrupt open=window;
+        if(open==null) return obj("open",false,"resumed",false);
+        window=null;
+        if(session.cancelSteps(open.paused,why)) stopBody(false);
+        long pausedMs=open.pausedMs(now());
+        boolean resumed=open.paused!=null&&session.mayDrive(open.paused);
+        if(resumed) { active=open.paused; task=open.task; task.resumeAfterGuard(pausedMs); }
+        else if(open.task!=null) open.task.stop();
+        JsonObject result=obj("open",false,"resumed",resumed,"pausedMs",pausedMs);
+        if(open.paused!=null) result.addProperty("operationId",open.paused.id);
+        return result;
     }
     /** The fight is over: what was paused plans its way again; only the operation that was paused gets the time back. */
     private void resumeAfterFight(long fightMs) {
@@ -540,7 +581,7 @@ final class ServerController implements ControlSession.Game {
         }
         if(operation.name.equals("look-at")) { look(point(args)); operation.finish("succeeded","Server view rotated",null); return; }
         if(operation.name.equals("approach-container")||operation.name.equals("approach-player")||operation.name.equals("approach-resource")) { beginApproach(operation);return; }
-        if(operation.name.equals("pickup-item")) {PickupItem pickup=PickupItem.create(operation,player,session,survival,resources);task=pickup;active=operation;pickup.tick();if(!operation.status.equals("running"))stop();return;}
+        if(operation.name.equals("pickup-item")) {PickupItem pickup=PickupItem.create(operation,player,session,survival,resources);task=pickup;active=operation;pickup.tick();if(!operation.status.equals("running"))stopBody(true);return;}
         if(operation.name.equals("retreat-from-entity")){beginRetreat(operation);return;}
         if(operation.name.equals("pillar-up")){requireWalkable();task=NativePillar.begin(operation,player,session,survival);active=operation;return;}
         if(operation.name.equals("craft-item")||operation.name.equals("smelt-item")) {
@@ -608,7 +649,7 @@ final class ServerController implements ControlSession.Game {
         WalkTask walk=new WalkTask(operation,timeout,true);walk.followed=followed;
         task=walk;active=operation;
     }
-    static boolean atomicAction(String name){return (CAPABILITIES.contains(name)||ItemInteractions.capabilities().contains(name))&&!Set.of("nearby-blocks","nearby-resources","companion-pickup","companion-mining","survival-state","assess-tool","navigation-3d","look-around","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","server-posture").contains(name);}
+    static boolean atomicAction(String name){return (CAPABILITIES.contains(name)||ItemInteractions.capabilities().contains(name))&&!Set.of("nearby-blocks","nearby-resources","companion-pickup","companion-mining","survival-state","assess-tool","navigation-3d","look-around","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","server-posture","task-interrupts").contains(name);}
     @Override public boolean nativeWriteInProgress(){return SurvivalActions.nativeWriteInProgress(player);}
     void beforePhysics(BodyPlayer body) {
         if(body!=player) { body.stopInput(); return; }
@@ -619,11 +660,13 @@ final class ServerController implements ControlSession.Game {
         lastDriveTick=server.getTickCount();postureDrove=false;
         if(survival!=null) survival.tick();
         emotes.tick(now());
+        if(window!=null&&window.expired(session.stepsRunning(window.paused),now())) closeInterrupt("No eating or defense step came within the lease time");
         // The guard first, then a running operation, then the posture (docs/server_body_protocol.md, 陪伴姿态).
         if(duty!=null&&tickDuty(body)) return;
         if(posture!=null&&tickPosture()) return;
         if(active==null) { body.stopInput(); idleGaze(body); return; }
-        if(!session.mayDrive(active)) { stop(); return; }
+        // A lost lease already stopped everything (the session cancels through stop()); this only ends the one operation.
+        if(!session.mayDrive(active)) { stopBody(true); return; }
         if(task!=null) { tickTask(task); return; }
         if(emotes.gesturing()){
             JsonObject result=emotes.gestureResult();
@@ -645,7 +688,7 @@ final class ServerController implements ControlSession.Game {
             finish(end.status(),end.summary(),end.result());
             return;
         }
-        if(active!=null&&!active.status.equals("running"))stop();
+        if(active!=null&&!active.status.equals("running"))stopBody(true);
     }
     /** Head movement only while nothing aims the body: no action and the posture standing still. */
     private void idleGaze(BodyPlayer body){
@@ -851,10 +894,14 @@ final class ServerController implements ControlSession.Game {
         if(active!=null) active.finish(status,summary,result);
         stopBody(!quiet);
     }
-    @Override public void stop() { stopBody(true); }
+    /** Everything ends: the running operation, and a task paused in an interrupt window with it. */
+    @Override public void stop() {
+        TaskInterrupt open=window; window=null;
+        try { stopBody(true); } finally { if(open!=null&&open.task!=null) open.task.stop(); }
+    }
     /** Ends the running action. The posture waits RESUME_AFTER_MS before it drives again, unless the action ended normally and left it alone (finish). */
     private void stopBody(boolean postureTail) { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;active=null;emotes.cancelGesture(player);BodyTask ended=task;task=null;if(ended!=null)ended.stop(); if(posture!=null&&postureTail) posture.interrupt(); if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
-    @Override public void abort(ControlSession.Operation operation) { if(active==operation) stop();else if(survival!=null) survival.abort(operation); }
+    @Override public void abort(ControlSession.Operation operation) { if(active==operation) stopBody(true);else if(survival!=null) survival.abort(operation); }
     @Override public boolean leave() {
         if(player==null)return false;
         remove();return true;
