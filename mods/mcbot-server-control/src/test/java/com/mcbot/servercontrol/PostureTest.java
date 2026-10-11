@@ -65,16 +65,18 @@ final class PostureTest {
             JsonObject act=auth.deepCopy();act.addProperty("operationId",UUID.randomUUID().toString());
             act.addProperty("controlGeneration",session.generation());act.addProperty("name",name);act.add("args",obj());return session.call("act",act);
         }
-        void finish() {active.finish("succeeded","Done",null);stop();}
-        /** One tick in ServerController.beforePhysics order; true when the posture drove. */
+        /** The operation ends normally: as ServerController.finish, a KEEPS or HOLDS action leaves the posture alone; any other ends through stop. */
+        void finish() {boolean quiet=posture!=null&&posture.endsQuietly(active.name);active.finish("succeeded","Done",null);if(quiet)active=null;else stop();}
+        /** One tick in ServerController.tickPosture order (after the guard); true when the posture drove. */
         boolean tick(long elapsed) {
             terrain.time.addAndGet(elapsed);session.call("heartbeat",auth);
             if(posture==null){terrain.physics();return false;}
             if(fighting){posture.guarding();wasFighting=true;terrain.physics();return false;}
             if(wasFighting){wasFighting=false;posture.resumeAfterGuard();}
             Posture current=posture;
-            String running=current.yieldTo(session.running(),animating);
-            boolean drove=current.tick(running);
+            List<String> running=session.running();
+            String yielded=current.yieldTo(running,animating);
+            boolean drove=current.tick(yielded,current.holdsFor(running));
             if(current.ended())posture=null;
             terrain.physics();return drove;
         }
@@ -143,7 +145,75 @@ final class PostureTest {
         f.session.call("release",f.auth);
         check(f.posture==null,"releasing the lease drops the posture");
         seated();
+        gestures();
         System.out.println("PostureTest: "+checks+" checks passed");
+    }
+    /**
+     * Step 3 (companion_state_design.md): a built-in gesture makes the posture stand still without a pause tail, look-at keeps
+     * driving, an add-on animation and other actions keep the pause as before. Every case goes through session.call and tick.
+     */
+    private static void gestures() {
+        // 1. A gesture while walking: the body stops for it, never reads as suspended, and walks again the tick it ends.
+        Fixture walk=new Fixture();walk.follow();
+        check(walk.tick(50)&&walk.terrain.input!=null,"walking toward the player before the gesture");
+        walk.immediate=false;walk.act("emote");
+        int moves=walk.terrain.moves;
+        for(int i=0;i<10;i++) check(!walk.tick(50)&&walk.state().equals("following")&&walk.terrain.input==null&&!walk.posture.json().has("suspendedFor")&&!walk.posture.json().has("resumeInMs"),"a gesture playing: the follow stands still, never suspended, no pause");
+        check(walk.terrain.moves==moves,"while the gesture plays the follow never walks");
+        walk.finish();
+        check(walk.tick(50)&&walk.state().equals("following")&&walk.terrain.input!=null,"the gesture ended: walks again on the very next tick, no pause");
+        // A guard fight during a gesture: the guard takes the body first; afterwards the gesture still holds, never guarding or suspended.
+        Fixture fight=new Fixture();fight.follow();fight.tick(50);
+        fight.immediate=false;fight.act("emote");
+        fight.fighting=true;
+        check(!fight.tick(50)&&fight.state().equals("guarding")&&fight.terrain.input==null,"guard fights during a gesture: guarding, the follow stands aside");
+        fight.fighting=false;
+        check(!fight.tick(50)&&fight.state().equals("following")&&fight.terrain.input==null,"fight over while the gesture still plays: following, standing still, not guarding");
+        fight.finish();
+        check(fight.tick(50)&&fight.state().equals("following"),"gesture ended after the fight: follows at once");
+        // 2. A gesture while waiting or seated: nothing changes, no state flicker, no pause.
+        Fixture waiting=new Fixture();
+        JsonObject wait=waiting.auth.deepCopy();wait.addProperty("action","wait");waiting.set(wait);
+        check(!waiting.tick(50)&&waiting.state().equals("waiting"),"waiting before the gesture");
+        waiting.immediate=false;waiting.act("emote");
+        check(!waiting.tick(50)&&waiting.state().equals("waiting")&&!waiting.posture.json().has("resumeInMs"),"waiting while a gesture plays: still waiting, never suspended");
+        waiting.finish();
+        check(!waiting.tick(50)&&waiting.state().equals("waiting")&&!waiting.posture.json().has("resumeInMs"),"waiting after the gesture: unchanged, nothing pending");
+        Fixture seat=new Fixture();BlockPos chair=new BlockPos(3,1,3);
+        seat.seated=true;seat.posture=Posture.seated(chair,0,seat.view());
+        seat.immediate=false;seat.act("emote");
+        check(!seat.tick(50)&&seat.state().equals("seated")&&seat.seated&&!seat.standUps,"seated while a gesture plays: still seated, no stand-up");
+        seat.finish();
+        check(!seat.tick(50)&&seat.state().equals("seated")&&seat.seated&&!seat.standUps,"seated after the gesture: still seated");
+        // 3. An add-on animation: unchanged; it outlives its operation, and the posture waits for it and then the usual pause.
+        Fixture addon=new Fixture();addon.follow();addon.tick(50);
+        addon.act("emote");addon.animating=true;
+        check(!addon.tick(50)&&addon.state().equals("suspended")&&addon.posture.json().get("suspendedFor").getAsString().equals("emote"),"add-on animation playing: suspended for emote");
+        addon.animating=false;
+        check(!addon.tick(50)&&addon.state().equals("suspended")&&addon.posture.json().get("resumeInMs").getAsLong()>0,"animation over: the 3-second pause runs");
+        addon.terrain.time.addAndGet(Posture.RESUME_AFTER_MS);
+        check(addon.tick(50)&&addon.state().equals("following"),"RESUME_AFTER_MS after the animation: follows again");
+        // 4. look-at keeps driving, whether it is still running or already finished (the server finishes it at once).
+        Fixture look=new Fixture();look.follow();look.tick(50);
+        look.immediate=false;look.act("look-at");
+        check(look.tick(50)&&look.state().equals("following")&&look.terrain.input!=null&&!look.posture.json().has("suspendedFor"),"look-at running: the follow keeps walking, never suspended");
+        look.finish();
+        check(look.tick(50)&&look.state().equals("following"),"look-at ended: the follow keeps driving with no pause");
+        look.immediate=true;look.act("look-at");
+        check(look.tick(50)&&look.state().equals("following"),"look-at finished at once: the follow keeps driving");
+        // 5. Another real action, or an explicit stop during a gesture: the pause as before.
+        Fixture move=new Fixture();move.follow();move.tick(50);
+        move.immediate=false;move.act("move-to-position");
+        check(!move.tick(50)&&move.state().equals("suspended")&&move.posture.json().get("suspendedFor").getAsString().equals("move-to-position"),"move-to-position: suspended for it, as before");
+        move.finish();
+        move.terrain.time.addAndGet(Posture.RESUME_AFTER_MS-200);
+        check(!move.tick(50)&&move.state().equals("suspended"),"move-to-position ended: still in the 3-second pause");
+        move.terrain.time.addAndGet(200);
+        check(move.tick(50)&&move.state().equals("following"),"then follows again once the pause is over");
+        Fixture halted=new Fixture();halted.follow();halted.tick(50);
+        halted.immediate=false;halted.act("emote");
+        halted.session.call("stop",halted.auth);
+        check(!halted.tick(50)&&halted.state().equals("suspended")&&halted.posture.json().get("resumeInMs").getAsLong()>0,"an explicit stop during a gesture: the 3-second pause applies as before");
     }
     /** Sitting as a posture: what a seated body may do does not suspend it; after a fight it walks back and sits. */
     private static void seated() {

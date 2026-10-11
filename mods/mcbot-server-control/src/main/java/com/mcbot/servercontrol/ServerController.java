@@ -419,12 +419,16 @@ final class ServerController implements ControlSession.Game {
         }
         return false;
     }
-    /** True when the posture drove the body this tick; it yields to a running action unless that action keeps it. */
+    /**
+     * True when the posture drove the body this tick. It yields to a running action unless that action keeps it (KEEPS), and
+     * stands still without a pause while a built-in gesture plays (HOLDS, Posture.holdsFor).
+     */
     private boolean tickPosture() {
         Posture current=posture;
-        String running=current.yieldTo(session.running(),emotes.playing()!=null);
+        List<String> running=session.running();
+        String yielded=current.yieldTo(running,emotes.playing()!=null);
         boolean drove;
-        try { drove=current.tick(running); }
+        try { drove=current.tick(yielded,current.holdsFor(running)); }
         catch(RuntimeException fault) { drove=false; current.halt(); }
         if(current!=posture) return false;
         if(current.ended()) { posture=null; return false; } // the followed name belongs to someone else now
@@ -872,10 +876,14 @@ final class ServerController implements ControlSession.Game {
     }
     private void finish(String status,String summary,JsonObject result) {
         if(navigation!=null)result.add("navigation",navigation.diagnostics());
+        // A built-in gesture (or another KEEPS/HOLDS action) that ends normally leaves the posture driving: no 3-second pause.
+        boolean quiet=active!=null&&posture!=null&&posture.endsQuietly(active.name);
         if(active!=null) active.finish(status,summary,result);
-        stop();
+        stopBody(!quiet);
     }
-    @Override public void stop() { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;actionGrace=null;active=null;pillar=null;emotes.cancelGesture(player);if(station!=null)station.stop();station=null;if(job!=null)job.stop();job=null;if(travel!=null)travel.stop();travel=null;if(farm!=null)farm.stop();farm=null;if(build!=null)build.stop();build=null;if(breed!=null)breed.stop();breed=null;if(hunt!=null)hunt.stop();hunt=null;sleepBed=null;sitSeat=null;if(navigation!=null)navigation.stop();navigation=null;followedPlayer=null;retreatTarget=null;retreatOrigin=null;approachPlayer=null;approachPlayerStart=null; if(posture!=null) posture.interrupt();if(pickup!=null)pickup.stop();pickup=null; if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
+    @Override public void stop() { stopBody(true); }
+    /** Ends the running action. The posture waits RESUME_AFTER_MS before it drives again, unless the action ended normally and left it alone (finish). */
+    private void stopBody(boolean postureTail) { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;actionGrace=null;active=null;pillar=null;emotes.cancelGesture(player);if(station!=null)station.stop();station=null;if(job!=null)job.stop();job=null;if(travel!=null)travel.stop();travel=null;if(farm!=null)farm.stop();farm=null;if(build!=null)build.stop();build=null;if(breed!=null)breed.stop();breed=null;if(hunt!=null)hunt.stop();hunt=null;sleepBed=null;sitSeat=null;if(navigation!=null)navigation.stop();navigation=null;followedPlayer=null;retreatTarget=null;retreatOrigin=null;approachPlayer=null;approachPlayerStart=null; if(posture!=null&&postureTail) posture.interrupt();if(pickup!=null)pickup.stop();pickup=null; if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
     @Override public void abort(ControlSession.Operation operation) { if(active==operation) stop();else if(survival!=null) survival.abort(operation); }
     @Override public boolean leave() {
         if(player==null)return false;

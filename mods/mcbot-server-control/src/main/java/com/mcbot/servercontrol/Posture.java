@@ -10,6 +10,7 @@ import static com.mcbot.servercontrol.Protocol.*;
  * section 7; protocol "陪伴姿态"). Not an operation: like the guard duty it belongs to the lease and the body session and
  * outlives ordinary stops. Each tick the guard goes first, then a running operation, then the posture: while an operation
  * runs the posture is suspended for it, and once the body has been free for {@link #RESUME_AFTER_MS} it drives again.
+ * KEEPS actions leave it driving; HOLDS actions (a built-in gesture) only stop it moving, with no pause afterwards.
  */
 final class Posture {
     /**
@@ -18,8 +19,19 @@ final class Posture {
      * calls, and the body must not walk off in between.
      */
     static final long RESUME_AFTER_MS=3000;
-    /** Actions that leave the posture driving: none of them moves the body (formerly the beside-follow list). Step 3 adds look-at and emote. */
-    private static final Set<String> KEEPS=Set.of("send-chat","select-slot","equip-item");
+    /**
+     * Actions that leave the posture driving: none of them moves the body (formerly the beside-follow list). look-at only turns
+     * the head: a walking posture turns it back to the walking direction on its next tick, a standing one keeps the look
+     * through the gaze hold (ServerController.idleGaze).
+     */
+    private static final Set<String> KEEPS=Set.of("send-chat","select-slot","equip-item","look-at");
+    /**
+     * Actions during which the posture stands still but keeps its state and gets no RESUME_AFTER_MS tail (companion_state_design.md,
+     * step 3). A built-in gesture (BodyEmotes.GESTURES, about a second) turns the body's yaw, pitch and stance itself, so walking
+     * would fight it; once it ends the posture drives on the next tick. An add-on animation is not a hold: it outlives its
+     * operation and suspends the posture instead (yieldTo).
+     */
+    private static final Set<String> HOLDS=Set.of("emote");
     enum Kind {FOLLOW,WAIT,SEATED}
     interface View {
         long now();
@@ -39,7 +51,7 @@ final class Posture {
     private final View view;
     private String state,reason,suspendedFor;
     private long resumeAt,returnSince;
-    private boolean returning,ended;
+    private boolean returning,ended,held;
 
     private Posture(Kind kind,long revision,FollowCompanion follow,BlockPos seat,View view) {
         this.kind=kind;this.revision=revision;this.follow=follow;this.seat=seat;this.view=view;
@@ -53,35 +65,58 @@ final class Posture {
     Kind kind(){return kind;}
     /** An action that never takes the body from any posture (it does not move the body). */
     static boolean keeps(String action){return KEEPS.contains(action);}
-    /** Whether this running action takes the body from the posture: not the KEEPS actions, and not what a seated body may do sitting. */
+    /** Whether this running action takes the body from the posture: not the KEEPS or HOLDS actions, and not what a seated body may do sitting. */
     boolean suspendedBy(String action) {
-        if(KEEPS.contains(action))return false;
-        return !(kind==Kind.SEATED&&NativeSeat.allowedWhileSeated(action));
+        if(KEEPS.contains(action)||HOLDS.contains(action))return false;
+        return takesBody(action);
     }
+    /** Whether the action takes the body from this posture; a seated body keeps what it may do while sitting. */
+    private boolean takesBody(String action){return !(kind==Kind.SEATED&&NativeSeat.allowedWhileSeated(action));}
     /**
      * What the posture gives way to now: the first running action that takes the body, else an add-on animation still playing
      * after its emote operation finished (BodyEmotes; walking off would cut a looping animation short), else null.
      */
     String yieldTo(java.util.List<String> running,boolean animating) {
         for(String action:running) if(suspendedBy(action)) return action;
-        return animating&&suspendedBy("emote")?"emote":null;
+        return animating&&takesBody("emote")?"emote":null;
     }
+    /**
+     * Whether a running HOLDS action (a built-in gesture) keeps this posture standing still now. A seated posture never holds:
+     * sitting keeps its own timing, as before.
+     */
+    boolean holdsFor(java.util.List<String> running) {
+        if(kind==Kind.SEATED) return false;
+        for(String action:running) if(HOLDS.contains(action)) return true;
+        return false;
+    }
+    /**
+     * The normal end of a KEEPS or HOLDS action: the posture is not interrupted, so there is no RESUME_AFTER_MS tail. A seated
+     * posture keeps the pause its stop always had. An explicit stop never asks this (ServerController.stop).
+     */
+    boolean endsQuietly(String action){return kind!=Kind.SEATED&&(KEEPS.contains(action)||HOLDS.contains(action));}
     /** After a fight while waiting the guard walks back to where it stood (the 10-10 rule); following and seated postures take the body back themselves. */
     boolean guardWalksBack(){return kind==Kind.WAIT;}
     /** The followed name now belongs to someone else: the posture is over (the controller drops it). */
     boolean ended(){return ended;}
 
     /**
-     * One tick, after the guard and any operation. `running`: a running action this posture yields to, or null.
-     * True when the posture drove the body this tick.
+     * One tick, after the guard and any operation. `running`: a running action this posture yields to, or null; `holds`: a
+     * HOLDS action is playing now ({@link #holdsFor}). True when the posture drove the body this tick.
      */
-    boolean tick(String running) {
+    boolean tick(String running,boolean holds) {
         long now=view.now();
-        if(!view.mayDrive()){halt();return false;}
+        if(!view.mayDrive()){halt();held=false;return false;}
         if(running!=null) {
             if(!"suspended".equals(state))halt();
-            suspendedFor=running;resumeAt=now+RESUME_AFTER_MS;state="suspended";return false;
+            suspendedFor=running;resumeAt=now+RESUME_AFTER_MS;state="suspended";held=false;return false;
         }
+        if(holds) {
+            // A gesture plays: stand still once; the state stays (a fight that just ended shows the posture's own state, not guarding), and a pause already running keeps its own clock.
+            if(state.equals("guarding"))state=kind==Kind.FOLLOW?follow.state():"waiting";
+            if(!held)halt();
+            held=true;return false;
+        }
+        held=false;
         // Still in the pause after an action: an operation's suspension (or a fight just over) shows as suspended; a wait or a seat that never moved stays as it was.
         if(now<resumeAt){if(state.equals("guarding"))state="suspended";return false;}
         suspendedFor=null;
@@ -118,13 +153,13 @@ final class Posture {
     /** The guard took the body for a fight this tick. */
     void guarding() {
         if(!"guarding".equals(state))halt();
-        state="guarding";
+        state="guarding";held=false;
     }
     /** The guard handed the body back: route again from where the fight left it. */
     void resumeAfterGuard(){if(follow!=null)follow.resume();returning=false;}
     /** An ordinary stop: movement ends now and the posture waits RESUME_AFTER_MS before it drives again (a follow shows suspended meanwhile). */
     void interrupt() {
-        halt();resumeAt=view.now()+RESUME_AFTER_MS;
+        halt();held=false;resumeAt=view.now()+RESUME_AFTER_MS;
         if(kind==Kind.FOLLOW)state="suspended";
     }
     void holdStroll(){if(follow!=null)follow.holdStroll();}
