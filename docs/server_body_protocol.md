@@ -16,16 +16,16 @@
 | claim | `{instanceId,worldId,username,controllerId}` | `{leaseId,stopToken,ttlMs,instanceId,sessionId,controlGeneration,chatCursor}`；新租约 10000ms。显式接管时创建或附着角色，已占用则 LEASE_BUSY。重复同一 controllerId 返回原租约和实际剩余期限，不延长有效期 |
 | heartbeat | `{instanceId,sessionId,leaseId}` | `{ttlMs:10000,controlGeneration}`；只续当前有效租约，不复活过期租约 |
 | observe | `{instanceId,sessionId,leaseId,block?}` | 现有 Observation 字段，`source:"server-observed"`，另含 instanceId/controlGeneration；未加载区块不隐式加载，空 container 必须为 null |
-| nearby-blocks | `{instanceId,sessionId,leaseId,centerPlayer?,radius?,maxResults?}` | 只读发现普通容器方块，不读取内容；返回 instanceId/sessionId/worldId/controlGeneration/dimension、center、candidates、truncated 和 budget。需 `nearby-blocks` 能力；radius 1–8（默认4）、maxResults 1–16（默认8）、y±2，仅已加载区块。指定玩家须同维度、Bot 32格内且视线通过 |
+| nearby-blocks | `{instanceId,sessionId,leaseId,centerPlayer?,radius?,maxResults?}` | 只读发现普通容器方块，不读取内容；返回 instanceId/sessionId/worldId/controlGeneration/dimension、center、candidates、truncated 和 budget。需 `nearby-blocks` 能力；radius 1–16（默认4）、maxResults 1–16（默认8）、y±2，仅已加载区块。指定玩家须同维度、Bot 32格内且视线通过 |
 | nearby-resources | `{instanceId,sessionId,leaseId,blockIds,radius?,maxResults?,center?}` | 只读有限资源发现；blockIds为1–8个方块ID或方块标签（`#c:ores`），radius 1–16（默认4）、maxResults 1–64（默认32）。center为`{x,y,z}`，默认Bot位置且距Bot不得超过8格；返回完整控制上下文、center、candidates、truncated、budget，详见有限采集边界 |
 | survival-state | `{instanceId,sessionId,leaseId,details?}` | 只读当前维度／控制上下文、serverTick/observedAt、生命／饥饿／饱和、选槽及foods；默认details:true含自身inventory，false省略完整库存。safe表示食品语义已核验，不代表省略的栈守卫可以用于写入 |
 | assess-tool | `{instanceId,sessionId,leaseId,x,y,z,expectedBlock?,policy?,minRemainingDurability?,dropPreference?}` | 32格内已加载目标；完整上下文含dimension，返回36槽候选、基础资格／估算／耐久／掉落偏好、推荐及原因；未知不推荐，禁止临时装备来执行只读评估 |
 | machine-status | `{instanceId,sessionId,leaseId,x,y,z}` | 只读（8b，10-09）：不走过去、不打开界面读一台机器的内容和进度，给运行端的“放好就走、到时回来取”用，不占动作、不打断正在做的事。只认身体所在维度、水平 256 格内（OUT_OF_REACH）；区块没加载回 `state:"unloaded"`（没加载的机器不工作，时间也不走）；加载了回 `id`，以及 `supported`（这个方块的工作站适配实现了 `progress`，现在是原版熔炉、烟熏炉、高炉和酿造台）、`machine`、`inputs`、`results`、`fuel`、`working`、`ticksLeft`／`secondsLeft`（照这样一直工作还要多久）、`fuelTicks`（燃料还够烧多少 tick）、`stalled`（还有料但没在工作：没燃料或出口满了） |
 | act | `{instanceId,sessionId,leaseId,controlGeneration,operationId,name,args}` | 现有 Operation 字段，另含 controlGeneration；同 ID 同内容返回原结果，异内容拒绝。动作按原生字段比较，不哈希；结果缓存淘汰后同 ID 也不能重新执行 |
 | operation | `{instanceId,sessionId,leaseId,operationId}` | 对应当前租约的 Operation；不以查询续租 |
-| stop | `{instanceId,sessionId,leaseId,clearGuard?,guardRevision?,stepAside?}` | `{stopped:true,controlGeneration}`；取消当前操作、推进代次、角色保持在线，旧代次 act 拒绝；`guard-duty-fenced`支持`clearGuard:true`连同必填`guardRevision`在同一请求中清保护（停止本身从不因序号被拒，序号已被更新的设置超过时只停不清）；省略则保留保护意图；`step-aside-stop`支持`stepAside:true`（跟随让开，之前发现的目标继续有效，见[跟随让开、自卫失败、没武器](#跟随让开自卫失败没武器试玩反馈修正)）；`server-posture`支持`clearPosture:true`连同必填`postureRevision`，同一请求里清姿态，规则同`clearGuard`（8m 第二步约定，届时删掉`stepAside`） |
+| stop | `{instanceId,sessionId,leaseId,clearGuard?,guardRevision?,clearPosture?,postureRevision?}` | `{stopped:true,controlGeneration}`；取消当前操作、推进代次、角色保持在线，旧代次 act 拒绝；`guard-duty-fenced`支持`clearGuard:true`连同必填`guardRevision`在同一请求中清保护（停止本身从不因序号被拒，序号已被更新的设置超过时只停不清）；省略则保留保护意图；`server-posture`支持`clearPosture:true`连同必填`postureRevision`，同一请求里清姿态，规则同`clearGuard`（8m 第二步；原来的`stepAside`和能力`step-aside-stop`已删） |
 | guard | `{instanceId,sessionId,leaseId,guardRevision,player?,expectedEntityId?,options?,off?}` | `guard-duty-fenced`保护配置；开启返回保护状态和`guardRevision`，关闭返回`{enabled:false,guardRevision}`；不占操作 ID 预算，见常驻保护一节 |
-| posture | `{instanceId,sessionId,leaseId,postureRevision,action?,player?,expectedEntityId?,distance?,wander?,off?}` | `server-posture`陪伴姿态（跟随／等待）；不是操作，不占操作 ID 预算，见[陪伴姿态](#陪伴姿态8m-第二步约定2026-10-11)（**约定，尚未实现**） |
+| posture | `{instanceId,sessionId,leaseId,postureRevision,action?,player?,expectedEntityId?,distance?,wander?,off?}` | `server-posture`陪伴姿态（跟随／等待）；不是操作，不占操作 ID 预算，见[陪伴姿态](#陪伴姿态8m-第二步2026-10-11) |
 | interrupt | `{instanceId,sessionId,leaseId,controlGeneration,action:"begin"\|"end",reason?}` | `task-interrupts`打断窗口：`begin`（`reason`为`eat`或`defend`）暂停正在跑的任务去进食或自卫，回`{open:true,reason,paused:{operationId,name}\|null}`，此刻不能暂停报`NOT_PAUSABLE`；`end`让任务接着做，回`{open:false,resumed,pausedMs?,operationId?}`。不是操作，不占操作 ID 预算，见[打断窗口](#打断窗口8m-第四步-4a2026-10-11) |
 | release | `{instanceId,sessionId,leaseId}` | `{released:true}`；仅停止并放弃这一份控制权，角色保留；旧 lease 不能影响新 lease |
 | revoke | `{instanceId,sessionId,leaseId,stopToken,leave?}` | `{stopped:true,revoked:true,left}`；宿主专用，仅撤销指定租约，角色默认保留；不能接管／移动，不续租。已释放的匹配旧租约可幂等确认，但绝不影响新租约。`leave:true`（宿主退出时用）同时让角色像玩家一样下线（原版存档），只在没有别的租约时生效，`left`说明这次是否真的下线；下次 claim 在原地重新上线 |
@@ -94,7 +94,7 @@ NBT 类型为 end／byte／short／int／long／float／double／byte_array／st
 | approach-player | `{player,expectedEntityId?,distance?,timeoutMs?}`；distance默认1.3，范围1–1.5；同维度真实玩家，任务内部必带UUID。行走中目标位移超过0.5格返回TARGET_MOVED；到达后由任务重新核验 |
 | approach-resource | `{targetToken,timeoutMs?}`；仅走向引用资源的原版block reach／LOS站位，不挖掘。开始时目标距Bot最多16格，默认15秒、timeoutMs 500–120000；复用已加载安全高差路线与资源引用／支撑保护 |
 | pickup-item | `{entityId,expectedItem,expectedCount,expectedComponents,expectedMaxStackSize?,timeoutMs?,companionGuard?}`；完整UUID必需、expectedCount为正整数。绑定真实ItemEntity实例与完整栈，距Bot须保持8格内；相对开始位置移动超过0.75格停止；统一导航行走无进展3秒进入有限重规划，预算耗尽停止。默认15秒、timeoutMs 500–30000。可选companionGuard另限制实时玩家范围，未携带时保持原有限拾取语义。普通物理碰撞拾取，不调用虚拟touch、塞库存或传送；原生Post才确认获得量，详见下节 |
-| follow-companion | `{player,expectedEntityId,distance?}`；UUID必需，distance默认2.5、范围1.5–6。持续运行，无总时长自然结束；距离及LOS满足时waiting，玩家离开站位后following。绑定真实玩家实例／UUID／维度，已加载安全高差地形内有界重规划；受阻、离线、受伤等失败后不自动恢复。原follow-player有限语义不变 |
+| follow-companion | **已删（8m 第二步，由 `posture` 方法取代，能力名也不再声明）**。原来：`{player,expectedEntityId,distance?}`；UUID必需，distance默认2.5、范围1.5–6。持续运行，无总时长自然结束；距离及LOS满足时waiting，玩家离开站位后following。绑定真实玩家实例／UUID／维度，已加载安全高差地形内有界重规划；受阻、离线、受伤等失败后不自动恢复。原follow-player有限语义不变 |
 | click-slot | `{containerId,expectedRevision,slot,expectedItem,expectedCount,expectedComponents,expectedCarriedItem,expectedCarriedCount,expectedCarriedComponents,button?}`；仅普通 PICKUP，button 0／1。每次点击后重读菜单，确认实际槽位／carried 变化 |
 | close-container | `{containerId,expectedRevision}`；检查当前窗口与版本，走原生关闭／carried 归还或掉落路径 |
 | select-slot | `{slot,expectedItem,expectedCount,expectedComponents,expectedMaxStackSize?}`；slot 0–8，匹配完整当前栈后选择，不搬移库存。可选上限在原生写入前比较实际getMaxStackSize，旧API兼容 |
@@ -158,7 +158,7 @@ Observation 另带 `sitting`（Bot 是否骑着已安装座位适配认定的座
 - hello 多 `hints:[{id,text}]`：附属模组用 `McbotApi.registerHint` 登记的用法说明（[Mod 适配](mod_adapters.md#插件说明registerhint)）。服务端只列命名空间下此刻有已安装登记项（容器、交互、工作站、表情或外观来源、拾取记账）的那些，被适配模组没装或版本不对时不列；text 是去掉控制字符的纯文本，最长 600 字符，每个命名空间最多一条。旧运行端不认识这个字段，照常工作。
 - 运行端（`client-runtime/src/plugins.ts`）拿到 hello 后、注册工具前统一过滤一次。参数 `--disabled-plugins <插件id,...>`（compat.json 的 adapters id；`--compat-file` 默认用 client-runtime 旁边的 compat.json）：addon 类插件关掉时，去掉命名空间属于它 `requires` 里 mod id 的 `adapters`、`interactions`、`itemInteractions`、`emotes.sources` 和 `hints`；config 类插件关掉时，从 `itemHandlerMods` 去掉它 `config.mods` 的键。某项能力因此一条都不剩（`machine-items`、`use-item`、`use-item-on-block`）就当作服务端没声明，不发布对应工具。`appearances` 不过滤：外观是托管的人在 WebUI 选的，不是 AI 的能力。
 - 硬调：服务端模组不变，所以运行端在 `act` 里拒绝（UNSUPPORTED，不发给服务端）：`open-container` 的 `expectedBlock`、`use-item-on-block`／`use-item` 的 `interaction`、`emote` 的 `source` 属于关掉的 addon 插件；`machine-items` 的 `expectedBlock` 属于关掉的 config 插件，或有 config 插件关掉时不带 `expectedBlock`（无法确认是谁的方块）。拾取记账（`storedIn`）照旧如实报告，它不是 AI 能调用的能力。
-- `hints` 只留 compat.json 官方插件（命名空间属于某个 addon 插件的 requires）且开着的，其余丢弃；再去一次控制字符、截到 600 字符。说明附在该插件影响到的第一个工具的描述末尾（顺序 `use-item`、`interact-block`、`open-container`、`emote`），前面写明「来自附属模组、只解释这些工具、不授予其他权限」；它不能新增工具、参数或权限。插件不带这四个工具中的任何一个时不发说明。没有 compat.json 时一律不发说明；有插件关掉而读不到 compat.json 时运行端拒绝启动。
+- `hints` 只留 compat.json 官方插件（命名空间属于某个 addon 插件的 requires）且开着的，其余丢弃；再去一次控制字符、截到 600 字符。说明对应该插件影响到的第一个工具（顺序 `use-item`、`interact-block`、`container-menu`、`emote`）：托管时工具描述里只列插件名，说明随这个工具第一次调用附上（10-12）；不托管时附在描述末尾；前面写明「来自附属模组、只解释这些工具、不授予其他权限」；它不能新增工具、参数或权限。插件不带这四个工具中的任何一个时不发说明。没有 compat.json 时一律不发说明；有插件关掉而读不到 compat.json 时运行端拒绝启动。
 
 ## 地面物品、原生拾取与有限采集
 
@@ -172,13 +172,13 @@ pickup-item成功result为`{entityId,pickedUpCount,pickup:"confirmed",requestedC
 
 有限任务先筛选与目标产物匹配的冻结候选，矿石须完整工具评估／准备能力、已知掉落效果与非精准工具；服务端资源引用挖掘仍在执行前核验实际主手及原生位置相关采掘资格。首批不支持精准矿石块，不按工具名称写等级表，不保证数据包或Mod未改变掉落。目标数量按原生新拾取回执累计；铜的多产物、时运等可导致一次真实拾取超过目标，以`overage`如实记录，到量后不再开挖新候选。实际掉落不匹配、无工具、未知或部分完成均保留真实结果，不扩大区域或自动重试。
 
-nearby-resources按固定center的水平圆形半径和y±2扫描，最多845个位置、150000次地形读取；只用已加载区块，不隐式加载未知区域。发现与后续approach／dig一致禁止`pos.y<floor(Bot.y)`、方块实体、玩家身体或任何附近玩家脚底支撑、液体／危险邻居及上方重力方块。候选只返回当前Bot视线通过者：`{position,id,properties,targetToken,distance,visible:true,requiresCorrectTool,suitableToolSlots,recommendedToolSlot?}`；工具槽仅0–8，由真实采掘工具适用性／速度提供，不凭物品名字猜。候选截断／预算耗尽通过truncated与budget明示。原木例外（10-07）：视线只被树叶挡住的原木也算候选并标`visible:false`（被树冠整棵包住的云杉），approach-resource对原木目标接受“去掉树叶后有视线”的站位；dig-block仍按真实视线判定，挡路的树叶由Node采集任务先敲掉（不当作资源）。整棵树（10-07）：nearby-resources可带`wholeTree:true`（center可离Bot最多16格），只返回离center最近的那一整棵树的原木（最多256节，不受maxResults限制），回复带`wholeTree:true`。原木候选都带`tree`编号：挨着的原木（含斜对角）连成一段，底下踩着地面（泥土、石头、红树根，不是原木、树叶或空气）的一段是树干，悬空的一段（隔着树叶的树枝、斜伸的金合欢／樱花枝）归到4格内最近的树干，连不到树干的不算树；两棵各自扎根的树树冠挨着也分开。gather-resources带`wholeTree:true`时不填count／stacks，目标就是这些树的全部原木，默认时限按节数算（每节4秒，120～600秒）、步数预算最多1024。`trees:1..8`（只配wholeTree）一次找离center最近的几棵、一次提交砍完；连不到任何树干的悬空原木（根已经砍掉的剩余部分）彼此4格内算一棵；整棵树扫描不按“低于脚底平面”排除原木（Bot站在比树根高的地方），走近和挖时仍按当时站的位置检查。同一任务里路过顺手捡到别的物品（树苗、木棍）只记进`unexpectedPickedUpCount`／`items`，不算目标、不中断任务。
+nearby-resources按固定center的水平圆形半径、y 从中心下 2 格到上 4 格扫描（半径最多 16），最多150000次地形读取；只用已加载区块，不隐式加载未知区域。发现与后续approach／dig一致禁止`pos.y<floor(Bot.y)`、方块实体、玩家身体或任何附近玩家脚底支撑、液体／危险邻居及上方重力方块。候选只返回当前Bot视线通过者：`{position,id,properties,targetToken,distance,visible:true,requiresCorrectTool,suitableToolSlots,recommendedToolSlot?}`；工具槽仅0–8，由真实采掘工具适用性／速度提供，不凭物品名字猜。候选截断／预算耗尽通过truncated与budget明示。原木例外（10-07）：视线只被树叶挡住的原木也算候选并标`visible:false`（被树冠整棵包住的云杉），approach-resource对原木目标接受“去掉树叶后有视线”的站位；dig-block仍按真实视线判定，挡路的树叶由Node采集任务先敲掉（不当作资源）。整棵树（10-07）：nearby-resources可带`wholeTree:true`（center可离Bot最多16格），只返回离center最近的那一整棵树的原木（最多256节，不受maxResults限制），回复带`wholeTree:true`。原木候选都带`tree`编号：挨着的原木（含斜对角）连成一段，底下踩着地面（泥土、石头、红树根，不是原木、树叶或空气）的一段是树干，悬空的一段（隔着树叶的树枝、斜伸的金合欢／樱花枝）归到4格内最近的树干，连不到树干的不算树；两棵各自扎根的树树冠挨着也分开。gather-resources带`wholeTree:true`时不填count／stacks，目标就是这些树的全部原木，默认时限按节数算（每节4秒，120～600秒）、步数预算最多1024。`trees:1..8`（只配wholeTree）一次找离center最近的几棵、一次提交砍完；连不到任何树干的悬空原木（根已经砍掉的剩余部分）彼此4格内算一棵；整棵树扫描不按“低于脚底平面”排除原木（Bot站在比树根高的地方），走近和挖时仍按当时站的位置检查。同一任务里路过顺手捡到别的物品（树苗、木棍）只记进`unexpectedPickedUpCount`／`items`，不算目标、不中断任务。
 
 ResourceTargets随机token固定120秒、最多256个，绑定session／generation／实际维度、坐标、完整BlockState及已加载Chunk实例。普通资源方块没有BlockEntity实例，同chunk同状态替换不声称可检测。Node的一个resourceRef冻结整批候选，30秒内可提交；执行不补扫、不追加候选或目标，不挖路／垫高／下坑／搭桥／传送。
 
 ### 可选陪伴拾取保护（2026-10-03已验证首批）
 
-新增能力标记`companion-pickup`只供Node门控，不是可执行动作；`act.name:"companion-pickup"`明确返回UNSUPPORTED，不会落入通用移动分支。当前仍为33个MCP工具，标记本身不增加工具。服务端只扩展pickup-item，不新增自动挖矿、dig guard或矿石目录。
+新增能力标记`companion-pickup`只供Node门控，不是可执行动作；`act.name:"companion-pickup"`明确返回UNSUPPORTED，不会落入通用移动分支。当时为33个MCP工具，标记本身不增加工具。服务端只扩展pickup-item，不新增自动挖矿、dig guard或矿石目录。
 
 `companionGuard`格式为`{player,expectedEntityId,maxDistance}`，三个字段均必需；player为1–16字符游戏名、expectedEntityId为完整UUID、maxDistance为1.5–4格且服务端不补默认。开始本次拾取时绑定真实ServerPlayer实例；执行前与每tick核验该实例、UUID、维度、生命和连接。身体与指定掉落实体必须同时在该玩家**当前**位置的maxDistance半径内；初始身体已更远也拒绝。路线候选、剩余路点、下一驾驶步与带0.2到达裕量的站位均限制在玩家半径内，仍保留全部原平地／危险／租约核验。
 
@@ -196,7 +196,7 @@ guard只阻止后续驾驶，不能回滚普通物理已经发生的碰撞拾取
 
 ## Node 与宿主约定
 
-持续陪伴工具仅在 `follow-companion` 能力存在时发布：`companion-mode` 接受 `{action:"follow"|"wait"|"pause"|"resume"|"stop"|"guard",player?,distance?,pickup?,guard?,say?}`，只有新follow允许指定player／distance／pickup。follow先核验附近玩家身份，返回受理状态，原生动作在后台持续；wait原地等候，两者都持有与有限任务共用的写锁。切换先确认旧动作停止。
+（10-12 注：本段和下面两段是 10-03～10-10 的写法，现在跟随／等待是服务端姿态，见「陪伴姿态」一节；`companion-mode` 在服务端有 `server-posture` 或 `guard-duty-fenced` 能力时发布，状态随 `get-status.companionMode` 返回，没有 `get-companion-mode` 工具；保护是常驻的，等待和空闲时也有。）当时：持续陪伴工具仅在 `follow-companion` 能力存在时发布：`companion-mode` 接受 `{action:"follow"|"wait"|"pause"|"resume"|"stop"|"guard",player?,distance?,pickup?,guard?,say?}`，只有新follow允许指定player／distance／pickup。follow先核验附近玩家身份，返回受理状态，原生动作在后台持续；wait原地等候，两者都持有与有限任务共用的写锁。切换先确认旧动作停止。
 
 跟随（和原地等待）是持续状态，不是任务（10-10 起）：用身体的工具（走路、采集、合成、建造、进食、表情、睡觉……，`mcp.ts`的`bodyTools`）开始前，运行端自动让开——确认身体停止、释放写锁、保留意图，状态为`paused`并带`suspendedFor`（工具名）和`reason`；该工具／反射结束、身体上没有别的东西在跑（没有运行中的操作和容器／采集／生存任务、没有打开的菜单、没睡着）并空闲约0.8秒后，运行端自己恢复同一个意图（重新核验会话和玩家身份），模型不用调`resume`。返回`running`、结果稍后用task事件到来的操作，在它终止时才恢复；同时有几个在跑，按最后一个结束算。睡觉在醒来后恢复。恢复时玩家不在附近：继续让开、给一次companion事件，玩家回到附近自动接上，不算受阻。让开期间任务让身体停止过（控制代次后移）不算失控，同一实例／会话／世界／维度即可沿用意图。模型显式`pause`是手动暂停，一直到`resume`（让开期间再pause也转成手动暂停）。只有这几种情况真正结束跟随：玩家叫停的`stop-action`（丢弃意图，不恢复）、`companion-mode stop`（结束跟随／等待，不打断正在做的其他任务，回执`state:"stopped"`并说明已结束；本来没有跟随时原样返回）、显式换成别的`follow`／`wait`。`guard`动作（要`guard`参数：布尔或保护选项）在当前跟随上开／关／改保护，选项逐项并到现有选项上；正在跟随时按新选项重启服务端的follow-companion，让开期间只改意图、恢复时生效；等待中没有保护，会报`INVALID_STATE`。
 
@@ -264,7 +264,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 `navigation-3d`是能力标记，不是可执行原子动作。move／follow／approach／pickup复用同一个原生导航器。只读已加载地形，使用实际碰撞形状、站立支撑、身体扫掠和实体阻挡；以原生前进和跳跃输入执行，不传送、不挖路、不搭桥。半砖、楼梯、一格跳上与最多2.5格的有界下落分别经过起跳净空和落地核验。任意离地不等于获授权跳跃；硬停止清除前进和跳跃，已有惯性与重力仍按原版继续。
 
-搜索分tick续算，单片最多64次展开，2ms是软时间目标（单次地形核验不可中途暂停），另有4096节点、32768候选边、192路点和地形读预算。有限动作总期限与行走无进展计时分开；搜索时停驻不触发行走卡住判定。实际预算诊断在完整动作回执的`navigation`中，不能把软目标说成硬实时保证。动态地形执行时重查，卡住／障碍仅有限重算。游泳、梯子、开门、跨沟跑酷和有伤下落未交付。
+（10-12 注：本段是 10-03 自写寻路的合同；3a 起改用原版 `PathFinder`／`WalkNodeEvaluator` 一次算路，节点上限 2048、宽搜 6000，按距离缩放，见 `NativeNavigation.java`；之后加了跳一格空隙、开关木门、游泳上岸，下面“未交付”只剩梯子和有伤下落。）当时：搜索分tick续算，单片最多64次展开，2ms是软时间目标（单次地形核验不可中途暂停），另有4096节点、32768候选边、192路点和地形读预算。有限动作总期限与行走无进展计时分开；搜索时停驻不触发行走卡住判定。实际预算诊断在完整动作回执的`navigation`中，不能把软目标说成硬实时保证。动态地形执行时重查，卡住／障碍仅有限重算。游泳、梯子、开门、跨沟跑酷和有伤下落未交付。
 
 `survival-state`增加`dangers`及`threats`。前者包含火焰、液体、氧气、下落和默认低血事实；后者包含服务端tick、8格范围、complete标志及最多24个实体的UUID、类型、分类、敌对依据、是否锁定自己、距离、视线、存活、爆炸准备和防卫资格。未知Mod实体不能按名字猜敌对；当前原版明确敌对清单或原生攻击自身证据可获得资格，玩家及友军始终排除。单实体事实读取异常返回明确null、unknown、factsAvailable:false，整体complete:false，不能当作安全或拖垮全部观察。
 
@@ -278,6 +278,8 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 `set-reflexes`新增autoDefend、defenseRadius（1–3，默认3）、lowHealth（1–20，默认8）、excludedEntityIds（最多64个UUID）、maxAttacks（1–3，默认2）和defenseTimeoutMs（500–5000，默认3000）。有效策略公开defenseSupported；旧身体没有该能力时autoDefend为false。变更仍带expectedRevision，先确认旧活动动作停止，再应用新策略，不恢复旧任务。
 
 ### 保护玩家（8h，2026-10-08）
+
+（10-12 注：本节的 `follow-companion.guard` 是第一版做法，已被下面的常驻保护取代，`follow-companion` 操作也已删。）
 
 能力标记`companion-guard`。`follow-companion`多一个可选参数`guard:{radius:3..12,lowHealth:4..16,bow,shield}`（都可省，默认 8、8、开、开），跟随运行中每个游戏刻由服务端判断，不经过模型：
 
@@ -307,7 +309,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - **什么时候接管身体**：Bot 离玩家 16 格内，且此刻没有操作在跑（空闲，或运行端在原地等待），或者在跑的是不带自己保护的`follow-companion`；在吃东西、挖掘、自卫（原生使用或写入中）、睡觉、开着界面时不接管。这一块里别的任务（建筑、采集、走路、长途走、工作站……）还不能被打断，保护等它们做完（`reason:BUSY`），这期间只有 3 格近身自卫；任务打断在下一块做。
 - **打完以后**：跟随时交还给跟随，跟随重新算路线，打架时挨的伤不再算作跟随受伤；空闲时走回开始打之前站的地方（1.2 格内算到，最多 15 秒，走不到就留在原地）。跟随在保护同一个玩家时挨打不会结束跟随。
 - **运行端**：身体有`guard-duty-fenced`时，`companion-mode follow`的保护（默认开，`guard:false`关）变成在开始跟随时调`guard`，`follow-companion`不再带`guard`；跟随让开、改成原地等待都不动保护；`companion-mode guard`不需要先跟随，没跟随时带`player`；`companion-mode stop`发 off 关保护，`stop-action`使用上述原子停止并清除，反射引起的停止不关。关闭要收到确认才清本地已确认状态；关闭遭`BUSY`（HTTP 队列满）后可显式重试，即使此前开启尚未回执也必须发送关闭。正在停止时也可以发关闭或开启，不报`BUSY`。`guard`事件从观察里的`guard`生成，规则同 8h；服务端那边保护没了（换过控制权等）时发一条`guard`事件说明。保护覆盖时 3 格近身自卫不插手，不覆盖时照常；保护在打时普通进食等打完，紧急进食照旧。
-- **兼容**：新运行端连接没有`guard-duty-fenced`的旧身体（包括只有`guard-duty`的版本）时，回退到`follow-companion.guard`路径；新服务端不再声明`guard-duty`，第一块的旧运行端连上新服务端时也自动回退到这条路径，不需要同步升级。
+- **兼容**：当时新运行端连接没有`guard-duty-fenced`的旧身体时回退到`follow-companion.guard`路径；8m 第二步删掉了这条旧路径，现在没有`guard-duty-fenced`时保护报 UNSUPPORTED，提示更新核心模组。
 - **验证范围**：配置请求／回执乱序、关闭拒绝后重试、停止升级、租约边界及原生回调重入授权撤销均有离线回归；没有本次修复的隔离服实测或真实模型试玩证据，离线夹具不证明真实伤害事件顺序。
 
 ### 保护打断任务（8m 第一步第二块，2026-10-10）
@@ -337,6 +339,8 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 ### 跟随让开、自卫失败、没武器（试玩反馈修正）
 
+（10-12 注：第一条的`stepAside`、`step-aside-stop`、`ControlSession.carries` 在 8m 第二步随服务端姿态删掉了：姿态让开不再停身体、不推进代次，目标自然继续有效。没武器时腾手空手打仍是现行做法。）
+
 玩家实测 Bot 一边跟随一边干活时的三个问题。只有离线测试，**未在真实游戏中验证**（没有隔离服实测，也没有真实模型试玩）。
 
 - **让开不再作废刚找到的目标（能力`step-aside-stop`）**：以前跟随为工具让开要停一次身体（代次加一），而`discover-resources`的 resourceRef、`discover-containers`的 containerRef 在运行端和服务端都按发现时的代次核验，于是跟随中“先找再做”的`gather-resources`、`approach-container`和存取箱子必定`WORLD_CHANGED`。现在`stop`可带`stepAside:true`：照常取消操作、代次加一，但服务端把这之前发出的资源目标和容器目标继续认作当前控制。规则是`ControlSession.carries(g)`：从代次 g 到当前只有 step-aside 停止。普通`stop`（包括`stop-action`）、带`clearGuard`的`stop`（同时带`stepAside`也按普通算）、`claim`、`revoke`、`release`、身体变化都会截断。会话、维度和服务端 120 秒期限照旧核验。运行端`ServerBody.carries`按同一规则记账，资源引用和容器引用的上下文比较改用`sameControl`（实例、会话、世界、维度相同，代次相同或被承接），本地 30 秒期限不变。只有`CompanionMode`为工具或反射让开时才发`stepAside`，服务端没声明能力时不发，行为同旧版。
@@ -362,7 +366,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 **`assess-armour`：收到的护甲自己穿上（10-11 试玩：玩家丢钻石胸甲，Bot 不会自己换）。** 只读能力（不是动作，`atomicAction` 排除）。请求 `{instanceId,sessionId,leaseId,items:[物品ID,1..8个]}`；服务端在主背包 0..35 格里找这些 ID 的、能穿的东西，对照身上现在穿的，返回 `candidates:[{slot,item,count,part,verdict,reason,wearing?}]`。能穿的只有原版人形护甲（`ArmorItem` 的头、胸、腿、脚，不含鞘翅、南瓜、头颅、马铠、狼铠）和**副手空着时**的盾牌（`part:"offhand"`）。**“更好”只在服务端判断一处（`ArmourChoice.java`，原生读取在 `ArmourAssessment.java`）**：先比护甲值，再韧性（都是该部位属性修饰符的加法值），再附魔总等级，最后剩余耐久（不会坏的算最大）；四项全相同不换。`verdict`：`better`（`reason` 为 `slot-empty` 或 `better-stats`）、`not-better`（`same`／`worse`／`better-candidate`＝同部位另有更好的候选／`offhand-occupied`）、`blocked`（`new-binding`＝新的带绑定诅咒穿上脱不掉、`worn-binding`＝身上的带绑定诅咒脱不下、`no-room`＝被替下的那件没地方放）。同部位多个候选时只有最好的一个是 `better`。被替下的旧件放回新件原来的格子（`equip-item` 的原有行为），所以单件永远放得下；`no-room` 只在新件是一叠多件、背包又没有空格时出现。
 
-运行端（`gift-gear.ts`，hello 同时带 `assess-armour`、`equip-item` 时由 `main.ts` 接到 `EventJournal.useGiftHandler`）：`gift` 事件发出前，把进了背包的礼物物品 ID 交给服务端评估；`better` 且身体不忙时用 `equip-item`（带评估的 `slot`，跟随／等待中靠 `beside-follow` 不停跟随）穿上，事件在原文后接 `已换上 X（替下 Y）`；其余结果也写进事件（不比身上的好、带绑定诅咒、放不下、副手有东西）。**忙**＝任务、采集、动作在跑，保护正在打，陪挖，或跟随被工具暂停：不打断，事件写 `可以换上 X，比身上的 Y好，但正在忙，没有换（空下来可以用 equip-item）`。评估或穿戴失败、8 秒内没结果时，事件照常发出（失败写“没成功”）。只处理玩家丢来的礼物，不是任何拾取。
+运行端（`gift-gear.ts`，hello 同时带 `assess-armour`、`equip-item` 时由 `main.ts` 接到 `EventJournal.useGiftHandler`）：`gift` 事件发出前，把进了背包的礼物物品 ID 交给服务端评估；`better` 且身体不忙时用 `equip-item`（带评估的 `slot`；`equip-item` 不让姿态挂起，跟随／等待中照常跟）穿上，事件在原文后接 `已换上 X（替下 Y）`；其余结果也写进事件（不比身上的好、带绑定诅咒、放不下、副手有东西）。**忙**＝任务、采集、动作在跑，保护正在打，陪挖，或跟随被工具暂停：不打断，事件写 `可以换上 X，比身上的 Y好，但正在忙，没有换（空下来可以用 equip-item）`。评估或穿戴失败、8 秒内没结果时，事件照常发出（失败写“没成功”）。只处理玩家丢来的礼物，不是任何拾取。
 
 **`entity-equipment`：附近实体的装备。** 观察 `entities` 里每个 `LivingEntity`（玩家、僵尸、骷髅、猪灵、凋灵骷髅、村民、盔甲架、马、狼……），只要有一个装备位不空，就带 `equipment`：
 
@@ -397,12 +401,14 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - **自卫不再轻易关掉**：①`stop-action`只停正在做的事，确认停下后自动自卫马上恢复；叫停时正在打的那只怪先放 3 秒，它还在打就接着还手。②有明确结果的失败（拒绝、退路被堵）不再关掉自卫，只是对这只怪 3 秒内不再试，同样的失败 10 秒内只报一次；结果未知（`unknown`）的才停用。试玩里模型叫停卡住的移动后，被 5 只僵尸围着也不还手，就是因为①。
 - **水里不再淹死**：身体空着（没有任务）、眼睛在水下时像玩家一样按住跳，浮在水面。试玩里小克沉到湖底站着，模型以为掉进了「地下水」，最后淹死。
 - **上岸只选和水面齐平的岸**：比水面高一整格的岸从水里爬不上去（实测浮到差 0.14 格，原版玩家也一样），不再当成上岸点；只有这种岸时直接`NO_PATH`说明。紧挨着水的岸原版标成`WATER_BORDER`，也算能上的岸（原来漏掉了，只会选离水一格的）。游泳的进展只按离岸变近算，水面上下浮动不算；浮出水面一下不算上岸，不会清掉试过的岸。试玩里卡在岸边就是选了高一格的岸，又因为浮动一直算「有进展」不换岸。
-- **追怪疾跑**：保护玩家时追怪和撤退都疾跑（饱食度 6 以上、不在水里、没在用物品、不是跳空隙），骷髅退着射也追得上。
+- **追怪疾跑**：保护玩家时追怪和撤退都疾跑（饱食度大于 6、不在水里、没在用物品、不是跳空隙），骷髅退着射也追得上。
 - **胡萝卜、土豆能自动吃**：能种的原版食物（`ItemNameBlockItem`：胡萝卜、土豆、甜浆果）原来被当成「未验证」，现在和普通食物一样。
 - **死后照样能下线**：宿主退出时驱动器先核对身体的会话编号，角色死了重生后编号变了，撤销就没发出去，留下假人。撤销现在不要求编号一致（服务端只认它自己退役的那份租约，别人接管了就不下线）。
 - 实测：`server-equip-swim-smoke.mjs`装着 SB 21 项、挪开模组加`--with-peer`19 项；`server-guard-smoke.mjs`14 项（含疾跑）；`server-navigation-defense-smoke.mjs`55 项；`server-stroll-smoke.mjs`10 项。
 
 ### 瞬间动作旁边跟随（能力 beside-follow，2026-10-11）
+
+（10-12 注：已删。8m 第二步改成服务端姿态后，这份名单变成 `Posture.KEEPS`，见「陪伴姿态」一节的「不让姿态挂起的操作」；下面是当时的写法。）
 
 - 服务端声明 `beside-follow` 后，`select-slot`、`equip-item` 可以在 `follow-companion` 运行时执行：跟随不停、不重发，运行端也不让开。两个动作都在服务端同步完成（`begin` 返回时已不是 running）；它们不移动身体，不改跟随的 `active`。
 - 放行条件：当前正在 running 的非聊天动作全部是 `follow-companion`。运行端的 exclusive 槽和共享任务锁在这种情况下对这两个动作同样放行。
@@ -454,9 +460,9 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 **验证范围**：离线——`GuardCombatTest`（决策：蓄力怪举盾、射完放下去打、没蓄力不举、隔墙不举、弹射物来得及／来不及／已举着／飞偏、关盾或没盾照旧、苦力怕优先、近战优先、对射的弓放下又拉起；弹道推算几何）和`FollowCompanionTest`（经协议`act follow-companion`带`guard`，跟随驱动真实的`GuardCombat`，视图为脚本）。**没有验证**，要真实游戏：`foes()`从真实生物读出蓄力（骷髅、流浪者、沼骸、掠夺者的弩、溺尸的三叉戟）、`incoming`读真实弹射物（箭的速度和下坠是否与推算吻合）、盾真的挡下这一箭、朝向、骷髅射击循环里举放的节奏、Bot 和玩家同时被瞄准时站着不动是否碍事。
 
-### 陪伴姿态（8m 第二步，约定，2026-10-11）
+### 陪伴姿态（8m 第二步，2026-10-11）
 
-**状态（2026-10-11）：服务端已按本节实现，只有离线测试（`PostureTest`、`FollowCompanionTest`、`ControlSessionTest`），没进过游戏；运行端在做。** 合并后删掉被取代的旧小节（`follow-companion`、`step-aside-stop`、`beside-follow`）。实现时补定的细节已写进下文，标“实现补定”。设计见[陪伴状态设计](companion_state_design.md)第 7 节；只针对单人陪伴（一个真人、一个 Bot），多人问题见该文 7.9。
+**状态（2026-10-11，10-12 补）：服务端和运行端都已按本节实现，离线测试（`PostureTest`、`FollowCompanionTest`、`ControlSessionTest`，运行端 companion 相关用例），10-11 用户试玩过坐下和站起来打，其余没在游戏里单独验证。** 被取代的旧小节（`follow-companion`、`step-aside-stop`、`beside-follow`）保留作记录，开头都注明了已删。实现时补定的细节已写进下文，标“实现补定”。设计见[陪伴状态设计](companion_state_design.md)第 7 节；只针对单人陪伴（一个真人、一个 Bot），多人问题见该文 7.9。
 
 能力标记`server-posture`。跟随、等待、坐着不再是操作，而是租约上的一项常驻“姿态”，写法照常驻保护（`guard`）。同时删掉：`follow-companion`操作及其能力名，`companion-guard`的`follow-companion.guard`旧路径，`stop`的`stepAside`和能力`step-aside-stop`（`ControlSession.carries`），`beside-follow`。
 
@@ -574,7 +580,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - 超过`ControlSession.TTL_MS`（10 秒，和租约“控制者失联”同一个时长）没有任何打断步骤在跑时（运行端出了问题），服务端自己关窗口，让任务接着做。
 
 **运行端**（`ServerBody.interrupt(reason, work)`）：先发`begin`，再用窗口令牌跑`work`（吃或打的那几步带这个令牌，绕过被暂停的操作和任务锁），最后发`end`。持有任务锁的那件任务（运行端一步一步发操作的采集）在`act()`里等窗口关了再发下一步，不报错；等的时候被叫停，这一步不发（`CANCELLED`）。窗口时长计入`Body.fightMs()`，所以采集的期限同样顺延。`NOT_PAUSABLE`是可恢复的错误，不丢租约。
-- `SurvivalReflexes`决定暂停还是取消：正在跑的是可续做的任务（`tool-registry.json`里`resumable`：`build`、`tend-crops`、`breed-animals`、`hunt`、`travel-to`、`go-to-place`、`gather-resources`、`collect-items`），并且这件任务还没续做满 2 次（`MAX_RESUMES`，运行端按服务端操作的`operationId`或采集任务 id 记）时走窗口，事件里说“先暂停，吃完／打完接着做（第 n 次）”，接着做了再发一条。
+- `SurvivalReflexes`决定暂停还是取消：正在跑的是可续做的任务（`tool-registry.json`里`resumable`：`build`、`tend-crops`、`breed-animals`、`hunt`、`go-to`（服务端操作是`travel-to`）、`gather-resources`、`collect-items`），并且这件任务还没续做满 2 次（`MAX_RESUMES`，运行端按服务端操作的`operationId`或采集任务 id 记）时走窗口，事件里说“先暂停，吃完／打完接着做（第 n 次）”，接着做了再发一条。
 - 此刻不能暂停（`NOT_PAUSABLE`），或采集自己的生存步骤（换工具、两块之间吃东西）正占着生存锁：自动进食和自卫这一拍先不做，下一拍再试；血量降到`lowHealth`（自卫的低血线）还在等时，照旧`stop`取消任务再处理。明确的`defend-self`不等，照旧取消。
 - 不可续做的任务、已经续做满 2 次的、陪挖陪捡的子任务、容器任务等：照旧`stop`取消，事件里说明。正在自动进食时来了怪，自卫照旧`stop`抢先（连同被暂停的任务一起取消）。
 - 窗口里吃或打的结果是`unknown`：先`stop`取消任务（窗口随之关闭，任务不会接着做），再像原来一样停用本能。
@@ -594,4 +600,4 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
   - `failed` + `NO_EFFECT`：前后快照完全一样（包括被保护事件取消的情况）。回执不带 inventory。
   - `unknown` + `NATIVE_UNKNOWN`：其他所有情况。回执带 `unexpected`（逐条原因）、`inventory`、`before`、`after`，不自动重试。
   - 打开了没有适配器菜单契约核验的菜单：立即原生关闭，判为 unknown。
-- Node 只向模型发布一个 `interact-block` 工具（参数：坐标、交互 ID、`item` 或 `emptyHand`、可选 `face`），由运行端读最新观察来填方块守卫、挑快捷栏槽；物品不在快捷栏时返回 `NOT_IN_HOTBAR`，提示先 `prepare-item`。`use-item-on-block`／`use-item` 本身不作为模型工具。
+- Node 只向模型发布一个 `interact-block` 工具（参数：坐标、交互 ID、`item` 或 `emptyHand`、可选 `face`），由运行端读最新观察来填方块守卫、挑快捷栏槽；物品不在快捷栏时返回 `NOT_IN_HOTBAR`，提示先用 `equip-item` 带 `hand:"main"` 拿到手上（10-12 前是 `prepare-item`）。`use-item-on-block`／`use-item` 本身不作为模型工具。

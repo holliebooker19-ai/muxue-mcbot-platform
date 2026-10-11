@@ -5,13 +5,14 @@
 - 10-11 小雪同意先做合并。已做（离线）：合并清单第 1～4、6～9、12、13 条，名字按本方案（go-to、places、blueprints、get-status include、equip-item hand main、get-up、pillar、container-menu、emote 看人）；ServerBody **68 → 49 个**。旧名字在 `tool-registry.json` 里标 `clientOnly`，只给旧 ClientBody。运行端 520 项、`mcp-server` 728 项通过（另 1 项跳过；vision 截图那项本机连不上 viewer，没改那部分）；核心 `gradlew build` 通过（坐着、睡着时的提示改成 get-up）。
 - 10-12 小雪看过用法后定：第 5、10、11、14 条（read-chat、approach-container、fetch-and-give、assess-tool）都删，ServerBody **45 个**；启动提示里的“取物交还优先 fetch-and-give”改成先 container-withdraw 再 give-item。`AGENT.md` 的工具数小雪同意改成 45。
 - 10-12 说明瘦身（离线）：说明只留“什么时候用、给什么参数”，范围、时限、失败码这类细节交给错误信息和事件。陪伴模式不再写保护的拉回范围和陪挖的守卫细节，只说“跟随时自动保护，玩家不要你打才 guard:false”。顺手改掉说明里还指向旧名字的地方（dig-block 的 select-slot、give-item 的 list-inventory）。同一组能力下（脚本 `tool-sizes`，44 个工具）工具列表从 **62,333 → 41,613 字符**；其中说明文字约 3.7 万 → 1.6 万，剩下约 2.9 万是参数结构（类型、正则、范围），没动。运行端 520 项、`mcp-server` 729 项通过（另 1 项跳过）。
-- 没做：隔离服 smoke／agent-trial 脚本里按旧名字调工具的地方（约 37 个文件，另开任务）；真实模型实测（合并和瘦身后挑工具对不对）。
+- 10-12 隔离服 smoke／agent-trial 脚本改成新名字（b15aef6，44 个文件，复核修正 2d54d00）；还留着 `fetch-and-give`（9 处）、`assess-tool`（4 处）的 TODO，只做了 `node --check`，没跑隔离服。
+- 没做：真实模型实测（合并和瘦身后挑工具对不对），随 10-12 的包一起试玩。
 
 下面是当时的方案原文。
 
 ## 为什么要整理
 
-- 现在 ServerBody 给模型 68 个工具（`client-runtime/tool-registry.json`）。所有能力都打开时，工具名、说明和参数加起来约 **7 万字符**（约 2 万 token），每一轮都要带给模型。有缓存时不太贵，但模型要在里面挑工具，Haiku 这类小模型更容易挑错。
+- 当时（10-11）ServerBody 给模型 68 个工具（`client-runtime/tool-registry.json`）。所有能力都打开时，工具名、说明和参数加起来约 **7 万字符**（约 2 万 token），每一轮都要带给模型。有缓存时不太贵，但模型要在里面挑工具，Haiku 这类小模型更容易挑错。
 - 10-06～10-11 的活动记录里一共调用了 984 次工具（`runtime/` 和绿色版 `runtime/` 里的 `activity-*.jsonl`）：
   - 用得最多：send-chat 282、get-block 89、discover-resources 75、get-operation 52、gather-resources 51。
   - **16 个一次也没用过**：assess-tool、forget-place、list-blueprints、save-blueprint、approach-container、open-container、click-slot、close-container、use-item、interact-block、use-bucket、machine-items、wake-up、fetch-and-give、produce-item、breed-animals。
@@ -80,6 +81,8 @@
 3. make-item 等第一批试玩反馈后再定。
 
 ## 需要你定的
+
+（10-12 注：1～3 已定，见上面进度；第 4 条高级工具开关没做。）
 
 1. 合并清单 14 条，哪些不要。
 2. 新名字（go-to、places、get-up、container-menu……）可以吗，还是保留旧名字里的一个（比如走路仍叫 travel-to）。

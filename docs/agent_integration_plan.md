@@ -1,6 +1,6 @@
 # MCBOT 多 Agent 与原生 API 接入计划
 
-> **2026-10-08 状态说明**：本文的进度描述停在 10-03～10-06，已过时。之后：R7 统一 Agent 适配接口 10-06 完成（第 4 步）；dsh 走 ACP 接入、10-06 隔离服真实模型通过，之后试玩两轮（第 5 步）；v0.1 只做 Claude Code、Codex、dsh 三家，Antigravity 和原生 API 不在 v0.1 范围里（原生 API 列在 v0.1 之后）。本文保留的是接入方式的调研和取舍理由；当前进度看[评审入口](review_guide.md)和[交付计划](delivery_plan.md)。
+> **2026-10-08 状态说明**：本文的进度描述停在 10-03～10-06，已过时。之后：R7 统一 Agent 适配接口 10-06 完成（第 4 步）；dsh 走 ACP 接入、10-06 隔离服真实模型通过，之后试玩两轮（第 5 步）；v0.1 只做 Claude Code、Codex、dsh 三家，Antigravity 和原生 API 不在 v0.1 范围里（原生 API 列在 v0.1 之后）。本文保留的是接入方式的调研和取舍理由；当前进度看[评审入口](review_guide.md)和[交付计划](delivery_plan.md)。10-12 补：正文里的“39 工具”“持续陪挖与建筑仍待实现”“游戏端 follow-companion”“`companion --body server` 已接 Claude／Codex”都是当时的说法——现在 ServerBody 合并后 45 个工具，持续陪挖和建筑（8i）已做，`follow-companion` 已由服务端姿态取代，dsh 也接上了 ServerBody 托管。
 
 2026-10-03 进度核对。Codex V0 已实现并完成首轮试玩；ServerBody 上本机 Claude／Codex 的 C 验收也已完成。最终通用接入层、其他新增 Agent 和原生 API 通道尚未完成。与 [通用适配主计划](archive/platform_compat_plan.md) 一起作为架构方向，近期顺序以 [交付清单](delivery_plan.md) 为准。
 

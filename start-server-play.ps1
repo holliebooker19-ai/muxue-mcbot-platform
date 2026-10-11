@@ -5,7 +5,7 @@ param(
     [ValidateSet('claude', 'codex', 'dsh')][string]$Agent = 'claude',
     [string]$Nickname = '',
     [string]$ConfigDir = '',
-    # 人设和玩家档案所在的记忆目录（<目录>/xiaoke/persona.md、<目录>/shared/players/*.md），留空就不带人设
+    # 人设和玩家档案所在的记忆目录（<目录>/<Bot 游戏名小写>/persona.md、<目录>/shared/players/*.md），留空用默认位置
     [string]$MemoryDir = '',
     [string]$Model = '',
     [string]$NodePath = '',

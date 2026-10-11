@@ -1,12 +1,14 @@
 # 陪伴状态设计：姿态、任务、打断
 
-2026-10-10 起草。起因是用户觉得托管时的状态管理设计得不好（8l 刚把跟随改成持续状态，但守卫、跟随、建筑、临时小任务之间的关系还是乱的）。本文先整理现状和问题，再定分层目标和分步路线；**第一步是守卫和跟随解耦**，详细设计见第 5 节。同一天的外部陪伴体验评审见 [companion_experience_review.md](companion_experience_review.md)，其中第 5 条与本文第一步是同一个问题。
+2026-10-10 起草。起因是用户觉得托管时的状态管理设计得不好（8n〔交付计划里原来也记作 8l〕刚把跟随改成持续状态，但守卫、跟随、建筑、临时小任务之间的关系还是乱的）。本文先整理现状和问题，再定分层目标和分步路线；**第一步是守卫和跟随解耦**，详细设计见第 5 节。同一天的外部陪伴体验评审见 [companion_experience_review.md](companion_experience_review.md)，其中第 5 条与本文第一步是同一个问题。
 
 状态：第 6 节的三个问题用户 10-10 已定。第一步分两块做：
 - **第一块（10-10，离线完成）**：服务端常驻保护（`GuardDuty`、协议方法 `guard`、观察里的 `guard`），空闲、原地等待、跟随时都能保护，等待中打完走回原位；运行端改用它（跟随让开、等待都不关保护，`companion-mode stop`／`stop-action` 关）。协议见 [server_body_protocol.md](server_body_protocol.md#常驻保护8m-第一步第一块2026-10-10)。离线：Java `GuardDutyTest` 17 项、`ControlSessionTest` 和 `FollowCompanionTest` 补的检查，运行端 `companion-guard-duty.test.mjs` 5 项；没有隔离服实测、没有真实模型试玩。
 - **第二块（10-10，离线＋隔离服完成）**：5.2 表里的任务打断和期限顺延，能力`guard-duty-tasks`，协议见 [server_body_protocol.md](server_body_protocol.md#保护打断任务8m-第一步第二块2026-10-10)。和 5.2 表的出入：`emote`手势不打断（几秒就完，打断反而要多处理一个被取消的操作）；`approach-player`不打断（玩家一动它就失败）；走向床可打断。没有改“打架开始前在路上挨打就 `BLOCKED`”的规则，打完后才把受伤基线重置。隔离服`server-guard-duty-smoke`8 项通过（等待、地面建筑、垫脚柱上不打、玩家太远），没有真实模型试玩；合成界面开着时只有离线检查。
 
 **适用范围（2026-10-11 用户定）**：本文只针对**单人陪伴**，也就是服务器上一个真人玩家和一个 Bot。多人（多个真人，或多个 Bot）暂不适配，放到以后，已知的问题记在 7.9。在此之前，设计照单人的情况写：Bot 陪的就是那个玩家，跟谁就保护谁，听到的命令都当成这个玩家下的。
+
+**10-12 状态**：四步都已完成（第 1 步第二块有隔离服实测，第 2～4 步只离线；10-11 用户试玩过坐下、站起来打、保护用弓和盾）。第 1、2 节和 7.1、8.1 写的是动工前的样子，第 2 节的六个问题分别由第 5、7、8 节的做法解决；各节和实现的出入写在各节末尾的“完成”段落里。
 
 ## 1. 现状：状态分在三层
 
@@ -47,10 +49,10 @@
 
 | 步 | 内容 | 主要改动 | 估计 |
 | --- | --- | --- | --- |
-| 1 | **守卫解耦**：保护玩家变成服务端独立的常驻职责，在等待、做任务时都有效（第 5 节） | 服务端新职责层和协议方法；任务的可打断点和期限顺延；运行端 `GuardDuty` | 2.5～3.5 天 |
-| 2 | **姿态在服务端挂起／恢复**：跟随、等待、坐着成为服务端姿态，让开不再拆掉重建（第 7 节） | `FollowCompanion` 从操作改成姿态；`CompanionMode` 去掉让开、代次接纳逻辑 | 4～5 天（10-11 估） |
+| 1 | **守卫解耦**：保护玩家变成服务端独立的常驻职责，在等待、做任务时都有效（第 5 节） | 服务端新职责层和协议方法；任务的可打断点和期限顺延；运行端 `GuardDuty` | 2.5～3.5 天；**10-10 完成**（第一块离线，第二块离线＋隔离服） |
+| 2 | **姿态在服务端挂起／恢复**：跟随、等待、坐着成为服务端姿态，让开不再拆掉重建（第 7 节） | `FollowCompanion` 从操作改成姿态；`CompanionMode` 去掉让开、代次接纳逻辑 | 4～5 天（10-11 估）；**10-11 完成（离线）** |
 | 3 | **小动作不打断姿态**：按 MOVE／LOOK 标志区分，`look-at`、`emote`、选格、穿装备不让开。10-11 先做了 select-slot、equip-item；emote、look-at 仍让开，待第 2 步后再做。**2026-10-11 完成（离线，未进游戏）**：没有用 MOVE／LOOK 标志，而是两张名单放在 `Posture.java`：`look-at` 进 KEEPS（姿态照常驱动）；内置手势 `emote` 进 HOLDS（播放时站住但不挂起、不补 3 秒，正常结束即继续跟随）；附加动画不变（挂起，播完 3 秒）。坐着时不变。见[协议](server_body_protocol.md)「陪伴姿态」一节里的「不让姿态挂起的操作」。 | 名单（`Posture`、`ServerController.finish`） | 0.5 天 |
-| 4 | **统一任务生命周期**：运行端单一调度器；建筑、种地、长途走被打断后续做 | 合并 6 个任务主人的公共部分；服务端可空字段改成一个任务槽。10-11 定 4a～4d 全做，详细设计见第 8 节 | 8～9.5 天（10-11 估） |
+| 4 | **统一任务生命周期**：运行端单一调度器；建筑、种地、长途走被打断后续做 | 合并 6 个任务主人的公共部分；服务端可空字段改成一个任务槽。10-11 定 4a～4d 全做，详细设计见第 8 节 | 8～9.5 天（10-11 估）；**10-11 完成（离线）** |
 
 陪挖、陪捡（问题 3）在第 2、4 步里一起拆：子任务交给统一调度器，`CompanionMode` 只留姿态。
 
@@ -66,6 +68,8 @@
 不在这一步做：跟随本身改成姿态（第 2 步）；被进食、自卫打断的任务续做（第 4 步）。
 
 ### 5.2 服务端
+
+（10-12 注：实现和本节的出入：能力名是 `guard-duty-fenced`（保护方法、`stop` 的 `clearGuard`）和 `guard-duty-tasks`（任务打断），没有 `guard-duty`；`approach-player` 和 `emote` 手势不打断（见文件开头）；期限顺延做成任务的 `resumeAfterGuard(fightMs)`，额度用 `GuardDuty.Grace`（最多原期限一倍），没有 `actionDeadline`／`extendDeadline`；`follow-companion` 和它的 `guard` 参数在第二步删掉了，没有过渡期旧路径。）
 
 **新的职责层**。`ServerController` 加一个字段 `GuardDuty duty`，不属于任何操作：
 
@@ -118,6 +122,8 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 
 ### 5.3 运行端
 
+（10-12 注：没有新建 `guard-duty.ts`，运行端的保护逻辑（`guardFor`、`noteGuard`、`fight` 等）留在 `companion-mode.ts`，服务端的保护在 `GuardDuty.java`。）
+
 - 新文件 `client-runtime/src/guard-duty.ts`：保存运行端想要的保护（玩家、选项），调新增的 `Body.setGuard()`（ServerBody 走 `guard` 方法），从观察读 `guard` 状态。租约丢失、重新接管后不自动恢复（和“不重放”的原则一致），由驱动器提示模型。
 - `CompanionMode`：`Intent` 去掉 `guard`；`guardFor`、`noteGuard`、`lastGuard`、`fight` 移到 `GuardDuty`。
   - `follow` 的 `guard` 参数保留，含义变成“开始跟随时顺便打开保护”（默认开，沿用 WebUI 的默认值）。
@@ -162,7 +168,7 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 2. **离玩家多远还去打**：Bot 离被保护玩家 16 格以内才放下手上的事去打；超出只靠 3 格近身自卫。
 3. **打完回哪**：等待中打完回到开始打之前站的地方（在保护范围内）；跟随中打完接着跟；做任务时打完回到任务。
 
-## 7. 第二步：姿态在服务端挂起／恢复（详细设计，2026-10-11 待用户审）
+## 7. 第二步：姿态在服务端挂起／恢复（详细设计，2026-10-11 用户已审，当天完成，离线）
 
 ### 7.1 现在怎么走一遍“跟随中让 Bot 去做件事”
 
@@ -209,7 +215,8 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
   - `suspended`：让给一个操作；
   - `away`：玩家不在 32 格内或在别的维度，回来自动接上；
   - `blocked`：走不过去，隔几秒再试，原来就有这个逻辑；
-  - `seated`：坐着。
+  - `seated`：坐着；
+  - `guarding`：保护在打（审后补定，打完回到原来的状态）。
 - 坐下：`sit` 操作成功后，姿态改成 `seated`，跟随或等待到此结束，保护不变；`stand-up` 之后姿态为空。坐下以后不再需要运行端的 `seatedDown`。
 
 **`ServerController` 里的结构**：
@@ -218,7 +225,7 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
   - 不再持有 `ControlSession.Operation`；
   - 失败不再 `finish` 一个操作，而是改姿态状态；
   - 能否驱动身体，改用和保护一样的租约检查：`dutyPermission()` 那种“同租约、同登录”。
-- 每 tick 的顺序：保护（`tickDuty`）→ 正在跑的操作 → 姿态。也就是说：
+- 每 tick 的顺序（实现，10-12 核对 `ServerController.beforePhysics`）：保护（`tickDuty`）→ 姿态（`tickPosture`，有不在 KEEPS 里的操作在跑就让开）→ 正在跑的操作。也就是说：
   - 操作在跑时，姿态是 `suspended`，`suspendedFor` 填操作名；
   - 没有操作时，姿态驱动身体；等待时照旧原地看人、闲逛。
 - 接上的时机：
@@ -366,7 +373,7 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 
 运行端的 R5 要先确定几个数：
 - “离得不太远”：复用陪挖、陪捡已有的范围，或者长途走的上限，不另起新数字；
-- “身边没有怪”：复用保护的 `wouldFight` 判断。
+- “身边没有怪”：复用保护的 `wouldFight` 判断。（实现：`death-recovery.ts` 用 survival-state 的威胁列表，敌对且可防卫的算，因为死后保护不一定开着，`wouldFight` 要求保护开着；距离上限用 `TRAVEL_MAX_BLOCKS`。）
 
 **第 2 步：合并（我做）**
 - 逐行审 worker 的代码；
@@ -429,7 +436,7 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 | `moves` | 会不会挪动身体 | 只作说明，姿态让不让开仍由服务端的 KEEPS／HOLDS 决定（第 3 步） |
 | `resumable` | 被进食／自卫打断后能不能续做（4a 用） | 新增 |
 
-`resumable` 为真的有：`build`、`tend-crops`、`breed-animals`、`hunt`、`travel-to`、`go-to-place`、`gather-resources`、`collect-items`。容器四件套、`craft-item`、`smelt-item`、`produce-item`、`modify-item`、`pillar-up`／`pillar-down` 不续做。
+`resumable` 为真的有：`build`、`tend-crops`、`breed-animals`、`hunt`、`travel-to`、`go-to-place`（10-12 合并后是 `go-to`）、`gather-resources`、`collect-items`。容器四件套、`craft-item`、`smelt-item`、`produce-item`、`modify-item`、`pillar-up`／`pillar-down` 不续做。
 
 改动：
 1. 新增 `work.ts`，里面放唯一的 `assertIdle()`／`busy()`：容器、采集、生存、垫高都没在跑，并且 `body.isBusy()` 为假。替换 `idleBody`、两份 `ordinaryBusy`、礼物换装的 `busy`、`PillarTasks` 的 `idle` 和 `mcp.ts` 里散落的三连。`register` 按表里的 `needsIdle` 统一检查，处理函数里不再自己写。
@@ -440,14 +447,14 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 - 原子动作在采集、生存任务跑着时，改成在运行端就报 BUSY。现在也是 BUSY，只是由 `ServerBody.act` 的任务锁报，提示文字不同。
 - `companion-mode` 不再查容器任务忙不忙。姿态和任务已经分开（第 2 步），“搬箱子时说一声跟着我”应当能设上，姿态会自己先让开。
 
-测试：`tool-registry` 表和 `mcp.ts` 注册的工具一致，`needsIdle` 的工具在忙时报 BUSY，白名单的条数和内容不变（68 个）。
+测试：`tool-registry` 表和 `mcp.ts` 注册的工具一致，`needsIdle` 的工具在忙时报 BUSY，白名单的条数和内容不变（当时 68 个；10-12 合并后 45 个）。
 
 **2026-10-11 完成（离线）**。离线检查：运行端 480 项（新增 `tool-registry.test.mjs` 3 项）、`mcp-server` 726 项（另有 1 项跳过）全部通过。和上面设计的出入：
 - 表是 `client-runtime/tool-registry.json`，不是 `.ts`。运行端由 `src/tool-registry.ts` 按自己的位置读它并校验；Codex 用固定路径按文件读（`codex-app-server.mjs`），不 import，所以不违反打包脚本“scripts 不引用目录以外的模块”的检查；打包时多复制这一个文件。白名单因此不依赖运行端是否已经构建。
 - `kind` 多了一种 `control`（`stop-action`、`set-reflexes`、`defend-self`）：不重新启用本能，也从不因为忙被拒。“重新启用被停用的本能”只有 `action`／`task` 会触发，取代原来的 `readTools`。
 - `companion-mode` 记为 `action`，`needsIdle` 为假：照旧会重新启用本能，但不再查容器任务（8.7 已同意）。
 - 只看不做的调用（带 `survey:true` 或 `dryRun:true`）一律不重新启用本能，也不查忙。原来只有 `tend-crops`、`breed-animals` 的 survey 是这样，现在 `hunt` 的 survey 和 `build` 的 `dryRun` 也一样。
-- `list-blueprints`、`save-blueprint` 只读写蓝图文件，记为 `read`。原来它们会重新启用本能，而且本能正在吃东西或打架时会被拒。
+- `list-blueprints`、`save-blueprint`（10-12 合并成 `blueprints`）只读写蓝图文件，记为 `read`。原来它们会重新启用本能，而且本能正在吃东西或打架时会被拒。
 - `assertIdle` 除了三个任务主人，还查 `body.isBusy()`（有动作在跑、有人持有任务锁、正在停止）。原来这种情况也是 BUSY，只是由 `ServerBody.act` 报出来。
 - 实现过程中发现：10-11 清理 worker worktree 时，`client-runtime` 和 `mcp-server` 的 `node_modules` 被一起清空了。已按 lock 文件重新 `npm ci`；其他目录和绿色版没有受影响。
 
@@ -557,7 +564,7 @@ interface BodyTask extends GuardDuty.Pausable {
 
 ### 8.5 4d 运行端：一个调度器（约 2～3 天；10-11 完成，见本节末尾）
 
-新增 `scheduler.ts`，统一管四个任务主人共有的那部分：
+新增 `scheduler.ts`，统一管四个任务主人共有的那部分（下面是设计；实际接口是 `start`／`live`／`end`／`block`／`cancel`／`cancelOne`／`halt`／`useCompanion`，没有 `run`、`borrow`，见本节末尾）：
 - 当前任务槽：id、工具名、epoch、`cancelled`／`stopPending`、身体任务锁令牌；
 - `assertIdle`，替换 4b 的 `work.ts`；
 - `run(tool, work)`：取锁、跑、放锁；
@@ -595,7 +602,7 @@ interface BodyTask extends GuardDuty.Pausable {
   - `get-companion-mode` 里的 `mining`／`pickup` 字段照旧。
 - 测试：`companion-*` 系列全过，新增 `companion-errands.test.mjs`。
 
-**2026-10-11 完成（离线）**。运行端 505 项（新增 `companion-errands.test.mjs` 6 项，`scheduler.test.mjs` 多 1 项）、`mcp-server` 726 项（另有 1 项跳过）通过；没有进游戏。`CompanionMode` 从 822 行减到 623 行。和上面设计的出入：
+**2026-10-11 完成（离线）**。运行端 505 项（新增 `companion-errands.test.mjs` 6 项，`scheduler.test.mjs` 多 1 项）、`mcp-server` 726 项（另有 1 项跳过）通过；没有进游戏。`CompanionMode` 从 822 行减到 623 行（10-12 加了跟丢自己追等，约 710 行）。和上面设计的出入：
 - 陪伴的锁也交给了调度器。它是一份只占锁、本身不算“正在跑的任务”的租约（`holder`），工具名记作 `companion-mode`。
   - 陪挖陪捡的子任务（一次采集）借这把锁跑，调度器把它记成这份租约的子租约：停这把锁，子任务一起停；锁同样要等停止确认后才放。
   - 死后捡回用的是同一把锁。

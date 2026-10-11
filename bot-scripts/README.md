@@ -1,5 +1,7 @@
 # bot-scripts — 小克自己写的行为脚本
 
+> 只属于旧 Mineflayer 实现（`mcp-server/`）。当前主线 ServerBody 没有 `list-scripts`、`run-script`、`memory-note` 这些工具，怎么玩见 [docs/play.md](../docs/play.md)。
+
 玩的过程中发现某个多步操作会反复做（砍树→做木板、挖一条隧道、铺一片地……），就把它写成脚本放在这里。
 文件保存后立即生效：`list-scripts` 查看，`run-script` 运行，不需要编译或重启。
 

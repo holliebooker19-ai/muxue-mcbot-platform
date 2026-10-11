@@ -186,7 +186,7 @@ export class CompanionMode {
   explicitStopCount(): number { return this.explicitStops; }
   read(): CompanionState { if (this.terminal) this.events.deliverOperation(this.terminal); return this.snapshot(); }
   observationEpoch(): number | null { return this.changing || this.stopping ? null : this.observationRevision; }
-  /** Take the server's word now (get-companion-mode): the same reading the monitor does every tick. */
+  /** Take the server's word now (get-status reports companionMode): the same reading the monitor does every tick. */
   async refresh(): Promise<void> {
     const epoch = this.observationEpoch();
     if (epoch === null) return;

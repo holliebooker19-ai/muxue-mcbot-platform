@@ -1,4 +1,4 @@
-# 评审入口（2026-10-10）
+# 评审入口（2026-10-10，10-12 更新数字和现状）
 
 写给第一次看这个仓库的评审者（人或另一个模型）。请根据代码和测试判断，不要把文档里的计划当成已经实现。旧的评审入口（10-03）在 [archive/review_guide.md](archive/review_guide.md)，只作历史参考。
 
@@ -48,25 +48,26 @@ v0.1 的范围（用户定的）：
 进度表见 [交付计划的进度总览](delivery_plan.md#进度总览2026-10-10)。概括：
 
 - 已完成：Agent 接入三家、WebUI 和配置页、Mod 适配接口和三个示例模组、按标签认模组资源、合成烧炼和工作站、睡觉、地点和走门、种地养动物、保护玩家、表情和外观（8j）、托管启动时自动重生、长途走（8k：地表粗路线、游泳过河）、建筑（8i：按蓝图逐格放，放前在原版放置代码里试出能得到要求状态的点击，够不着就垫高，缺点击面就放临时靶块，从垫脚柱迈上盖好的楼板和屋顶，两层木屋 94% 一次盖对）。
-- 用户已试玩八轮（Claude 六轮、dsh 两轮，另有一次 dsh 补测整棵树；模型有 Sonnet、Haiku、DeepSeek-V41-Flash），每轮的反馈都修完了（交付计划 3a～3j）。Codex 只在 10-05 首版验收时跑过受控阶段，没有试玩过。
+- 用户已试玩八轮（Claude 六轮、dsh 两轮，另有一次 dsh 补测整棵树；模型有 Sonnet、Haiku、DeepSeek-V41-Flash），每轮的反馈都修完了（交付计划 3a～3j）；之后 10-11、10-12 又在用户自己的单人实例（局域网）试玩了几次，修复记在交付计划的「10-11 试玩反馈和排期」。Codex 只在 10-05 首版验收时跑过受控阶段，没有试玩过。
 - 8b 10-09 基本做完：模组机器通用物品槽适配（`machine-items`，服主按 Mod 开启）、熔炉和酿造台放好就走到时回来取（只读 `machine-status`、运行端记账和 `machine` 事件），只有隔离服实测。
 - 10-10 用户把“让别人装得上”提前：兼容清单 `compat.json`（9a，网站、README、WebUI 模组页的唯一来源，`scripts/check-compat.mjs` 核对它和代码里锁的版本）已完成，NeoForge 放宽到 21.1.217 及以上；托管启动改成只要 Node（`scripts/start-server-play.mjs`），`scripts/package.mjs` 能出 Windows 绿色版目录（自带官方 Node），还没发布。
-- 还没做：发布绿色版（9）、网站（9b）、WebUI 模组页和安装向导（6c 的①②）、农夫乐事（8c）、模组炉子沿用 smelt-item（8b 收尾）、三家回归发布（10）。
+- 10-10～10-12 又做了：WebUI 插件页（6c 的②）、陪伴状态重构（8m，四步）、工具合并（68 → 45 个）和说明瘦身、启动提示词分三层、Agent 自己压缩上下文、远处找人和跟丢自己追、游戏里叫停分暂停／取消。
+- 还没做：发布绿色版（9）、网站（9b）、安装向导、农夫乐事（8c）、模组炉子沿用 smelt-item（8b 收尾）、三家回归发布（10）。
 
 证据分三层，强弱不同，请分开看：离线测试 < 隔离服实测（脚本驱动真实服务器，不用模型）< 真实模型试玩。很多能力只有隔离服实测，没经过真实模型。
 
-当前规模（行数，Java 行很长，行数偏少）：核心模组约 9300 行、测试 2100 行；client-runtime 约 4800 行、测试 4600 行；scripts（驱动器、WebUI、43 个隔离服实测脚本等）约 15000 行；三个示例附属模组各 150～500 行。
+当前规模（行数，Java 行很长，行数偏少）：核心模组约 13100 行、测试 3700 行；client-runtime 约 7300 行、测试 8200 行；scripts（驱动器、WebUI、64 个隔离服实测脚本等）约 19000 行（10-12）；三个示例附属模组各 150～500 行。
 
 ## 4. 已知问题和风险
 
 - **外部评审的 11 个问题 10-09 已修**：2026-10-08 评审发现，清单、做法和证据见[交付计划](delivery_plan.md#2026-10-08-外部评审的问题)。
 - **工作站有几处比说法窄**：熔炉类（`PROCESSOR`）目前按单原料执行；附魔、铁砧“先预览、问过玩家再做”只是提示词约定，程序不验证玩家是否同意。详见[工作站设计](workstation_design.md)。
-- **驱动器太大**：`scripts/companion.mjs` 约 1560 行，三家 Agent 的会话、事件调度、叫停、重启、记忆整理都在里面。
-- **启动提示词越来越长**：每加一个能力就在 `startupPrompt` 里加一句，现在二十多条规则。
-- **工具多**：MCP 工具约 63 个（按服务器能力和已装适配增减）。小模型（Haiku、Flash）会选错工具或自己逐格探查。
+- **驱动器太大**：`scripts/companion.mjs` 约 1800 行，三家 Agent 的会话、事件调度、叫停、重启、记忆整理都在里面。
+- **启动提示词**：10-12 已分三层（常驻规则约 1,100 字、玩法说明用到时才给，见[启动提示词瘦身方案](prompt_slimming_plan.md)），还没用真实模型试过。
+- **工具多**：10-12 从 68 个合并到 45 个（以 `client-runtime/tool-registry.json` 去掉 `clientOnly` 为准，按服务器能力和已装适配增减），见[工具整理方案](tool_consolidation_plan.md)。小模型（Haiku、Flash）会选错工具或自己逐格探查。
 - **实测靠本地夹具**：`scripts/server-*-smoke.mjs` 依赖本机的隔离服、存档备份和端口，干净 clone 跑不了；没有 CI。有几个已知的偶发失败（保护实测有一次无报错退出、导航与防卫的高处拾取偶发、Node 24.15 原生崩溃 0xC0000409；绿色版改带官方 Node 24.21.0）。
 - **R6 只做了一半**：背包里无法完整编码组件的物品会降级显示，容器格子和地上物品还没有。
-- **死亡只在启动托管时自动重生**：托管途中死了，控制结束，要重新启动托管。
+- **托管途中死亡**：WebUI 启动的托管（`--wait`）会原地复活后自动接上，并告诉 Agent 死因；命令行不带 `--wait` 时死后要重新启动托管（启动时会自动重生）。
 - **YSM 看不到结果**：YSM 的指令不回任何消息，只能确认指令发出去了；模型和动画的样子要在客户端看。
 - **多版本还没开始**：核心大量依赖原版内部实现（寻路、发包、菜单、配方、组件），NeoForge 事件（受伤、横扫、聊天、踩耕地等）在 Fabric 上要用 mixin 重做。评估见[交付计划](delivery_plan.md)末尾「多版本和发布渠道」一段。
 
@@ -75,10 +76,10 @@ v0.1 的范围（用户定的）：
 1. 第 2 节的取舍有没有明显错误，或者会在 v0.1 之后（多版本、Fabric、原生 API、多 Bot）卡住的地方？
 2. 程序和模型的分工合适吗？工具数量和粒度对小模型是不是太重？有没有该合并或该拆开的工具？
 3. 安全边界（前置核验、租约、unknown 不重试、未知 Mod 拒绝、不伤玩家和宠物的兜底）有没有漏洞，特别是并发和停止时的竞态？
-4. Mod 适配接口（`com.mcbot.servercontrol.api`：ContainerAdapter、ItemInteraction、PickupSink、WorkstationAdapter、EmoteSource、AppearanceSource）是否一致、够用？以后别人写适配会不会踩坑？
+4. Mod 适配接口（`com.mcbot.servercontrol.api` 和 `api.workstation`：McbotApi、ContainerAdapter、ItemInteraction、PickupSink、SeatAdapter、WorkstationAdapter、EmoteSource、AppearanceSource）是否一致、够用？以后别人写适配会不会踩坑？
 5. 驱动器和提示词：`companion.mjs` 和 `startupPrompt` 应该怎么拆、怎么控制长度？
 6. 测试：离线、隔离服、真实模型三层的投入比例合理吗？哪些风险目前没有任何测试覆盖？
-7. 按 v0.1 剩下的计划（10-10 起：打包发布 9 → 网站 9b → WebUI 模组页 6c①② → 8c → 10；“在干净环境从头安装一遍”的演练跟打包一起做），顺序和估时是否现实，有没有该先做的基础工作？
+7. 按 10-12 的排期（这批改动试玩 → 长期记忆 → 自主性 → v0.1 剩下的：网站 9b、8c、8b 收尾、回归发布 10；“在干净环境从头安装一遍”的演练跟发布一起做），顺序是否现实，有没有该先做的基础工作？
 
 请先给总判断，再按优先级列出有证据的问题（文件和调用链、触发条件、影响、最小建议），区分“v0.1 前必须修”和“可以以后再做”。没有把握的标成待验证，不要直接建议大规模重写。
 
@@ -106,8 +107,8 @@ v0.1 的范围（用户定的）：
 离线测试（需要 Node 24、JDK 21，首次要联网装依赖）：
 
 ```pwsh
-Set-Location client-runtime; npm ci; npm test          # 运行端，约 355 项
-Set-Location ../mcp-server; npm ci; npm test           # 驱动器、WebUI、打包和兼容清单、旧 Mineflayer 实现，约 680 项（vision 浏览器清理那项在干净 HEAD 上也偶发失败）
+Set-Location client-runtime; npm ci; npm test          # 运行端，约 540 项（10-12）
+Set-Location ../mcp-server; npm ci; npm test           # 驱动器、WebUI、打包和兼容清单、旧 Mineflayer 实现，约 740 项（10-12）（vision 浏览器清理那项在干净 HEAD 上也偶发失败）
 Set-Location ../mods/mcbot-server-control; ./gradlew.bat build   # 核心，含 Java 检查和 loaderNeutralCheck
 Set-Location ../mcbot-yes-steve-model; ./gradlew.bat build       # 附属模组要先构建核心
 ```

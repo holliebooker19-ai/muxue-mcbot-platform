@@ -1,6 +1,6 @@
 # Body 运行端（ServerBody 与 ClientBody V1）
 
-2026-10-03增量：能力齐备的ServerBody现在提供39个MCP工具，包含主背包准备、工具基础评估、自动进食、有限防卫及revision策略；高差导航通过`navigation-3d`声明。生存终态单独记录，不因静默进食或取消而丢历史，也不逐击唤醒模型。当前验收与限制见[生存第二批](../docs/archive/server_navigation_defense_validation.md)；下文13／21／33等数量属于相应历史阶段。
+> **10-12 说明**：本页按批次记录，下文的工具名和工具数（13／21／33／39 等）都是当时的。现在 ServerBody 的工具清单以 [`tool-registry.json`](tool-registry.json) 去掉 `clientOnly` 的条目为准（全部能力下 45 个），新旧名字对应见下面「工具与当前边界」开头。，包含主背包准备、工具基础评估、自动进食、有限防卫及revision策略；高差导航通过`navigation-3d`声明。生存终态单独记录，不因静默进食或取消而丢历史，也不逐击唤醒模型。当前验收与限制见[生存第二批](../docs/archive/server_navigation_defense_validation.md)；下文13／21／33等数量属于相应历史阶段。
 
 这是独立的 TypeScript／MCP 包，使用同一 Body 契约连接两种后端。ServerBody 连接安装 `mcbot-server-control` 的独立服务器，显式接管服务端生存角色，无额外 Bot Minecraft 客户端；A／B／C、持续陪伴及有限采集首批已有对应真实验证。ClientBody 是保留的可选 V1 原型，连接安装 `mcbot-control` 的真实客户端，客户端须先由用户进入世界，游戏服务器无需安装该客户端控制 Mod。
 
@@ -72,17 +72,17 @@ node dist/main.js --body client --connection-file "C:/path/to/instance/config/mc
 - `follow-player`（旧的限时跟随）不再给 ServerBody，跟随用 `companion-mode`。
 - `tool-registry.json` 里标 `clientOnly` 的是只给旧 ClientBody 的工具，ClientBody 的工具和形状不变。10-12 又删了 4 个：`read-chat`（只留给 ClientBody，ServerBody 的聊天作为事件推给模型）、`assess-tool`（采集、挖方块时程序自己挑工具）、`approach-container`（容器任务自己会走过去）、`fetch-and-give`（先 `container-withdraw` 再 `give-item`；运行端内部这条组合流程还在，和取物、交物共用代码）。ServerBody 共 45 个。
 
-公共观察／控制工具：`get-status`、`get-position`、`list-inventory`、`find-entity`、`read-chat`、`get-block`、`get-operation`、`wait-for-events`、`stop-action`；支持容器时另有 `get-container`。
+ServerBody 现在的观察／控制工具（`tool-registry.json` 里 kind 为 read、chat、control 的）：`get-status`、`find-entity`、`get-block`、`get-operation`、`look-around`、`discover-resources`、`discover-containers`、`workstation-options`、`places`、`blueprints`、`wait-for-events`、`send-chat`、`stop-action`、`set-reflexes`、`defend-self`；`get-position`、`list-inventory`、`read-chat`、`get-container` 只给 ClientBody。
 
-两种后端已有的动作：`send-chat`、`look-at`、`move-to-position`、`follow-player`、`dig-block`、`place-block`、`open-container`、`click-slot`、`close-container`；ServerBody B 另有 `select-slot`、`drop-item`，全部启用是 11 个动作＋10 个观察／控制工具共 21 个。ClientBody v1 全部启用仍为 19 个。
+历史（10-03 之前）：两种后端已有的动作：`send-chat`、`look-at`、`move-to-position`、`follow-player`、`dig-block`、`place-block`、`open-container`、`click-slot`、`close-container`；ServerBody B 另有 `select-slot`、`drop-item`，当时全部启用共 21 个。其中 `look-at`、`move-to-position`、`follow-player`、`open-container`、`click-slot`、`close-container` 现在只给 ClientBody（ServerBody 用 `emote`、`go-to`、`companion-mode`、`container-menu`），`select-slot` 并进了 `equip-item hand:"main"`。ClientBody v1 全部启用仍为 19 个。
 
-2026-10-03 最新ServerBody完整能力集为33个MCP工具：原交互28个、持续陪伴2个入口、有限采集／拾取3个入口；旧能力集仍按声明发布。容器流程优先 `discover-containers({centerPlayer?,radius?,maxResults?})` → `fetch-and-give({containerRef,item,count?,stacks?,player,say?})`；也可单独 `container-list`、`container-withdraw`、`give-item`。`say` 是 Agent 自己写的自然回应，先发言再操作。程序持有完整 typed-NBT、菜单 guards 和服务端实例token，模型不用逐槽复制；任务自动走近、取物、返回指定玩家交物。
+2026-10-03 最新ServerBody完整能力集为33个MCP工具：原交互28个、持续陪伴2个入口、有限采集／拾取3个入口；旧能力集仍按声明发布。容器流程是 `discover-containers({centerPlayer?,radius?,maxResults?})` → `container-withdraw` → `give-item`；也可 `container-list` 先看内容（当时的 `fetch-and-give` 10-12 已删，运行端内部同一流程还在）。`say` 是 Agent 自己写的自然回应，先发言再操作。程序持有完整 typed-NBT、菜单 guards 和服务端实例token，模型不用逐槽复制；任务自动走近、取物、返回指定玩家交物。
 
 走近限有界已加载平地，可绕有限障碍，不挖路／搭桥／传送；最大搜索32格不等于保证32格内任意路线成功，预算用尽明确拒绝。接收玩家绑定UUID，行走中位移超过0.5格停止；最终丢出前校验1.5格距离与视线。同坐标同状态换箱、双箱另一半替换和目标卸载会拒绝旧引用。容器任务仍需单个足量源栈和空快捷栏，不跨源栈；组件变体歧义拒绝。任务数量可为 `count` 或 `stacks` 二选一，最多256个，取物数量还须容纳于选定实际物品的一栈；99个交物会按64＋35分批，每批重读接收者和完整物品 guards，不能通过截断数量满足接口。交物的 `pickup` 仍是指定玩家拾取未确认，与后面的Bot原生拾取证据分开。旧服务端无新能力时保留明确标注的近距／state-only保护。
 
-持续陪伴增量：声明 `server-posture` 的新服务端发布 `companion-mode({action:"follow"|"wait"|"pause"|"resume"|"stop"|"guard",player?,distance?,wander?,pickup?,mining?,guard?,say?})` 和只读 `get-companion-mode`（没有 `server-posture` 时 follow／wait 报 UNSUPPORTED，提示更新核心模组，没有旧路径）。跟随／等待是**服务端持有的姿态**（`posture` 方法，带 `postureRevision`，和 `guardRevision` 一样按序号生效，迟到的旧回执 CANCELLED 丢弃），运行端只翻译：`follow` 必须明确玩家，距离默认2.5格、范围1.5..6，`wait` 原地等待，二者都不持有任务锁，也不是操作；聊天、读取和别的工具照常用。用身体的工具（走路、采集、合成、建造、吃、表情、睡觉……）开始时服务端姿态自己让开（`get-companion-mode` 里 `suspendedFor` 写着在做什么，`state` 不变），操作结束几秒后自动接上，运行端不发任何请求，不用 `pause`／`resume`；`pause` 只是手动关掉姿态（记住意图，直到 `resume` 重新设置）。`stop` 关姿态和保护且不打断其他任务（不发身体 stop）；`stop-action`、玩家叫停、`companion-mode stop`、托管结束带 `clearGuard`＋`clearPosture`，普通停止（反射自卫、策略变更）不清姿态也不清保护。`guard` 是单独的常驻保护，保护的就是被跟随的玩家。新的 `follow`／`wait` 直接换掉旧姿态（服务端按序号只认最新）。
+持续陪伴增量：声明 `server-posture` 的新服务端发布 `companion-mode({action:"follow"|"wait"|"pause"|"resume"|"stop"|"guard",player?,distance?,wander?,pickup?,mining?,guard?,say?})` （状态随每次 `get-status` 的 `companionMode` 返回；没有 `server-posture` 时 follow／wait 报 UNSUPPORTED，提示更新核心模组，没有旧路径）。跟随／等待是**服务端持有的姿态**（`posture` 方法，带 `postureRevision`，和 `guardRevision` 一样按序号生效，迟到的旧回执 CANCELLED 丢弃），运行端只翻译：`follow` 必须明确玩家，距离默认2.5格、范围1.5..6，`wait` 原地等待，二者都不持有任务锁，也不是操作；聊天、读取和别的工具照常用。用身体的工具（走路、采集、合成、建造、吃、表情、睡觉……）开始时服务端姿态自己让开（`companionMode` 里 `suspendedFor` 写着在做什么，`state` 不变），操作结束几秒后自动接上，运行端不发任何请求，不用 `pause`／`resume`；`pause` 只是手动关掉姿态（记住意图，直到 `resume` 重新设置）。`stop` 关姿态和保护且不打断其他任务（不发身体 stop）；`stop-action`、玩家叫停、`companion-mode stop`、托管结束带 `clearGuard`＋`clearPosture`，普通停止（反射自卫、策略变更）不清姿态也不清保护。`guard` 是单独的常驻保护，保护的就是被跟随的玩家。新的 `follow`／`wait` 直接换掉旧姿态（服务端按序号只认最新）。
 
-`get-status.companionMode` 与 `get-companion-mode` 返回 `state`、可选 `intent/player/distance/guardEnabled/suspendedFor/away/stage/code/reason/seated`；`following`／`waiting` 来自服务端观察里的 `posture`（站在玩家身边的跟随显示为 `waiting`），`suspendedFor` 是姿态让开的操作名，`away` 是玩家不在附近（回到附近自动接上，只发一次事件）。服务端自己结束了姿态（比如同名但不是原来那位玩家）时发一次 `POSTURE_ENDED`，不会自己重设。坐下由服务端设成 `seated`：跟随／等待结束、保护保留，站起来后要重新 follow；打完怪走回座位坐下失败时姿态变成等待，带 sit 错误码发一次事件。手动 `pause`、受阻（`blocked`，陪拾取／陪挖出错）时服务端不持有姿态，只有显式 `resume` 才重新设置，重新核验原会话、维度和同一玩家UUID。租约失效、叫停或进程重启均废弃旧意图。
+`get-status.companionMode` 返回 `state`、可选 `intent/player/distance/guardEnabled/suspendedFor/away/stage/code/reason/seated`；`following`／`waiting` 来自服务端观察里的 `posture`（站在玩家身边的跟随显示为 `waiting`），`suspendedFor` 是姿态让开的操作名，`away` 是玩家不在附近（回到附近自动接上，只发一次事件）。服务端自己结束了姿态（比如同名但不是原来那位玩家）时发一次 `POSTURE_ENDED`，不会自己重设。坐下由服务端设成 `seated`：跟随／等待结束、保护保留，站起来后要重新 follow；打完怪走回座位坐下失败时姿态变成等待，带 sit 错误码发一次事件。手动 `pause`、受阻（`blocked`，陪拾取／陪挖出错）时服务端不持有姿态，只有显式 `resume` 才重新设置，重新核验原会话、维度和同一玩家UUID。租约失效、叫停或进程重启均废弃旧意图。
 
 RuntimeMonitor后台更新持续状态；显式模式变化记录 `companion_state`，受阻／失控只记录一次需宿主解释的 `companion` 事件。姿态让开、回来、站在玩家身边与走动之间的切换不发唤醒事件，也不产生逐tick任务回合。新增的事件只有：回座位失败、服务端结束了姿态、死后恢复结果。旧ServerBody、ClientBody和旧Mineflayer路径保持原有工具，有限 `follow-player` 继续保留。
 
@@ -94,7 +94,7 @@ RuntimeMonitor后台更新持续状态；显式模式变化记录 `companion_sta
 
 有限采集／拾取通过三个能力门控入口提供：
 
-- `discover-resources({blockIds,radius?,maxResults?})`：明确1–8个受支持方块ID、半径1–16（默认4，中心往下 2 格到往上 4 格，近的先核验）、最多64个候选（默认32），冻结已加载、可见的候选，返回30秒内提交的 `resourceRef`。首批只支持石头、深板岩、花岗岩、闪长岩、安山岩和8种主世界原木；不含圆石方块、任意Mod矿石。程序不判断天然树或人工建筑，Agent须选择已获授权的区域。
+- `discover-resources({blockIds,radius?,maxResults?})`：明确1–8个受支持方块ID、半径1–16（默认4，中心往下 2 格到往上 4 格，近的先核验）、最多64个候选（默认32），冻结已加载、可见的候选，返回30秒内提交的 `resourceRef`。首批只支持石头、深板岩、花岗岩、闪长岩、安山岩和8种主世界原木；10-07（8a）起按方块标签认：原木 `#minecraft:logs`（不含去皮和六面树皮）、矿石 `#c:ores`、石料 `#c:stones` 加原版五种，模组的同类方块也算，`blockIds` 可以填标签。程序不判断天然树或人工建筑，Agent须选择已获授权的区域。
 - `look-around({radius?})`：只读，概括已加载的 8–32 格（默认 32，上下各 8 格）内的玩家、生物（敌对在前）、掉落物，以及至少一面露在外面的矿石、原木、容器、床、工作方块、门、作物、水面／岩浆面、刷怪笼、传送门；每类给数量和最近一个的距离、方位、高差、是否看得见，另有生物群系、时间段、天气、露天和亮度。埋着的方块不报，不发目标令牌。
 - `gather-resources({resourceRef,item,count?,stacks?,say?,maxSteps?,timeoutMs?})`：先收取授权区域匹配掉落，再在冻结候选内选工具、走近、原生挖掘和拾取。不会为凑够目标向外补扫；脚下或玩家支撑块、方块实体、危险、缺合适工具或已满背包会拒绝新挖掘。
 - `collect-items({item,count?,stacks?,radius?,say?,maxSteps?,timeoutMs?})`：只捡当前观察到且处于固定半径内的掉落实体，冻结UUID集合；不挖方块，不启动持续“只捡”模式。
@@ -109,7 +109,7 @@ RuntimeMonitor后台更新持续状态；显式模式变化记录 `companion_sta
 
 资源引用是状态与已加载区块保护，不能宣称检测同一区块内同状态替换；真实一般容器的实例保护继续独立保留。首批不挖脚下平地、不挖路或搭桥，不处理复杂矿道、战斗、持续陪挖、完整砍树或建筑预设；不能把组件改为99的验证当作任意内容Mod资源采集已经支持。
 
-ServerBody `get-status`／`get-container`／`get-operation` 默认摘要，原子调试需 `details:true`；`list-inventory` 仍返回完整字段。容器摘要明确区分 container／player／cursor／unknown。完整终态保留在本地 operation trace；已交付终态不再重复唤醒，内部任务步骤不产生逐步 Agent 回合。ClientBody 原工具默认形状保留。
+ServerBody `get-status`／`get-operation` 默认摘要，原子调试需 `details:true`；完整背包用 `get-status` 带 `include:["inventory"]`（ClientBody 的 `get-container`、`list-inventory` 形状不变）。容器摘要明确区分 container／player／cursor／unknown。完整终态保留在本地 operation trace；已交付终态不再重复唤醒，内部任务步骤不产生逐步 Agent 回合。ClientBody 原工具默认形状保留。
 
 槽位可携 `active`／`mayPickup`：通用任务忽略隐藏槽的内容，不从不可取槽拿物品；空槽的mayPickup=false不代表不能放入，存入仍服从原生mayPlace。特定内容Mod由服务端Adapter提供准确来源和槽语义，任务层不添加Mod名称分支；已实现的窄Iron Furnaces范围及实际证据见[D记录](../docs/archive/server_content_D_validation.md)。
 
@@ -123,7 +123,7 @@ ServerBody `get-status`／`get-container`／`get-operation` 默认摘要，原�
 
 2026-10-03数量与有限采集首批：当时本包 **126／126** Node离线检查通过，保留已有世界／租约／组件／取消守卫。真实程序矩阵 **27／27** 与Claude-b／Sonnet5.5／low四阶段通过，详见[数量与有限采集验收](../docs/archive/server_gather_validation.md)。实际模型自主选择6个圆石并确认挖6／收6；只捡组件有效上限99的一组圆石；任务中独立叫停约310毫秒；叫停后的首个明确任务成功收取一组16雪球。程序矩阵另覆盖有效上限16／64／99、99个容器取物交还的64＋35原子丢物、部分结果、变体、满包和停止。该历史批次没有Codex有限采集／拾取模型证据，后续跟随拾取批次已补；持续陪挖与建筑仍未验收；不将不同测试阶段计数相加。
 
-此前持续陪伴批次为100／100离线基线；[实际验证](../docs/archive/server_companion_validation.md)包含19项程序矩阵、Claude-b／Codex各6个真实聊天阶段，以及Claude受阻说明和明确恢复。该历史首批仅跟随和等待；目前跟随拾取已交付，持续陪挖与建筑仍待迁移。
+此前持续陪伴批次为100／100离线基线；[实际验证](../docs/archive/server_companion_validation.md)包含19项程序矩阵、Claude-b／Codex各6个真实聊天阶段，以及Claude受阻说明和明确恢复。该历史首批仅跟随和等待；之后跟随拾取、持续陪挖（`mining`）和建筑（`build`，8i）都已交付，验收范围见[交付计划](../docs/delivery_plan.md)。
 
 此前交互验证见[走近与替换核验](../docs/archive/server_approach_validation.md)、[真实Claude任务体验](../docs/archive/server_agent_interaction_trial_2026-10-03.md)和[D内容Mod记录](../docs/archive/server_content_D_validation.md)；10月2日第一批近距证据保留在[交互修复记录](../docs/archive/server_interaction_validation.md)。同Sonnet5.5／low的短会话已证实先回应、绕墙返回和停止后新任务，多轮性能统计与复杂场景仍待扩展，不能把工具直连耗时当模型回复时间。以下41项是B阶段历史基线。
 

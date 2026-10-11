@@ -673,7 +673,7 @@ final class ServerController implements ControlSession.Game {
         if(survival!=null) survival.tick();
         emotes.tick(now());
         if(window!=null&&window.expired(session.stepsRunning(window.paused),now())) closeInterrupt("No eating or defense step came within the lease time");
-        // The guard first, then a running operation, then the posture (docs/server_body_protocol.md, 陪伴姿态).
+        // The guard first, then the posture (it steps aside while an operation outside Posture.KEEPS runs), then the operation (docs/server_body_protocol.md, 陪伴姿态).
         if(duty!=null&&tickDuty(body)) return;
         if(posture!=null&&tickPosture()) return;
         if(active==null) { body.stopInput(); idleGaze(body); return; }

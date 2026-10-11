@@ -10,7 +10,7 @@ MCBOT 的示例附属模组，让 Bot 能用 [Yes Steve Model](https://modrinth.
 
 | 功能 | 谁来用 | 说明 |
 | --- | --- | --- |
-| 选模型（外观来源 `yes_steve_model:model`） | 托管的人，在 WebUI 配置页「外观」里选 | 列表是服务器 `config/yes_steve_model/custom` 里的模型：单个 `.ysm` 文件（ID 带扩展名，比如 `ds_whale.ysm`）和模型文件夹（ID 是文件夹名）。每次启动托管、运行端接管身体后套用一次。AI 不能改 |
+| 选模型（外观来源 `yes_steve_model:model`） | 托管的人，在 WebUI 配置页「角色」标签的外观里选 | 列表是服务器 `config/yes_steve_model/custom` 里的模型：单个 `.ysm` 文件（ID 带扩展名，比如 `ds_whale.ysm`）和模型文件夹（ID 是文件夹名）。每次启动托管、运行端接管身体后套用一次。AI 不能改 |
 | 播动画（表情来源 `yes_steve_model:animation`） | AI，用 `emote` 工具填 `source` | 播当前模型的动画，比如表情轮盘的 `extra0`～`extra7`。按 `seconds`（默认 6 秒，1～30）后自动播 `idle` 停下；Bot 开始做别的事时也会马上停，说话和转头不打断 |
 
 ## 限制
