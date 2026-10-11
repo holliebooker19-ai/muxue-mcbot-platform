@@ -50,7 +50,7 @@
 | 1 | **守卫解耦**：保护玩家变成服务端独立的常驻职责，在等待、做任务时都有效（第 5 节） | 服务端新职责层和协议方法；任务的可打断点和期限顺延；运行端 `GuardDuty` | 2.5～3.5 天 |
 | 2 | **姿态在服务端挂起／恢复**：跟随、等待、坐着成为服务端姿态，让开不再拆掉重建（第 7 节） | `FollowCompanion` 从操作改成姿态；`CompanionMode` 去掉让开、代次接纳逻辑 | 4～5 天（10-11 估） |
 | 3 | **小动作不打断姿态**：按 MOVE／LOOK 标志区分，`look-at`、`emote`、选格、穿装备不让开。10-11 先做了 select-slot、equip-item；emote、look-at 仍让开，待第 2 步后再做。**2026-10-11 完成（离线，未进游戏）**：没有用 MOVE／LOOK 标志，而是两张名单放在 `Posture.java`：`look-at` 进 KEEPS（姿态照常驱动）；内置手势 `emote` 进 HOLDS（播放时站住但不挂起、不补 3 秒，正常结束即继续跟随）；附加动画不变（挂起，播完 3 秒）。坐着时不变。见[协议](server_body_protocol.md)「陪伴姿态」一节里的「不让姿态挂起的操作」。 | 名单（`Posture`、`ServerController.finish`） | 0.5 天 |
-| 4 | **统一任务生命周期**：运行端单一调度器；建筑、种地、长途走被打断后续做 | 合并 6 个任务主人的公共部分；服务端可空字段改成一个任务槽 | 待评估 |
+| 4 | **统一任务生命周期**：运行端单一调度器；建筑、种地、长途走被打断后续做 | 合并 6 个任务主人的公共部分；服务端可空字段改成一个任务槽。10-11 定 4a～4d 全做，详细设计见第 8 节 | 8～9.5 天（10-11 估） |
 
 陪挖、陪捡（问题 3）在第 2、4 步里一起拆：子任务交给统一调度器，`CompanionMode` 只留姿态。
 
@@ -389,3 +389,193 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 - 第 1 步：服务端约 2 天，运行端同时做；
 - 第 2 步：约 1 天；
 - 共约 3.5～4 天。
+
+## 8. 第四步：统一任务生命周期（详细设计，2026-10-11，8.7 已答）
+
+10-11 用户定的范围：4a、4b、4c、4d 全做，全部由我来做，不派 worker。顺序是 **4b → 4d 服务端 → 4a → 4d 运行端 → 4c**。4a 用 A 方案（服务端暂停）。和前几步一样只针对单人陪伴（见开头的适用范围）。
+
+### 8.1 现在的样子（读代码确认，2026-10-11）
+
+**服务端**（`ServerController.java`）
+- 正在跑的东西分散在 9 个任务字段（`pickup`、`pillar`、`station`、`job`、`build`、`hunt`、`farm`、`breed`、`travel`）和几组走路状态（`navigation` 加上 `sleepBed`／`sitSeat`／`followedPlayer`／`retreatTarget`／`approachPlayer`）里。
+- `beforePhysics` 用一串 `if` 逐个判断（约第 654～723 行）。每个分支的出错处理都不一样：
+  - 失败结果里有的带 `position`，有的不带；
+  - `pillar`、`travel`、`pickup` 不接 `RuntimeException`；
+  - `job` 先 `stop()` 再 `finish`。
+- `pausable()` 用一长串三元表达式挑出当前任务，给保护打怪暂停用。
+- `stopBody` 逐个清空这些字段。
+- 吃东西（`eat-item`）、自卫（`defend-entity`）由 `SurvivalActions` 自己跑，不占 `active`。
+- `ControlSession` 只允许一个非聊天操作在跑（第 312 行）。
+
+**运行端**
+- 忙不忙的判断有 4 种写法：
+  - `idleBody`（三连 `assertIdle`）；
+  - `ordinaryBusy`（三连再加 `isBusy`／`pendingOperations`／`companion.busy`），`main.ts` 和 `mcp.ts` 各写了一份；
+  - 礼物换装用的 `busy`（`main.ts` 第 136 行）；
+  - 原子动作只查 `tasks.assertIdle()`（`mcp.ts` 第 477 行）。
+- `readTools` 是另一份手写名单（第 53 行）。Codex 白名单 `CODEX_SERVER_TOOLS` 又是一份手写名单，靠 `tool-allowlist.test.mjs` 用正则扫 `mcp.ts` 兜底。
+- 任务主人有 `ContainerTasks`、`GatherTasks`、`SurvivalTasks`、`PillarTasks` 四个，各自有一套 epoch／active／stopping／cancel／stopped，还要借锁（`borrowed`：采集借给陪挖陪捡，生存借给采集）。
+- 打断：自动自卫（只在保护关着时）和紧急进食都先 `stopCurrent()` 取消原任务，事件里说“不会重放”（`survival-reflexes.ts` 第 176～181、215～220 行）。`defend-self` 走同一条路。
+- `CompanionMode`（822 行）里的陪挖、陪捡占了约 200 行（`mineBlock`、`returnFromMining`、`pickupItem`、`block`、`childActive`）。
+
+### 8.2 4b：忙判断一处，加工具属性表（约 1 天）
+
+新增 `client-runtime/src/tool-registry.ts`，每个 MCP 工具一条记录。
+
+| 属性 | 取值 | 现在对应的地方 |
+|---|---|---|
+| `kind` | `read`（只看）、`chat`、`action`（原子动作）、`task`（多步任务或服务端长任务） | `readTools`、`readOnlyCall` |
+| `needsIdle` | 开始前要不要身体空着 | 三连 `assertIdle`、`idleBody` |
+| `moves` | 会不会挪动身体 | 只作说明，姿态让不让开仍由服务端的 KEEPS／HOLDS 决定（第 3 步） |
+| `resumable` | 被进食／自卫打断后能不能续做（4a 用） | 新增 |
+
+`resumable` 为真的有：`build`、`tend-crops`、`breed-animals`、`hunt`、`travel-to`、`go-to-place`、`gather-resources`、`collect-items`。容器四件套、`craft-item`、`smelt-item`、`produce-item`、`modify-item`、`pillar-up`／`pillar-down` 不续做。
+
+改动：
+1. 新增 `work.ts`，里面放唯一的 `assertIdle()`／`busy()`：容器、采集、生存、垫高都没在跑，并且 `body.isBusy()` 为假。替换 `idleBody`、两份 `ordinaryBusy`、礼物换装的 `busy`、`PillarTasks` 的 `idle` 和 `mcp.ts` 里散落的三连。`register` 按表里的 `needsIdle` 统一检查，处理函数里不再自己写。
+2. `readTools` 改成从表里取 `kind === 'read'`。
+3. Codex 白名单从表生成：`codex-app-server.mjs` 读构建好的 `client-runtime/dist/tool-registry.js`（驱动器本来就要先构建运行端）；`tool-allowlist.test.mjs` 改成核对“表 = `mcp.ts` 实际注册的工具”。动手时先确认打包脚本按 import 收集文件时不会把这个路径当成 scripts 下的文件。
+
+和现在不一样的地方（都是我认为该改的，审时请看一眼）：
+- 原子动作在采集、生存任务跑着时，改成在运行端就报 BUSY。现在也是 BUSY，只是由 `ServerBody.act` 的任务锁报，提示文字不同。
+- `companion-mode` 不再查容器任务忙不忙。姿态和任务已经分开（第 2 步），“搬箱子时说一声跟着我”应当能设上，姿态会自己先让开。
+
+测试：`tool-registry` 表和 `mcp.ts` 注册的工具一致，`needsIdle` 的工具在忙时报 BUSY，白名单的条数和内容不变（68 个）。
+
+### 8.3 4d 服务端：一个任务槽（约 1.5～2 天，行为不变）
+
+新增接口 `BodyTask extends GuardDuty.Pausable`：
+
+```java
+interface BodyTask extends GuardDuty.Pausable {
+    void tick();                   // 照常可抛 Protocol.Error／RuntimeException
+    JsonObject report();           // 失败时结果里的进度（progress()／detail()）
+    void stop();
+    boolean withPosition();        // 失败结果加不加 position（按现有分支逐个照抄）
+    String faultLabel();           // null 表示不接 RuntimeException（pillar、travel、pickup 现在就是这样）
+    default boolean stopBeforeFinish(){return false;} // job 现在先 stop 再 finish
+}
+```
+
+- 现有 9 个任务类实现它。走路类操作（`move-to-position`、`follow-player`、`approach-*`、`retreat-from-entity`、`sleep-in-bed`、`sit`）收进一个新类 `WalkTask`，把 `navigation`、`actionDeadline`、`actionGrace` 和那几个零散字段搬进去；`tickApproach`／`tickRetreat`／`tickSleep`／`tickSit` 照原样搬过去。
+- `ServerController` 只留一个字段 `private BodyTask task;`。`beforePhysics` 那串 `if` 换成一段共用的 tick／出错收尾；`pausable()`、`resumeAfterFight` 直接用 `task`。`stopBody` 改成一次 `task.stop()`。
+- 拾取回执（`receivePickup*`）用 `task instanceof PickupItem` 拿到拾取任务。
+- 手势（`emotes.gesturing()`）仍然归 `BodyEmotes` 管，不进任务槽：第 3 步的 HOLDS 靠它。
+- 各分支现有的不一致（加不加 `position`、接不接 `RuntimeException`）这次**照抄不改**，在代码注释里记下，以后统一。
+
+测试：`ControlSessionTest`、`FollowCompanionTest`、`PostureTest`、`GuardDutyTest` 全过；新增 `BodyTaskTest`，覆盖共用收尾的三种失败形状。
+- 不跑隔离服 smoke（8.7 第 1 问，用户 10-11 定）。④ 全部做完打包后由用户试玩。
+
+### 8.4 4a：进食／自卫打断后续做（服务端暂停，约 2 天）
+
+**规则**：自动自卫、紧急进食、`defend-self` 打断一件可续做的任务时：
+- 任务**暂停**，不取消；
+- 打断处理完，任务**接着做**，期限顺延；
+- 模型那次工具调用照常等它的结果。
+
+同一件任务最多续做 2 次，第 3 次打断照旧取消（现在的做法）。不可续做的任务、陪挖陪捡的子任务，也照旧取消。
+
+**服务端**
+- 新增协议方法 `interrupt`，能力名 `task-interrupts`。
+  - `{action:"begin", reason:"eat"|"defend"}`：开一个“打断窗口”。
+  - `{action:"end"}`：关掉窗口，被暂停的任务接着做。
+- 什么时候能开窗口：判断和保护打怪暂停任务时**完全一样**，直接复用 `dutyMayInterrupt` 里的条件，不另列一张名单：
+  - 身体空着；
+  - 或者正在跑的任务此刻 `interruptible()`（在地面、手上没挖到一半）；
+  - 或者是在地面上走路。
+  
+  另外，保护正在打架时不能开。
+- 开不了时返回 `NOT_PAUSABLE`，并带原因。
+- 窗口开着时：
+  - 被暂停的任务不 tick，身体停下；
+  - 会话里，被暂停的操作不算“正在跑”，允许打断用的几步一个接一个跑：`select-slot`、`swap-inventory`、`eat-item`、`defend-entity`、`retreat-from-entity`，也就是 `SurvivalTasks` 吃东西和自卫时实际发出的那几步；
+  - 姿态照旧让开（任务还算在跑）；
+  - 保护不在窗口里开打，和它等吃完饭是同一个道理。
+- 关窗口时调用任务的 `resumeAfterGuard(暂停时长)`：停下走路、重新规划、期限顺延。顺延和保护打架共用同一份 `Grace` 额度，合起来最多顺延一倍，不另起数字。
+- `stop`、租约结束都会连同窗口一起取消。窗口开着、却超过 `ControlSession.TTL_MS` 没有任何打断步骤在跑时（运行端出了问题），服务端自己关掉窗口、让任务接着做。这里复用租约“控制者失联”用的那个时长。
+- 有了 4d 服务端的任务槽，这块只是在槽上加一个 `paused` 标记。
+
+**运行端**
+- `ServerBody.interrupt(reason, work)`：先发 `begin`，再用一个打断令牌跑 `work`，最后发 `end`。
+  - `act()` 遇到打断令牌，绕过被暂停的那个操作和任务锁。
+  - 遇到**持有任务锁的那件任务**（采集是在运行端一步一步发操作的），就**等窗口关了再发**，不报错。这样采集会停在下一步之前，不需要改采集本身的代码。
+- 采集的期限顺延：`FightGrace` 除了打架时长，再加上打断暂停的时长，额度仍然是它自己的预算。
+- `SurvivalReflexes`：原先“先 `stopCurrent()` 再吃／打”的地方改成先查正在跑的是什么：
+  - 是可续做的任务（查 4b 的表；运行端任务看采集，服务端任务看 `pendingOperations` 的名字），并且这件任务还没续做满 2 次：走 `interrupt`。事件写“暂停了 build，打完接着做（第 1 次，最多 2 次）”，接着做时再发一条。
+  - 收到 `NOT_PAUSABLE`（比如正在脚手架上、正在游泳、正在挖）：这一拍先不打断，下一拍再试，和保护的等法一样。只有血量降到 `policy.lowHealth`（自卫已有的低血线）还在等时，才照旧取消任务去处理。
+  - 不可续做、已经续做满 2 次、陪挖陪捡的子任务在跑：照旧 `stopCurrent()`。事件里说明是第几次、为什么取消。
+  - 打断的结果是 `unknown`：先 `stopCurrent()` 取消任务，再像现在一样停用本能。手上状态不确定时，不让任务接着跑。
+- 续做次数在运行端记，按任务标识计：服务端任务用 `operationId`，采集用它自己的任务 id。服务端只管暂停和接着做。
+- 改工具说明：`defend-self`、`set-reflexes`、`build`、`tend-crops`、`travel-to` 等，以及系统指令里“打断不重放”的说法。
+
+**测试**
+- Java：
+  - 新增窗口的纯逻辑测试：能开／不能开的条件，开着时会话放行哪些步骤，关闭时顺延，超时自己关；
+  - 补 `ControlSessionTest`。
+- 运行端：
+  - 自卫和进食打断可续做的任务，接着做；
+  - 第 3 次取消；
+  - 不可续做的任务照旧取消；
+  - `NOT_PAUSABLE` 时等，降到低血线才取消；
+  - 采集在下一步之前停住、期限顺延；
+  - `unknown` 时取消；
+  - 叫停时窗口一起取消。
+
+### 8.5 4d 运行端：一个调度器（约 2～3 天）
+
+新增 `scheduler.ts`，统一管四个任务主人共有的那部分：
+- 当前任务槽：id、工具名、epoch、`cancelled`／`stopPending`、身体任务锁令牌；
+- `assertIdle`，替换 4b 的 `work.ts`；
+- `run(tool, work)`：取锁、跑、放锁；
+- `cancel()`／`stopped()`，`action-stop.ts` 只调它一个；
+- 借锁 `borrow()`：采集借给陪挖陪捡，生存借给采集；
+- 4a 的 `interrupt`；
+- `current()`：告诉 4a 现在跑的是什么。
+
+`ContainerTasks`、`GatherTasks`、`SurvivalTasks`、`PillarTasks` 只留各自的业务（容器引用、资源引用、进度、收据），生命周期交给调度器。下面这些语义原样保留：
+- `SurvivalTasks` 的 `blocked`（结果未知后停住）；
+- 采集里“停止未确认时不放锁”（`stopPending`）；
+- 迟到的回执不能动新任务（epoch 栅栏）。
+
+测试：现有 47 个测试文件全过（只改构造方式，不改断言）；新增 `scheduler.test.mjs`，覆盖借锁、迟到回执、停止未确认时保留锁、打断。
+
+### 8.6 4c：陪挖、陪捡搬出 CompanionMode（约 1.5 天）
+
+- 新增 `companion-errands.ts`（`CompanionErrands`）：根据姿态观察（`waiting`／`active`、离玩家多远）决定什么时候去挖、去捡，通过调度器的借锁跑子任务。`mineBlock`、`returnFromMining`、`pickupItem`、预算和收据游标都搬过去。
+- `CompanionMode` 只留姿态和保护的翻译：`request`、`update` → `observePosture`、事件、`stop`。`childActive` 和它对 `GatherTasks` 的直接引用都去掉。
+- 对外行为不变：
+  - 子任务跑着时模型的工具报 BUSY；
+  - `unknown` 和 `blocked` 不重试；
+  - `get-companion-mode` 里的 `mining`／`pickup` 字段照旧。
+- 测试：`companion-*` 系列全过，新增 `companion-errands.test.mjs`。
+
+### 8.7 要你定的（10-11 已答）
+
+用户 10-11 的回答：
+1. **不跑** smoke，只做离线检查；④ 全部做完打包后试玩。
+2. 用**等**的做法，血量降到低血线才取消。
+3. 两处变化**都可以**。
+
+1. **问题 4**：4d 服务端做完后，要不要跑一遍现有的隔离服 smoke 做回归？
+   - 建议跑：任务槽改的是所有服务端任务共用的 tick／收尾，离线测试覆盖不到真实游戏里的走路、挖、放方块。
+   - 要跑的有 `server-guard-duty-smoke`（任务暂停）、建筑、种地、长途走、垫高、陪挖这几个，大约半天，要按[隔离服实测](dev.md#进度与证据)的方法先挪开核心以外的模组。
+   - 不跑的话，就等 ④ 全部做完打包后你试玩。
+2. **打断时任务正好不能暂停**（`NOT_PAUSABLE`，比如脚手架上、正在挖）：
+   - 我的建议是像保护一样等它到能暂停的时候，血量降到低血线才照旧取消。
+   - 另一种做法是这种时候直接照旧取消。等的好处是任务不会白丢；坏处是挨打的那几秒先不还手。
+3. 8.2 里的两处行为变化（原子动作提前报 BUSY；`companion-mode` 不再查容器任务）可以吗？
+
+### 8.8 估计和风险
+
+- 估计：
+  - 4b：1 天；
+  - 4d 服务端：1.5～2 天（跑 smoke 再加半天）；
+  - 4a：2 天；
+  - 4d 运行端：2～3 天；
+  - 4c：1.5 天；
+  - 合计约 8～9.5 天。
+- 风险：
+  - 4d 服务端是纯重构，但范围是所有服务端任务；
+  - 4a 让会话第一次允许“一个暂停的操作 + 一串打断步骤”并存，`ControlSession` 的 BUSY 规则和运行端的 `exclusive`／任务锁都要一起改，回执、代次、停止栅栏是最容易出错的地方；
+  - 4d 运行端要动 4 个任务主人，借锁关系最绕，所以排在 4a 之后：先让行为定下来，再整理结构。
+- 每一块单独提交、单独跑三套离线测试。全部做完重新打包，交给你试玩。
