@@ -13,7 +13,7 @@ MCBOT 的附属模组：让 Bot 能用 [Iron Furnaces](https://modrinth.com/mod/
 | 功能 | AI 用什么 | 说明 |
 | --- | --- | --- |
 | 找到铁炉 | `discover-containers` | 附近的铁炉作为容器候选出现 |
-| 放入原料和燃料、取出成品 | `open-container` 后逐格操作，或 `container-list`、`container-withdraw` | 和原版熔炉相同的用法，菜单是铁炉自己的 55 槽菜单 |
+| 放入原料和燃料、取出成品 | `container-menu` 打开后逐格操作，或 `container-list`、`container-withdraw` | 和原版熔炉相同的用法，菜单是铁炉自己的 55 槽菜单 |
 
 ## 安全规则
 

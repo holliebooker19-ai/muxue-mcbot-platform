@@ -31,7 +31,7 @@ async function fixture(t) {
   const tokens = new Map(), tokenActs = [];
   const hello = mock.handlers.hello;
   mock.handlers.hello = () => ({ ...hello(), capabilities: ['send-chat', 'look-at', 'move-to-position', 'nearby-resources', 'approach-resource', 'dig-block', 'select-slot', 'pickup-item',
-    'nearby-blocks', 'approach-container', 'defend-entity'] });
+    'nearby-blocks', 'approach-container', 'open-container', 'close-container', 'defend-entity'] });
   const stop = mock.handlers.stop;
   mock.handlers.stop = params => { const result = stop(params); generation = result.controlGeneration; return result; };
   const issue = () => { const token = randomUUID(); tokens.set(token, generation); return token; };
@@ -101,40 +101,38 @@ test('following: a player stop-action between discover and gather still voids th
   assert.deepEqual(f.tokenActs, [], 'nothing was dug');
 });
 
+// container-list walks to the container with its reference first (approach-container), then opens it: the open is where this fixture ends the task.
+const code = reply => reply.value.code ?? reply.value.result?.code;
 test('a reference kept locally is refused after any real stop of the body, a manual pause sends none', async t => {
   const f = await fixture(t);
   await f.follow();
   const found = await f.call('discover-containers', {});
   await f.mode.request({ action: 'pause' });
   assert.deepEqual(f.stops(), [], 'pause is the posture off, not a stop');
-  const kept = await f.call('approach-container', { containerRef: found.value.candidates[0].containerRef });
-  assert.equal(kept.error, false, 'still valid after the pause');
+  await f.call('container-list', { containerRef: found.value.candidates[0].containerRef });
+  assert.deepEqual(f.tokenActs[0], { name: 'approach-container', ok: true }, 'still valid after the pause');
   const again = await f.call('discover-containers', {});
   await f.body.stop();
-  const walked = await f.call('approach-container', { containerRef: again.value.candidates[0].containerRef });
-  assert.equal(walked.error, true);
-  assert.equal(walked.value.code, 'WORLD_CHANGED');
+  const walked = await f.call('container-list', { containerRef: again.value.candidates[0].containerRef });
+  assert.equal(code(walked), 'WORLD_CHANGED');
 });
 
-test('following: discover-containers then approach-container walks without a stop; a stop-action in between refuses it', async t => {
+test('following: discover-containers then container-list walks without a stop; a stop-action in between refuses it', async t => {
   const f = await fixture(t);
   await f.follow();
   const found = await f.call('discover-containers', {});
   assert.equal(found.error, false, JSON.stringify(found.value));
-  const walked = await f.call('approach-container', { containerRef: found.value.candidates[0].containerRef });
-  assert.equal(walked.error, false, `approach was refused: ${JSON.stringify(walked.value)}`);
-  assert.equal(walked.value.status, 'succeeded');
-  assert.deepEqual(f.tokenActs, [{ name: 'approach-container', ok: true }]);
+  await f.call('container-list', { containerRef: found.value.candidates[0].containerRef });
+  assert.deepEqual(f.tokenActs[0], { name: 'approach-container', ok: true }, 'the walk was not refused');
   assert.deepEqual(f.stops(), []);
+  const acts = f.tokenActs.length;
 
   const again = await f.call('discover-containers', {});
   assert.equal((await f.call('stop-action')).error, false);
-  const refused = await f.call('approach-container', { containerRef: again.value.candidates[0].containerRef });
-  assert.equal(refused.error, true);
-  assert.ok(['STALE_REFERENCE', 'WORLD_CHANGED'].includes(refused.value.code), refused.value.code);
-  assert.equal(f.tokenActs.length, 1, 'no second walk');
+  const refused = await f.call('container-list', { containerRef: again.value.candidates[0].containerRef });
+  assert.ok(['STALE_REFERENCE', 'WORLD_CHANGED'].includes(code(refused)), code(refused));
+  assert.equal(f.tokenActs.length, acts, 'no second walk');
 });
-
 test('following + self-defense that fails for certain: the posture stays, no WORLD_CHANGED, no disconnect', async t => {
   const f = await fixture(t);
   await f.follow();

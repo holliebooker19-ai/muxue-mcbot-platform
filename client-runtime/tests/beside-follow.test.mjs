@@ -17,8 +17,9 @@ test('select-slot and equip-item go straight to the server beside a following co
   const call = (name, args) => client.callTool({ name, arguments: args });
   await f.follow();
   const stopsBefore = f.calls('stop').length, postured = f.postures().length;
-  const picked = await call('select-slot', slot);
-  assert.equal(picked.isError, undefined, `select-slot is not refused beside the follow: ${picked.content[0].text}`);
+  // select-slot is no MCP tool of ServerBody any more (equip-item hand main selects); it is sent as the body action it still is.
+  const picked = await f.body.act('select-slot', slot);
+  assert.equal(picked.status, 'succeeded', `select-slot is not refused beside the follow: ${picked.summary}`);
   assert.equal(f.calls('act', 'select-slot').length, 1, 'the request reached the server');
   // equip-item may still be refused by its own checks (the mock has no inventory); the follow must stay put either way.
   await call('equip-item', { item: 'minecraft:iron_helmet' });

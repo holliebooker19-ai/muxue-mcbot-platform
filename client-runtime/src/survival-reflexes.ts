@@ -2,7 +2,7 @@ import { BodyError, type Body, type SurvivalState, type Threat, type Operation, 
 import type { EventJournal } from './events.js';
 import { gearLabel } from './model-view.js';
 import { selectFood, selectThreat, threatRefusal, type BorrowedSurvivalTask, type DefensePolicy, type SurvivalTasks } from './survival-tasks.js';
-import { TOOLS } from './tool-registry.js';
+import { resumable } from './tool-registry.js';
 import type { RunningWork } from './scheduler.js';
 
 /** How often one task may be paused for eating or defense and carry on; the next interrupt stops it as before (docs/companion_state_design.md 8.4). */
@@ -50,7 +50,7 @@ export class SurvivalReflexes {
   private room(): Room {
     if (!this.body.interrupt || !this.body.hello.capabilities.includes('task-interrupts')) return { kind: 'stop' };
     const work = this.options.running?.();
-    if (!work || TOOLS.get(work.name)?.resumable !== true) return { kind: 'stop' };
+    if (!work || !resumable(work.name)) return { kind: 'stop' };
     const count = this.resumes?.id === work.id ? this.resumes.count : 0;
     if (count >= MAX_RESUMES) return { kind: 'stop', note: `${work.name} 已经暂停后接着做过 ${MAX_RESUMES} 次，这次停下` };
     if (this.tasks.read().state !== 'idle') return { kind: 'wait' };

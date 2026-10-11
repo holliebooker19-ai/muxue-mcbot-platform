@@ -52,7 +52,7 @@ test('self defense stops a raw body action while the posture is giving way, and 
       confirmedDamage: 1, damageConfirmation: 'native_damage_event', terminationReason: 'attack-limit', sideEffects: 'confirmed' } } : op;
   };
   const reflexes = new SurvivalReflexes(f.body, survival, f.events, { stopCurrent: stop, ordinaryBusy: bodyBusy, ...companionReflexHooks(f.mode) });
-  await f.call('move-to-position', moveTo);
+  await f.call('go-to', moveTo);
   const walk = [...f.mock.operations.values()].find(op => op.name === 'move-to-position');
   const from = f.mock.calls.length;
   const defended = await reflexes.defendSelf(threat.entityId);
@@ -69,9 +69,9 @@ test('self defense stops a raw body action while the posture is giving way, and 
 test('a tool that uses the body makes the posture give way on the server; the runtime shows it and sends nothing', async t => {
   const f = await fixture(t); await f.follow();
   assert.equal(f.mode.snapshot().guardEnabled, true);
-  const moved = await f.call('move-to-position', moveTo);
+  const moved = await f.call('go-to', moveTo);
   assert.equal(moved.isError, undefined, 'a body tool is not refused while following');
-  assert.equal((await f.call('get-companion-mode')).suspendedFor, 'move-to-position');
+  assert.equal((await f.call('get-status')).companionMode.suspendedFor, 'move-to-position');
   const snapshot = f.mode.snapshot();
   assert.deepEqual([snapshot.state, snapshot.intent, snapshot.player, snapshot.suspendedFor, snapshot.guardEnabled], ['following', 'follow', 'Alex', 'move-to-position', true]);
   assert.match(snapshot.reason, /自动接着跟/);
@@ -97,14 +97,14 @@ test('a sleeping body is the same: the server keeps the posture aside until it i
 
 test('a refused call does not touch the posture', async t => {
   const f = await fixture(t); await f.follow();
-  assert.equal((await f.call('move-to-position', { x: 'oops', y: 64, z: 0 })).isError, true);
+  assert.equal((await f.call('go-to', { x: 'oops', y: 64, z: 0 })).isError, true);
   assert.equal(f.mode.snapshot().state, 'following'); assert.equal(f.postures().length, 1); assert.deepEqual(f.stops(), []);
   assert.equal(f.server.requests.length, 1);
 });
 
 test('stop-action ends the follow for good (posture and protection): nothing picks it up when the walk ends', async t => {
   const f = await fixture(t); await f.follow();
-  await f.call('move-to-position', moveTo);
+  await f.call('go-to', moveTo);
   assert.deepEqual(await f.call('stop-action'), { isError: undefined, stopped: true });
   assert.equal(f.mode.snapshot().state, 'stopped'); assert.equal(f.mode.snapshot().intent, undefined);
   assert.equal(f.server.current, null); assert.equal(f.duty, null);
@@ -115,7 +115,7 @@ test('stop-action ends the follow for good (posture and protection): nothing pic
 
 test('stop-action keepCompanion:true drops only the running task: the follow and protection stay', async t => {
   const f = await fixture(t); await f.follow();
-  await f.call('move-to-position', moveTo);
+  await f.call('go-to', moveTo);
   assert.deepEqual(await f.call('stop-action', { keepCompanion: true }), { isError: undefined, stopped: true });
   assert.equal(f.stops().at(-1).clearPosture, undefined); assert.equal(f.stops().at(-1).clearGuard, undefined);
   assert.equal(f.server.current.action, 'follow', 'the server keeps the posture');
@@ -133,12 +133,12 @@ test('a manual pause is the posture off until resume, also across other tools an
   await f.mode.request({ action: 'pause' });
   assert.equal(f.server.current, null, 'paused: the server holds no posture');
   assert.equal(f.mode.snapshot().state, 'paused'); assert.equal(f.mode.snapshot().suspendedFor, undefined);
-  await f.call('move-to-position', moveTo); f.finishMove(); await f.ticks();
+  await f.call('go-to', moveTo); f.finishMove(); await f.ticks();
   assert.equal(f.mode.snapshot().state, 'paused'); assert.equal(f.server.current, null); assert.equal(f.follows().length, 1);
   await f.mode.request({ action: 'resume' });
   assert.equal(f.follows().length, 2); assert.equal(f.mode.snapshot().state, 'following'); assert.equal(f.server.current.player, 'Alex');
   // pause while a tool has it giving way: now the model owns the decision
-  await f.call('move-to-position', moveTo); await f.ticks(1);
+  await f.call('go-to', moveTo); await f.ticks(1);
   assert.equal(f.mode.snapshot().suspendedFor, 'move-to-position');
   await f.mode.request({ action: 'pause' });
   assert.equal(f.mode.snapshot().state, 'paused'); assert.equal(f.mode.snapshot().suspendedFor, undefined);
@@ -154,7 +154,7 @@ test('companion-mode stop ends the follow and protection without a body stop, an
   assert.deepEqual(f.stops(), [], 'the posture is switched off with its own method, nothing is stopped');
   // while giving way for a walk: the walk keeps running and the follow does not come back
   await f.follow();
-  await f.call('move-to-position', moveTo);
+  await f.call('go-to', moveTo);
   const walk = [...f.mock.operations.values()].find(op => op.name === 'move-to-position');
   const second = await f.call('companion-mode', { action: 'stop', say: '不跟了' });
   assert.equal(second.state, 'stopped'); assert.match(second.reason, /不受影响/);
@@ -177,7 +177,7 @@ test('companion-mode guard changes protection only: the posture is not set again
   assert.deepEqual(f.duty.options, { radius: 9, bow: false }, 'options are merged onto the current ones');
   assert.equal(f.postures().length, 1); assert.equal(f.mode.snapshot().state, 'following');
   // while the posture gives way the option is simply kept
-  await f.call('move-to-position', moveTo); await f.ticks(1);
+  await f.call('go-to', moveTo); await f.ticks(1);
   const aside = await f.call('companion-mode', { action: 'guard', guard: { radius: 5 } });
   assert.equal(aside.suspendedFor, 'move-to-position'); assert.equal(aside.guardEnabled, true);
   assert.deepEqual(f.duty.options, { radius: 5, bow: false });
@@ -198,7 +198,7 @@ test('guard needs the standing guard duty and is not offered without it', async 
 
 test('after the task the posture waits for a player who is out of sight (away), the model is told once, and it is picked up when they are back', async t => {
   const f = await fixture(t); await f.follow();
-  await f.call('move-to-position', moveTo);
+  await f.call('go-to', moveTo);
   f.finishMove(); f.server.set({ state: 'away', reason: 'PLAYER_AWAY' }); await f.ticks(4);
   const snapshot = f.mode.snapshot();
   assert.equal(snapshot.away, true); assert.match(snapshot.reason, /不在附近/);
@@ -212,13 +212,13 @@ test('cancelling work that a reflex preempts keeps the follow, while an explicit
   const f = await fixture(t); await f.follow();
   const tasks = new ContainerTasks(f.body), gather = new GatherTasks(f.body, f.events);
   const stop = createActionStop(f.body, f.mode);
-  await f.call('move-to-position', moveTo);
+  await f.call('go-to', moveTo);
   await stop();
   assert.equal(f.mode.snapshot().intent, 'follow'); assert.equal(f.server.current.action, 'follow');
   f.server.resume(); await f.ticks();
   assert.equal(f.mode.snapshot().state, 'following', 'the cancelled walk moved the control generation on; the follow is still ours');
   assert.equal(f.postures().length, 1);
-  await f.call('move-to-position', moveTo);
+  await f.call('go-to', moveTo);
   await stop({ clearGuard: true, clearPosture: true });
   assert.equal(f.mode.snapshot().state, 'stopped'); assert.equal(f.mode.snapshot().intent, undefined); assert.equal(f.server.current, null);
 });

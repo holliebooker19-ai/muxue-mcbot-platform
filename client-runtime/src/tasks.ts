@@ -50,14 +50,6 @@ export class ContainerTasks {
     if (!isDeepStrictEqual(context, target.context)) throw new BodyError('WORLD_CHANGED', '容器引用不属于当前身体会话');
     return target;
   }
-  async approachContainer(ref: string, timeoutMs?: number): Promise<Operation> {
-    this.assertIdle(); const epoch = this.epoch;
-    const state = await this.observe(epoch);
-    const target = this.target(ref, this.context(state));
-    this.check(epoch);
-    if (!target.block.targetToken) throw new BodyError('UNSUPPORTED', '身体未提供容器实例引用，不能安全走近');
-    return this.body.act('approach-container', { targetToken: target.block.targetToken, timeoutMs });
-  }
   private context(state: Context): Context { return { instanceId: state.instanceId, sessionId: state.sessionId, worldId: state.worldId, dimension: state.dimension, controlGeneration: state.controlGeneration }; }
   private limit(timeoutMs: number, message: string, fights = true): Limit {
     const deadline = this.now() + timeoutMs;
@@ -290,7 +282,7 @@ export class ContainerTasks {
           const source = state.inventory.find(item => item.slot === request.slot);
           if (!source || source.id !== request.item || source.count === 0) throw new BodyError('ITEM_CHANGED', `背包第 ${request.slot} 格不是 ${request.item}`);
           const hotbar = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(slot => state.inventory.find(item => item.slot === slot) ?? { slot, id: 'minecraft:air', count: 0, components: {} }).find(item => this.empty(item));
-          if (!hotbar) throw new BodyError('INVENTORY_FULL', '快捷栏没有空格，先用 prepare-item 把它拿到快捷栏');
+          if (!hotbar) throw new BodyError('INVENTORY_FULL', '快捷栏没有空格，先用 equip-item hand:main 把它拿到手上');
           const value = (item: ItemStack) => ({ id: item.id, count: item.count, components: item.components!, ...(item.maxStackSize !== undefined ? { maxStackSize: item.maxStackSize } : {}) });
           this.success(await this.step(epoch, id, context, 'swap-inventory', { sourceSlot: source.slot, hotbarSlot: hotbar.slot, expectedSource: value(source), expectedTarget: value(hotbar as ItemStack) }), epoch);
           state = await this.observe(epoch, context); request = { ...request, slot: hotbar.slot };
@@ -331,7 +323,7 @@ export class ContainerTasks {
       }
       progress.stage = 'done';
       return this.record(id, context, name, 'succeeded', progress.droppedCount ? '物品已丢出，指定玩家拾取尚未确认' : name === 'container-list' ? '容器内容已读取并关箱'
-        : progress.slot !== undefined && progress.slot > 8 ? `物品已取出，快捷栏满了，放在背包第 ${progress.slot} 格；要拿在手上用先 prepare-item` : '物品已取出并持有', progress);
+        : progress.slot !== undefined && progress.slot > 8 ? `物品已取出，快捷栏满了，放在背包第 ${progress.slot} 格；要拿在手上用 equip-item hand:main` : '物品已取出并持有', progress);
     } catch (error) {
       let failure = error;
       const codeOf = (value: unknown) => value instanceof BodyError ? value.code : 'UNKNOWN';

@@ -71,13 +71,13 @@ test('read-only queries never authorize action, while a real action or a non-sur
   let authorized = 0;
   const reflexes = { authorizeAction() { authorized++; }, async stop() { return { stopped: true }; }, read() { return { armed: false }; } };
   const c = await client(t, body, new EventJournal(), { reflexes, companion: { snapshot: () => ({ state: 'idle' }), read: () => ({ state: 'idle' }), refresh: async () => {}, request: async () => ({}) } });
-  await raw(c, 'workstation-options', {}); await raw(c, 'list-places', {}); await raw(c, 'get-companion-mode', {});
+  await raw(c, 'workstation-options', {}); await raw(c, 'places', { action: 'list' }); await raw(c, 'get-status', {});
   await raw(c, 'tend-crops', { survey: true }); await raw(c, 'breed-animals', { animal: 'minecraft:cow', survey: true });
-  await raw(c, 'remember-place', { name: 'home' });
+  await raw(c, 'places', { action: 'remember', name: 'home' });
   assert.equal(authorized, 0);
   await raw(c, 'tend-crops', {}); assert.equal(authorized, 1);
   await raw(c, 'breed-animals', { animal: 'minecraft:cow', survey: false }); assert.equal(authorized, 2);
-  await raw(c, 'travel-to', { x: 1, z: 1 }); assert.equal(authorized, 3);
+  await raw(c, 'go-to', { x: 1, z: 1 }); assert.equal(authorized, 3);
 });
 
 test('wait-for-events with types confirms only the delivered contiguous prefix and never repeats a match', async t => {

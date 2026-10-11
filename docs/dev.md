@@ -29,7 +29,7 @@ Set-Location ../mcbot-yes-steve-model   # 附属模组编译时要用核心的 j
 
 `mcp-server`的不少测试直接加载`dist/`：`npm test`会先构建，单独用`node --test tests/xxx.test.mjs`跑某个文件前要先`npm run build`，否则报找不到模块，那是没构建，不是测试原本就失败。
 
-新加 MCP 游戏工具时，要在`client-runtime/tool-registry.json`里写一条：`kind`、`needsIdle`、`moves`、`resumable`，说明见文件开头。`mcp.ts`只注册表里有的工具，开始前的“忙不忙”统一按表检查，处理函数里不要再写`assertIdle`；Codex 白名单就是这张表。`mcp-server`的`tool-allowlist.test.mjs`核对表和实际注册的工具是否一致。
+新加 MCP 游戏工具时，要在`client-runtime/tool-registry.json`里写一条：`kind`、`needsIdle`、`moves`、`resumable`（工具在服务端用别的操作名跑时写`runsAs`，比如`go-to`远路是`travel-to`），说明见文件开头；`clientOnly`的是只给旧 ClientBody 的工具（10-11 合并工具后留下的旧名字，见[工具整理方案](tool_consolidation_plan.md)）。`mcp.ts`只注册表里有的工具，开始前的“忙不忙”统一按表检查，处理函数里不要再写`assertIdle`；Codex 白名单就是这张表。`mcp-server`的`tool-allowlist.test.mjs`核对表和实际注册的工具是否一致。
 
 支持范围的清单是根目录的`compat.json`（网站、README、WebUI模组页都读它）；改了模组里锁的版本或jar版本号，要同步改清单，`node scripts/check-compat.mjs`核对，`mcp-server`的`npm test`也会跑。
 

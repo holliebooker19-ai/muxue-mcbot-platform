@@ -10,8 +10,8 @@ MCBOT 的示例附属模组，让 Bot 能用 [Sophisticated Backpacks](https://m
 
 | 功能 | AI 用什么 | 说明 |
 | --- | --- | --- |
-| 打开手里的背包 | `use-item`，交互 `sophisticatedbackpacks:backpack/open` | 背包要在快捷栏里。打开后菜单不会自动关，AI 用 `get-container` 看，用 `click-slot` 存取，用完 `close-container` |
-| 放在地上的背包当容器 | `discover-containers`、`container-list`、`container-withdraw`；也可以用 `open-container` 后逐格操作 | 和箱子用法一样。适配器 id 是 `sophisticatedbackpacks:backpack` |
+| 打开手里的背包 | `use-item`，交互 `sophisticatedbackpacks:backpack/open` | 背包要在快捷栏里。打开后菜单不会自动关，AI 用 `container-menu` 的 read 看、click 存取，用完 close |
+| 放在地上的背包当容器 | `discover-containers`、`container-list`、`container-withdraw`；也可以用 `container-menu` 打开后逐格操作 | 和箱子用法一样。适配器 id 是 `sophisticatedbackpacks:backpack` |
 | 拾取升级的记账 | 不需要额外调用 | Bot 身上的背包有拾取升级时，掉落物会被直接收进背包。回执里会写明数量进了 `storedIn: sophisticatedbackpacks:backpack/pickup`，不算进 Bot 的物品栏 |
 
 适配器认六种背包：皮革、铜、铁、金、钻石、下界合金。实服只测了皮革背包和铁背包。

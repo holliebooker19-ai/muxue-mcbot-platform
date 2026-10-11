@@ -90,7 +90,7 @@ final class NativeSeat {
 
     /** Refuse before walking anywhere: anything the sit would refuse at the seat anyway. */
     static void requireCanSit(ServerPlayer bot) {
-        if(bot.isSleeping()) throw error("SLEEPING","Body is asleep; call wake-up first");
+        if(bot.isSleeping()) throw error("SLEEPING","Body is asleep; call get-up first");
         if(bot.isPassenger()&&!seated(bot)) throw error("BUSY","Body is riding something that is not a seat");
         if(bot.containerMenu!=bot.inventoryMenu) throw error("BUSY","Close the container before sitting down");
     }

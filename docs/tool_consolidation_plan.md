@@ -1,6 +1,12 @@
-# 工具整理方案（草案，2026-10-11，待小雪审）
+# 工具整理方案（2026-10-11）
 
-这份是方案，**还没改代码**。审完定下来再动手。
+## 进度
+
+- 10-11 小雪同意先做合并。已做（离线）：合并清单第 1～4、6～9、12、13 条，名字按本方案（go-to、places、blueprints、get-status include、equip-item hand main、get-up、pillar、container-menu、emote 看人）；ServerBody **68 → 49 个**。旧名字在 `tool-registry.json` 里标 `clientOnly`，只给旧 ClientBody。运行端 520 项、`mcp-server` 728 项通过（另 1 项跳过；vision 截图那项本机连不上 viewer，没改那部分）；核心 `gradlew build` 通过（坐着、睡着时的提示改成 get-up）。
+- 10-12 小雪看过用法后定：第 5、10、11、14 条（read-chat、approach-container、fetch-and-give、assess-tool）都删，ServerBody **45 个**；启动提示里的“取物交还优先 fetch-and-give”改成先 container-withdraw 再 give-item。`AGENT.md` 的工具数小雪同意改成 45。
+- 没做：说明瘦身（下一步）；隔离服 smoke／agent-trial 脚本里按旧名字调工具的地方（约 37 个文件，另开任务）；真实模型实测。
+
+下面是当时的方案原文。
 
 ## 为什么要整理
 

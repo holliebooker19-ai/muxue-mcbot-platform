@@ -10,7 +10,7 @@ Bot 默认只会用原版的箱子、木桶、漏斗、发射器、潜影盒、�
 | 谁来写 | 服主，不用写代码 | Mod 作者或适配者，单独打包成一个附属模组 |
 | 放在哪 | `config/mcbot-server-control/interactions/*.json` | 和 mcbot-server-control 一起放进 `mods/` |
 
-两种都在服务器启动时加载。之后服务端会把它们告诉运行端：容器适配列在 `hello.adapters`，交互列在 `hello.interactions`，其中对空使用的交互另外列在 `hello.itemInteractions`。AI 在 `open-container`、`interact-block` 和 `use-item` 的工具说明里能看到这些名单。启动日志里会打一行 `MCBOT adapters: ...`。有问题的 JSON 文件和适配器会被跳过，并记一条 `MCBOT adapter: ...` 警告。
+两种都在服务器启动时加载。之后服务端会把它们告诉运行端：容器适配列在 `hello.adapters`，交互列在 `hello.interactions`，其中对空使用的交互另外列在 `hello.itemInteractions`。AI 在 `container-menu`、`interact-block` 和 `use-item` 的工具说明里能看到这些名单。启动日志里会打一行 `MCBOT adapters: ...`。有问题的 JSON 文件和适配器会被跳过，并记一条 `MCBOT adapter: ...` 警告。
 
 ## 安全规则
 
@@ -124,7 +124,7 @@ Bot 默认只会用原版的箱子、木桶、漏斗、发射器、潜影盒、�
 
 - `EmoteSource`（10-08 新增，第 8j 步）：别的 Mod 提供的身体动画，比如玩家模型 Mod 的动作。AI 用 `emote` 工具，`source` 填来源 id、`name` 填动画名。核心先检查名字只含 `[A-Za-z0-9_.:-]`、最长 64，再问 `accepts`；开始时调 `play`，到 `seconds`（默认 6 秒，1～30）、Bot 开始做别的事（说话和转头除外）或下线时调 `stop`，因为模型动画一般会一直循环。`hint()` 是给 AI 看的一句说明，会写进 `emote` 工具的说明里。用 `McbotApi.registerEmotes` 登记。没有来源时，`emote` 只有内置的原版手势：wave、nod、shake、crouch、jump、spin。
 - `AppearanceSource`（10-08 新增）：Bot 的样子，比如玩家模型 Mod 的模型。`choices` 列出服务器上可选的（只读）；托管的人在 WebUI 里选一个，运行端每次接管后用 `set-appearance` 动作套用一次（`apply`）。AI 不能改，MCP 也不发布这个动作。用 `McbotApi.registerAppearance` 登记。
-- `SeatAdapter`（10-11 新增）：别的 Mod 的椅子、凳子，右键后玩家骑上一个座位实体。AI 用 `sit`／`stand-up`。适配者只回答：这个方块是不是座位（`seat`）、座位上是不是已经有人（`occupied`，拿不准就答 true）、这个实体是不是该 Mod 的座位实体（`seatEntity`）。核心负责走过去、保证主手是空手（手里拿着地毯这类东西时，右键会改椅子而不是坐下）、发右键，并且只认观察到的结果：Bot 真的骑着一个 `seatEntity` 认定的实体才算坐下。原版楼梯、台阶不是座位，没有适配器就是 `NO_SEAT`。范例见森罗厨房附属模组的 `SeatAccess`（按类名认方块和实体，不用反射）。
+- `SeatAdapter`（10-11 新增）：别的 Mod 的椅子、凳子，右键后玩家骑上一个座位实体。AI 用 `sit`／`get-up`。适配者只回答：这个方块是不是座位（`seat`）、座位上是不是已经有人（`occupied`，拿不准就答 true）、这个实体是不是该 Mod 的座位实体（`seatEntity`）。核心负责走过去、保证主手是空手（手里拿着地毯这类东西时，右键会改椅子而不是坐下）、发右键，并且只认观察到的结果：Bot 真的骑着一个 `seatEntity` 认定的实体才算坐下。原版楼梯、台阶不是座位，没有适配器就是 `NO_SEAT`。范例见森罗厨房附属模组的 `SeatAccess`（按类名认方块和实体，不用反射）。
 
 在附属模组的构造函数里登记：
 
@@ -157,7 +157,7 @@ McbotApi.registerHint("examplecook:hint", "Wok: add oil first, then ingredients,
 - id 规则和其他登记一样（`命名空间:路径`，和容器、交互等共用一个 id 集合，不能重复），**同一命名空间只能登记一条**；服务器启动后冻结，再登记抛 `IllegalStateException`。命名空间要用被适配模组的 mod id（运行端靠它对应插件，`check-compat` 会查）。
 - 文本：控制字符和格式字符换成空格、合并连续空格、去掉首尾空白后，不能为空，最长 `McbotApi.HINT_MAX`（600）字符，超了直接抛 `IllegalArgumentException`（加载模组时就发现）。
 - 服务端只在这个命名空间下有已安装的登记项（容器、交互、工作站、表情或外观来源、拾取记账）时才下发；被适配模组没装或版本不对时不发。
-- 运行端把说明当不可信文本：只收命名空间属于 `compat.json` 官方插件、且「给 AI 用」开着的；附在该插件影响到的第一个工具（`use-item`、`interact-block`、`open-container`、`emote`）的描述末尾，前缀写明来自附属模组、只解释这些工具。它不能新增工具、参数或权限。插件不带这四个工具中的任何一个时说明不会出现。
+- 运行端把说明当不可信文本：只收命名空间属于 `compat.json` 官方插件、且「给 AI 用」开着的；附在该插件影响到的第一个工具（`use-item`、`interact-block`、`container-menu`、`emote`）的描述末尾，前缀写明来自附属模组、只解释这些工具。它不能新增工具、参数或权限。插件不带这四个工具中的任何一个时说明不会出现。
 - 只写模组里已经实现、有测试证据的用法。现有 4 个附属模组的说明写在各自的 `Mcbot*` 主类（`HINT` 常量），离线测试检查长度和控制字符。config 类插件（通用物品槽）这一轮没有说明。
 
 ## 「给 AI 用」开关

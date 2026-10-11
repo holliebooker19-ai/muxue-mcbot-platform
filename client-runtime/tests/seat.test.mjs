@@ -32,20 +32,20 @@ async function setup(t, { caps = capabilities, sitResult } = {}) {
   return Object.assign(f, { client, acts, call, follows });
 }
 
-test('sit and stand-up are published only with their capabilities', async t => {
+test('sit and get-up (stand-up) are published only with their capabilities', async t => {
   const full = await setup(t);
   const names = (await full.client.listTools()).tools.map(tool => tool.name);
-  assert.ok(names.includes('sit') && names.includes('stand-up'));
+  assert.ok(names.includes('sit') && names.includes('get-up') && !names.includes('stand-up'));
   const old = await setup(t, { caps: capabilities.filter(cap => cap !== 'sit' && cap !== 'stand-up') });
   const oldNames = (await old.client.listTools()).tools.map(tool => tool.name);
-  assert.ok(!oldNames.includes('sit') && !oldNames.includes('stand-up'));
+  assert.ok(!oldNames.includes('sit') && !oldNames.includes('get-up'));
 });
 
 test('sit forwards an optional seat position; partial or malformed arguments never reach the server', async t => {
   const f = await setup(t);
   assert.equal((await f.call('sit', { x: 4, y: 64, z: -2 })).status, 'succeeded');
   assert.equal((await f.call('sit')).status, 'succeeded');
-  assert.equal((await f.call('stand-up')).status, 'succeeded');
+  assert.equal((await f.call('get-up')).status, 'succeeded');
   assert.deepEqual(f.acts().map(act => [act.name, act.args]), [['sit', { x: 4, y: 64, z: -2 }], ['sit', {}], ['stand-up', {}]]);
   const partial = await f.client.callTool({ name: 'sit', arguments: { x: 4 } });
   assert.equal(partial.isError, true);
@@ -64,7 +64,7 @@ test('a successful sit ends the follow, keeps the guard duty and is not resumed 
   const sat = await f.call('sit');
   assert.equal(sat.status, 'succeeded');
   assert.ok(f.acts().some(act => act.name === 'sit'), 'sit went to the server');
-  assert.equal((await f.call('get-companion-mode')).seated, true);
+  assert.equal((await f.call('get-status')).companionMode.seated, true);
   const state = f.mode.snapshot();
   assert.equal(state.seated, true);
   assert.equal(state.intent, undefined, 'the follow is over');
@@ -76,8 +76,8 @@ test('a successful sit ends the follow, keeps the guard duty and is not resumed 
   assert.equal(f.follows().length, 1, 'no follow set again by anyone');
   assert.equal(f.mode.snapshot().seated, true);
 
-  assert.equal((await f.call('stand-up')).status, 'succeeded');
-  assert.equal((await f.call('get-companion-mode')).seated, undefined);
+  assert.equal((await f.call('get-up')).status, 'succeeded');
+  assert.equal((await f.call('get-status')).companionMode.seated, undefined);
   assert.equal(f.mode.snapshot().guardEnabled, true, 'standing up leaves the protection alone');
   assert.deepEqual(f.told.at(-1), { action: 'guard', player: 'Alex', guard: true }, 'only the protection is left of it');
   await delay(60); await f.monitor.tick();
@@ -112,13 +112,13 @@ test('get-companion-mode drops the sitting mark when the server shows no seat an
   const f = await setup(t);
   await f.follow();
   await f.call('sit');
-  assert.equal((await f.call('get-companion-mode')).seated, true);
+  assert.equal((await f.call('get-status')).companionMode.seated, true);
   // The guard got the body up and is walking back to the seat: still seated for the model.
   f.server.set({ returning: true });
-  assert.equal((await f.call('get-companion-mode')).seated, true);
+  assert.equal((await f.call('get-status')).companionMode.seated, true);
   // The way back failed: the server turned the seat into a wait with the sit code. The model is told, once.
   f.server.drop(); f.server.current = { action: 'wait', postureRevision: f.server.revision + 1 }; f.server.set({ state: 'waiting', reason: 'SEAT_OCCUPIED' });
-  const back = await f.call('get-companion-mode');
+  const back = (await f.call('get-status')).companionMode;
   assert.equal(back.seated, undefined);
   assert.equal(back.intent, 'wait');
   const told = f.events.since(0, ['companion']).map(event => JSON.parse(event.text));

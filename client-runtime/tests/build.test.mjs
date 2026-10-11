@@ -67,7 +67,7 @@ test('blueprints are saved relative to their minimum corner and listed with thei
   assert.throws(() => shelf.save('../x', '', [{ x: 0, y: 0, z: 0, state: 'stone' }], false), /蓝图名/);
   const { body } = await setup(t);
   const c = await client(t, body, { blueprints: shelf });
-  const listed = JSON.parse((await c.callTool({ name: 'list-blueprints', arguments: {} })).content[0].text);
+  const listed = JSON.parse((await c.callTool({ name: 'blueprints', arguments: { action: 'list' } })).content[0].text);
   assert.deepEqual(listed[0].materials, { oak_log: 1, oak_planks: 1 });
 });
 
@@ -84,5 +84,5 @@ test('build sends absolute cells with the blueprint turn; dryRun only asks for t
   await assert.rejects(body.act('build', { blocks: [{ x: 0, y: 0, z: 0, state: 'stone', rotation: 45 }] }), { code: 'INVALID_ARGUMENT' });
   const { body: old } = await setup(t, []);
   const names = (await (await client(t, old, { blueprints: shelf })).listTools()).tools.map(tool => tool.name);
-  for (const name of ['build', 'list-blueprints', 'save-blueprint']) assert.ok(!names.includes(name), name);
+  for (const name of ['build', 'blueprints']) assert.ok(!names.includes(name), name);
 });

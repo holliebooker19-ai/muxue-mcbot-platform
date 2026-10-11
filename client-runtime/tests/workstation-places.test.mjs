@@ -32,10 +32,12 @@ const call = async (c, name, args = {}) => JSON.parse((await c.callTool({ name, 
 test('craft, smelt and place tools are published only with their capabilities', async t => {
   const { body } = await setup(t);
   const names = (await (await client(t, body)).listTools()).tools.map(tool => tool.name);
-  for (const name of ['craft-item', 'smelt-item', 'travel-to', 'remember-place', 'list-places', 'forget-place', 'go-to-place']) assert.ok(names.includes(name), name);
+  for (const name of ['craft-item', 'smelt-item', 'go-to', 'places']) assert.ok(names.includes(name), name);
+  for (const name of ['travel-to', 'go-to-place', 'move-to-position', 'remember-place', 'list-places', 'forget-place']) assert.ok(!names.includes(name), `${name} is merged`);
   const { body: old } = await setup(t, []);
   const oldNames = (await (await client(t, old)).listTools()).tools.map(tool => tool.name);
-  for (const name of ['craft-item', 'smelt-item', 'travel-to', 'go-to-place']) assert.ok(!oldNames.includes(name), name);
+  for (const name of ['craft-item', 'smelt-item', 'places']) assert.ok(!oldNames.includes(name), name);
+  assert.ok(oldNames.includes('go-to'), 'near walks without travel-to');
 });
 
 test('craft-item and smelt-item forward only their own arguments; malformed ones never reach the server', async t => {
@@ -106,34 +108,44 @@ test('use-bucket and till forward their arguments; place-block fills a left-out 
   await assert.rejects(body.act('tend-crops', { till: 65 }), { code: 'INVALID_ARGUMENT' });
   assert.equal(acts().length, 4);
 });
-test('places are remembered per world in the runtime directory and go-to-place walks there with travel-to', async t => {
+test('places are remembered per world in the runtime directory and go-to place walks there with travel-to', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'places-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const { body, acts } = await setup(t);
   const places = new PlaceBook(dir, 'test-world');
   const c = await client(t, body, { places });
-  const saved = await call(c, 'remember-place', { name: 'Home', x: 10, y: 64, z: -5 });
+  const saved = await call(c, 'places', { action: 'remember', name: 'Home', x: 10, y: 64, z: -5 });
   assert.equal(saved.saved.name, 'Home');
   assert.equal(new PlaceBook(dir, 'test-world').get('home').position.x, 10, 'written to disk and found case-insensitively');
   assert.equal(new PlaceBook(dir, 'other-world').get('home'), undefined, 'another world has its own list');
-  assert.equal((await call(c, 'list-places')).length, 1);
-  await call(c, 'go-to-place', { name: 'home' });
+  assert.equal((await call(c, 'places', { action: 'list' })).length, 1);
+  assert.equal((await call(c, 'places', { action: 'forget' })).code, 'INVALID_ARGUMENT', 'forget needs a name');
+  await call(c, 'go-to', { place: 'home' });
   assert.deepEqual(acts().map(act => [act.name, act.args]), [['travel-to', { x: 10, y: 64, z: -5, tolerance: 1.5 }]]);
-  assert.equal((await call(c, 'go-to-place', { name: 'mine' })).code, 'NOT_FOUND');
-  assert.deepEqual(await call(c, 'forget-place', { name: 'HOME' }), { removed: true });
+  assert.equal((await call(c, 'go-to', { place: 'mine' })).code, 'NOT_FOUND');
+  assert.deepEqual(await call(c, 'places', { action: 'forget', name: 'HOME' }), { removed: true });
 });
 
-test('move-to-position past 32 blocks walks as travel-to; a near one stays an ordinary move', async t => {
-  const { body, acts } = await setup(t);
+test('go-to: a point past 32 blocks (or without y) walks as travel-to, a near one is an ordinary move, player walks up to them; exactly one target', async t => {
+  const { body, acts } = await setup(t, [...extra, 'approach-player']);
   const c = await client(t, body);
-  const far = await call(c, 'move-to-position', { x: 100, y: 70, z: -40, tolerance: 0.5 });
-  assert.equal(far.routedVia, 'travel-to');
-  await call(c, 'move-to-position', { x: 10, y: 64, z: 5 });
-  assert.deepEqual(acts().map(act => [act.name, act.args]), [['travel-to', { x: 100, y: 70, z: -40, tolerance: 1 }], ['move-to-position', { x: 10, y: 64, z: 5 }]]);
+  await call(c, 'go-to', { x: 100, y: 70, z: -40, tolerance: 0.5 });
+  await call(c, 'go-to', { x: 10, z: 5 });
+  await call(c, 'go-to', { player: 'muxue', say: '来了' });
+  await call(c, 'go-to', { x: 10, y: 64, z: 5, tolerance: 6, timeoutMs: 300000 });
+  await body.stop(); // the mock keeps a near walk running
+  assert.deepEqual(acts().map(act => [act.name, act.args]), [
+    ['travel-to', { x: 100, y: 70, z: -40, tolerance: 1 }], ['travel-to', { x: 10, z: 5 }],
+    ['send-chat', { message: '来了' }], ['approach-player', { player: 'muxue' }],
+    ['move-to-position', { x: 10, y: 64, z: 5, tolerance: 3, timeoutMs: 120000 }],
+  ]);
+  for (const args of [{}, { x: 1, z: 1, player: 'muxue' }, { place: 'home', player: 'muxue' }, { x: 1 }]) assert.equal((await call(c, 'go-to', args)).code, 'INVALID_ARGUMENT', JSON.stringify(args));
   const { body: old, acts: oldActs } = await setup(t, []);
-  await call(await client(t, old), 'move-to-position', { x: 100, y: 64, z: 0 });
+  const near = await client(t, old);
+  await call(near, 'go-to', { x: 100, y: 64, z: 0 });
   assert.deepEqual(oldActs().map(act => act.name), ['move-to-position'], 'without travel-to the server decides');
+  await old.stop();
+  assert.equal((await call(near, 'go-to', { x: 1, z: 1 })).code, 'INVALID_ARGUMENT', 'a near walk needs y');
 });
-
 test('bedtime wakes the model once a night when the body is near home', () => {
   const events = new EventJournal(undefined, 'ServerBot');
   let home = { name: '家', dimension: 'minecraft:overworld', position: { x: 0, y: 64, z: 0 }, savedAt: 0 };
@@ -150,17 +162,19 @@ test('bedtime wakes the model once a night when the body is near home', () => {
   assert.equal(events.since(0).filter(e => e.type === 'bedtime').length, 2, 'the next night near home again');
   home = undefined;
 });
-test('meet is offered with travel-meet only, reaches the server from travel-to and go-to-place, and must name a player', async t => {
-  const { body, acts } = await setup(t, [...extra, 'travel-meet']);
+test('meet is offered with travel-meet only, reaches the server from go-to (point or place), and must name a player', async t => {
+  const { body, acts } = await setup(t, [...extra, 'travel-meet', 'approach-player']);
   const c = await client(t, body, { places: new PlaceBook() });
   const tools = (await c.listTools()).tools;
-  for (const name of ['travel-to', 'go-to-place']) assert.ok(tools.find(tool => tool.name === name).inputSchema.properties.meet, name);
-  await call(c, 'travel-to', { x: 100, z: -40, meet: 'muxue' });
-  await call(c, 'remember-place', { name: '家', x: 10, y: 64, z: -5 });
-  await call(c, 'go-to-place', { name: '家', meet: 'muxue' });
-  assert.deepEqual(acts().map(act => [act.name, act.args]), [['travel-to', { x: 100, z: -40, meet: 'muxue' }], ['travel-to', { x: 10, y: 64, z: -5, tolerance: 1.5, meet: 'muxue' }]]);
+  assert.ok(tools.find(tool => tool.name === 'go-to').inputSchema.properties.meet);
+  await call(c, 'go-to', { x: 100, z: -40, meet: 'muxue' });
+  await call(c, 'go-to', { x: 3, y: 64, z: 3, meet: 'muxue' });
+  await call(c, 'places', { action: 'remember', name: '家', x: 10, y: 64, z: -5 });
+  await call(c, 'go-to', { place: '家', meet: 'muxue' });
+  assert.deepEqual(acts().map(act => [act.name, act.args]), [['travel-to', { x: 100, z: -40, meet: 'muxue' }], ['travel-to', { x: 3, y: 64, z: 3, meet: 'muxue' }], ['travel-to', { x: 10, y: 64, z: -5, tolerance: 1.5, meet: 'muxue' }]]);
+  assert.equal((await call(c, 'go-to', { player: 'muxue', meet: 'muxue' })).code, 'INVALID_ARGUMENT', 'walking up to a player needs no meet');
   await assert.rejects(body.act('travel-to', { x: 1, z: 2, meet: 'no one' }), { code: 'INVALID_ARGUMENT' });
   const { body: old } = await setup(t);
   const oldTools = (await (await client(t, old)).listTools()).tools;
-  for (const name of ['travel-to', 'go-to-place']) assert.equal(oldTools.find(tool => tool.name === name).inputSchema.properties.meet, undefined, `${name} on an older core`);
+  assert.equal(oldTools.find(tool => tool.name === 'go-to').inputSchema.properties.meet, undefined, 'an older core');
 });

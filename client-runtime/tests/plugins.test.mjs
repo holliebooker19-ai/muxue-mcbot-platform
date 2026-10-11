@@ -26,7 +26,7 @@ const HINTS = [
 ];
 // What a server with all four add-ons and the cookery machines enabled says.
 const fullHello = () => ({
-  capabilities: [...serverCapabilities, 'open-container', 'use-item-on-block', 'use-item', 'emote', 'machine-items', 'set-appearance'],
+  capabilities: [...serverCapabilities, 'open-container', 'click-slot', 'close-container', 'use-item-on-block', 'use-item', 'emote', 'machine-items', 'set-appearance'],
   adapters: [`${SB}:backpack`, 'ironfurnaces:iron_furnace'],
   interactions: ['minecraft:composter/add', `${KC}:pot/add_oil`, `${KC}:pot/stir`, `${SB}:backpack/open`, `${SB}:backpack/take`],
   itemInteractions: [`${SB}:backpack/open`],
@@ -113,10 +113,10 @@ test('hard calls into a disabled plugin are refused; other calls are untouched',
 
 test('each hint goes to the first tool its plugin appears in', () => {
   const notes = pluginNotes(applyPluginPolicy(fullHello(), policy()));
-  assert.deepEqual([...notes.keys()].sort(), ['emote', 'interact-block', 'open-container', 'use-item']);
+  assert.deepEqual([...notes.keys()].sort(), ['container-menu', 'emote', 'interact-block', 'use-item']);
   assert.match(notes.get('use-item'), /\[sophisticatedbackpacks\] Backpacks open/);
   assert.match(notes.get('interact-block'), /\[kaleidoscope_cookery\] Wok/);
-  assert.match(notes.get('open-container'), /\[ironfurnaces\] Iron furnace/);
+  assert.match(notes.get('container-menu'), /\[ironfurnaces\] Iron furnace/);
   assert.match(notes.get('emote'), /\[yes_steve_model\] YSM/);
   assert.ok(![...notes.values()].some(text => /Ignore the rules/.test(text)));
 });
@@ -137,7 +137,7 @@ test('MCP with every plugin on: hints sit in the tool descriptions they belong t
   const { c } = await setup(t, '');
   const tools = Object.fromEntries((await c.listTools()).tools.map(tool => [tool.name, tool]));
   assert.match(tools['use-item'].description, /Plugin notes.*\[sophisticatedbackpacks\] Backpacks open with use-item\./);
-  assert.match(tools['open-container'].description, /ironfurnaces:iron_furnace.*Plugin notes.*\[ironfurnaces\]/);
+  assert.match(tools['container-menu'].description, /ironfurnaces:iron_furnace.*Plugin notes.*\[ironfurnaces\]/);
   assert.match(tools.emote.description, /\[yes_steve_model\] YSM animations\./);
   assert.ok(tools['machine-items'], 'machine-items published');
   for (const tool of Object.values(tools)) assert.doesNotMatch(tool.description, /Ignore the rules/, 'third-party hint never reaches the model');

@@ -19,7 +19,7 @@ export const registeredTools = [...new Set([
 
 test('mcp.ts 能提取到足够多的工具名（防止正则失效后测试空转）', () => {
   assert.ok(registeredTools.length >= 55, `只提取到 ${registeredTools.length} 个`);
-  for (const name of ['emote', 'equip-item', 'use-item', 'interact-block', 'send-chat', 'fetch-and-give']) assert.ok(registeredTools.includes(name), name);
+  for (const name of ['emote', 'equip-item', 'use-item', 'interact-block', 'send-chat', 'container-menu']) assert.ok(registeredTools.includes(name), name);
 });
 
 test('工具表与 mcp.ts 注册的工具一一对应', () => {
@@ -28,8 +28,8 @@ test('工具表与 mcp.ts 注册的工具一一对应', () => {
   assert.deepEqual([...listed].filter(name => !registeredTools.includes(name)), [], '工具表里有，mcp.ts 没注册');
 });
 
-test('Codex 服务器端白名单就是工具表，没有重复', () => {
-  assert.deepEqual([...CODEX_SERVER_TOOLS], Object.keys(registry));
+test('Codex 服务器端白名单就是工具表去掉只给旧 ClientBody 的，没有重复', () => {
+  assert.deepEqual([...CODEX_SERVER_TOOLS], Object.keys(registry).filter(name => !registry[name].clientOnly));
   assert.equal(new Set(CODEX_SERVER_TOOLS).size, CODEX_SERVER_TOOLS.length);
 });
 

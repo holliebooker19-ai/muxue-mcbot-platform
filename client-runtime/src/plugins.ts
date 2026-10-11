@@ -133,7 +133,7 @@ export function pluginRefusal(name: ActionName, args: unknown, policy?: PluginPo
 
 /**
  * Where each plugin hint is shown: appended to the description of the first tool the plugin's entries appear in
- * (use-item, interact-block, open-container, emote), so the model reads it next to the tool it is about. Tool
+ * (use-item, interact-block, container-menu, emote), so the model reads it next to the tool it is about. Tool
  * descriptions are the one place all three agents (Claude, Codex, dsh) are sure to see. A hint whose plugin brings
  * none of these tools is not shown.
  */
@@ -145,7 +145,7 @@ export function pluginNotes(hello: BodyHello): Map<string, string> {
     const ns = namespace(hint.id);
     const tool = has([...items], ns) ? 'use-item'
       : has((hello.interactions ?? []).filter(id => !items.has(id)), ns) ? 'interact-block'
-      : has(hello.adapters, ns) ? 'open-container'
+      : has(hello.adapters, ns) ? 'container-menu'
       : has(hello.emotes?.sources.map(s => s.id), ns) ? 'emote' : '';
     if (tool) per.set(tool, [...(per.get(tool) ?? []), hint]);
   }

@@ -5,22 +5,26 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ServerBody } from '../dist/server-body.js';
 import { createMcpServer } from '../dist/mcp.js';
 import { EventJournal } from '../dist/events.js';
-import { TOOLS, toolInfo, looksOnly } from '../dist/tool-registry.js';
+import { TOOLS, toolInfo, looksOnly, resumable } from '../dist/tool-registry.js';
 import { mockServerControl } from './mock-server-control.mjs';
 
 test('the tool table: every entry is complete, and only the agreed tasks carry on after an interruption (design 8.2)', () => {
-  assert.equal(TOOLS.size, 68);
+  assert.equal([...TOOLS.values()].filter(info => !info.clientOnly).length, 45, 'ServerBody tools after the merge (docs/tool_consolidation_plan.md)');
+  assert.deepEqual([...TOOLS].filter(([, info]) => info.clientOnly).map(([name]) => name).sort(), ['click-slot', 'close-container', 'follow-player', 'get-container', 'get-position', 'list-inventory', 'look-at', 'move-to-position', 'open-container', 'read-chat'], 'kept for the old ClientBody only');
   for (const [name, info] of TOOLS) {
     assert.ok(['read', 'chat', 'control', 'action', 'task'].includes(info.kind), name);
     for (const flag of ['needsIdle', 'moves', 'resumable']) assert.equal(typeof info[flag], 'boolean', `${name}.${flag}`);
     if (['read', 'chat', 'control'].includes(info.kind)) assert.equal(info.needsIdle, false, `${name}: looking, talking and stopping are never refused as busy`);
   }
   assert.deepEqual([...TOOLS].filter(([, info]) => info.resumable).map(([name]) => name).sort(),
-    ['breed-animals', 'build', 'collect-items', 'gather-resources', 'go-to-place', 'hunt', 'tend-crops', 'travel-to']);
+    ['breed-animals', 'build', 'collect-items', 'gather-resources', 'go-to', 'hunt', 'tend-crops']);
+  assert.equal(resumable('travel-to'), true, 'the long walk go-to starts on the server');
+  for (const work of ['move-to-position', 'approach-player', 'pillar-up', 'craft-item']) assert.equal(resumable(work), false, work);
   assert.throws(() => toolInfo('no-such-tool'), /tool-registry\.json/);
   assert.equal(looksOnly({ survey: true }), true);
   assert.equal(looksOnly({ dryRun: true }), true);
   assert.equal(looksOnly({ survey: false }), false);
+  assert.equal(looksOnly({ action: 'read' }), true, 'container-menu read');
   assert.equal(looksOnly(undefined), false);
 });
 
@@ -36,24 +40,24 @@ async function setup(t) {
 
 test('one busy check at the door: an action is refused while another holds the body, reading and chatting are not', async t => {
   const { body, mock, call } = await setup(t);
-  const walk = await call('move-to-position', { x: 3, y: 64, z: 3 });
+  const walk = await call('go-to', { x: 3, y: 64, z: 3 });
   assert.equal(walk.status, 'running');
   const acts = () => mock.calls.filter(entry => entry.method === 'act').length;
   const before = acts();
-  const refused = await call('look-at', { x: 0, y: 64, z: 0 });
+  const refused = await call('go-to', { x: 0, y: 64, z: 0 });
   assert.equal(refused.error, true); assert.equal(refused.code, 'BUSY');
   assert.match(refused.message, /已有身体动作或任务在跑/);
   assert.equal(acts(), before, 'refused before anything reached the server');
-  assert.equal((await call('get-position')).error, false);
+  assert.equal((await call('get-status')).error, false);
   assert.equal((await call('send-chat', { message: 'hi' })).status, 'succeeded');
   await body.stop();
-  assert.equal((await call('look-at', { x: 0, y: 64, z: 0 })).status, 'succeeded', 'free again after the stop');
+  assert.equal((await call('go-to', { x: 0, y: 64, z: 0 })).status, 'running', 'free again after the stop');
 });
 
 test('the task lock counts as busy too (a pillar, a companion errand)', async t => {
   const { body, call } = await setup(t);
   body.acquireTask('someone-else');
-  assert.equal((await call('look-at', { x: 0, y: 64, z: 0 })).code, 'BUSY');
+  assert.equal((await call('go-to', { x: 0, y: 64, z: 0 })).code, 'BUSY');
   body.releaseTask('someone-else');
-  assert.equal((await call('look-at', { x: 0, y: 64, z: 0 })).status, 'succeeded');
+  assert.equal((await call('go-to', { x: 0, y: 64, z: 0 })).status, 'running');
 });

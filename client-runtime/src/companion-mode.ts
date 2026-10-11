@@ -316,7 +316,7 @@ export class CompanionMode {
       if (reply.action === 'seated') {
         // Waiting while seated changes nothing (a follow stands the body up): the seat stays, nothing of this request is held.
         this.intent = undefined; this.errands.clear();
-        this.publish({ state: 'stopped', reason: '正坐着：wait 不改变姿态，站起来（stand-up）后才能等或跟随', seated: true }); return this.snapshot();
+        this.publish({ state: 'stopped', reason: '正坐着：wait 不改变姿态，站起来（get-up）后才能等或跟随', seated: true }); return this.snapshot();
       }
       if (next.action === 'follow' && (reply.player !== next.player || reply.entityId !== next.expectedEntityId)) throw new BodyError('INVALID_RESPONSE', '姿态回执缺少完整状态或目标身份');
       this.intent = next; this.awayNoted = false;

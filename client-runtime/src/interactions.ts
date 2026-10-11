@@ -63,7 +63,7 @@ export async function equipItem(body: Body, request: { item: string; slot?: numb
 function hotbarStack(inventory: Array<{ slot: number; id: string; count: number; components?: Record<string, unknown>; componentsComplete?: boolean }>, selectedSlot: number | undefined, item: string) {
   const matches = inventory.filter(stack => stack.id === item && stack.count > 0);
   const hotbar = matches.filter(stack => stack.slot >= 0 && stack.slot <= 8);
-  if (!hotbar.length) throw new BodyError(matches.length ? 'NOT_IN_HOTBAR' : 'MISSING_ITEM', matches.length ? `${item} 不在快捷栏，先用 prepare-item 放到快捷栏` : `背包里没有 ${item}`);
+  if (!hotbar.length) throw new BodyError(matches.length ? 'NOT_IN_HOTBAR' : 'MISSING_ITEM', matches.length ? `${item} 不在快捷栏，先用 equip-item hand:main 拿到手上` : `背包里没有 ${item}`);
   const chosen = hotbar.find(stack => stack.slot === selectedSlot) ?? hotbar[0];
   if (chosen.componentsComplete === false || !chosen.components) throw new BodyError('INCOMPLETE_GUARD', '这个物品的组件读不完整，不能安全使用');
   return chosen;

@@ -320,33 +320,33 @@ async function stdioSetup(t, initialState) {
   return { mock, client, control, controlFile, controllerId, connectionFile, stderr: () => stderr };
 }
 
-test('actual stdio ServerBody publishes 13 accurate tools, writes stop-only lease file and releases on process close', async t => {
+test('actual stdio ServerBody publishes 8 accurate tools, writes stop-only lease file and releases on process close', async t => {
   const { mock, client, control, controlFile, controllerId, connectionFile, stderr } = await stdioSetup(t);
   assert.deepEqual(Object.keys(control).sort(), ['protocol', 'backend', 'connectionFile', 'worldId', 'username', 'instanceId', 'sessionId', 'leaseId', 'stopToken', 'controllerId', 'chatCursor'].sort());
   assert.equal(control.controllerId, controllerId); assert.equal(control.connectionFile, connectionFile); assert.equal(control.stopToken, mock.stopToken);
   assert.equal(JSON.stringify(control).includes(mock.connection.token), false);
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 13);
-  assert.ok(tools.every(tool => !['dig-block', 'place-block', 'get-container', 'open-container', 'memory-context'].includes(tool.name)));
+  assert.equal(tools.length, 8);
+  assert.ok(tools.every(tool => !['dig-block', 'place-block', 'get-container', 'open-container', 'container-menu', 'memory-context', 'follow-player', 'look-at', 'move-to-position'].includes(tool.name)));
   assert.match(tools.find(tool => tool.name === 'get-status').description, /server-observed/);
   const status = JSON.parse((await client.callTool({ name: 'get-status', arguments: {} })).content[0].text);
   assert.equal(status.source, 'server-observed'); assert.equal(JSON.stringify(status).includes(mock.stopToken), false);
-  const started = JSON.parse((await client.callTool({ name: 'follow-player', arguments: { player: 'Alex' } })).content[0].text); assert.equal(started.status, 'running');
+  const started = JSON.parse((await client.callTool({ name: 'go-to', arguments: { x: 1, y: 2, z: 3 } })).content[0].text); assert.equal(started.status, 'running');
   assert.equal(JSON.parse((await client.callTool({ name: 'stop-action', arguments: {} })).content[0].text).stopped, true);
-  assert.equal(JSON.parse((await client.callTool({ name: 'look-at', arguments: { x: 1, y: 2, z: 3 } })).content[0].text).controlGeneration, 1);
+  assert.equal(JSON.parse((await client.callTool({ name: 'go-to', arguments: { x: 1, y: 2, z: 3 } })).content[0].text).controlGeneration, 1);
   await client.close(); await until(() => mock.calls.some(call => call.method === 'release'));
   await until(() => !fs.existsSync(controlFile));
   assert.equal(stderr().includes(mock.stopToken), false); assert.equal(stderr().includes(mock.connection.token), false);
 });
 
-test('actual stdio ServerBody withholds chat from before its claim in get-status and read-chat', async t => {
+test('actual stdio ServerBody withholds chat from before its claim in get-status (read-chat is ClientBody only)', async t => {
   const old = { seq: 4, time: 4, username: 'Alex', message: 'old command before claim' };
   const { mock, client } = await stdioSetup(t, { chatCursor: 4, chat: [old] });
   const fresh = { seq: 5, time: 5, username: 'Alex', message: 'new command' };
   mock.setState({ chatCursor: 5, chat: [old, fresh] });
   const status = JSON.parse((await client.callTool({ name: 'get-status', arguments: {} })).content[0].text);
   assert.deepEqual(status.chat, [fresh]);
-  assert.deepEqual(JSON.parse((await client.callTool({ name: 'read-chat', arguments: {} })).content[0].text), [fresh]);
+  assert.ok(!(await client.listTools()).tools.some(tool => tool.name === 'read-chat'));
 });
 
 test('host revoke makes actual MCP terminal and removes only its lease file; explicit new process can claim', async t => {

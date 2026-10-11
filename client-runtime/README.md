@@ -63,6 +63,15 @@ node dist/main.js --body client --connection-file "C:/path/to/instance/config/mc
 
 ## 工具与当前边界
 
+**2026-10-11 起 ServerBody 的工具合并了**（[工具整理方案](../docs/tool_consolidation_plan.md)），服务端动作名和协议不变，下面各段落里的旧工具名是当时的写法，对应关系是：
+- `go-to`：`move-to-position`、`travel-to`、`go-to-place`、`approach-player`。给 `x/z`（`y` 可选）、`place` 或 `player` 其中一个；32 格内、给了 `y` 的走普通导航，远了、没给 `y`、带 `meet` 或目标区块没加载的走 `travel-to`。
+- `places`（`remember`／`list`／`forget`）、`blueprints`（`list`／`save`）、`pillar`（`up` 或 `down`）、`get-up`（躺着就 `wake-up`，否则 `stand-up`）。
+- `container-menu`（`open`／`read`／`click`／`close`）：每一步按原来那个工具的参数严格核对，菜单 guard 照旧必填；`read` 只看，身体忙时也不拒绝。
+- `get-status` 加 `include`：`inventory` 给完整背包，`survival` 给危险、威胁和进食／防卫策略；`get-position`、`list-inventory`、`get-companion-mode`、`get-survival-state` 不再单独发布。
+- `equip-item` 加 `hand:"main"`：把背包里的东西拿到主手（原来的 `prepare-item`，快捷栏里的只选中，原来的 `select-slot`）；`emote` 不带 `name` 只转身看玩家或坐标（原来的 `look-at`）。
+- `follow-player`（旧的限时跟随）不再给 ServerBody，跟随用 `companion-mode`。
+- `tool-registry.json` 里标 `clientOnly` 的是只给旧 ClientBody 的工具，ClientBody 的工具和形状不变。10-12 又删了 4 个：`read-chat`（只留给 ClientBody，ServerBody 的聊天作为事件推给模型）、`assess-tool`（采集、挖方块时程序自己挑工具）、`approach-container`（容器任务自己会走过去）、`fetch-and-give`（先 `container-withdraw` 再 `give-item`；运行端内部这条组合流程还在，和取物、交物共用代码）。ServerBody 共 45 个。
+
 公共观察／控制工具：`get-status`、`get-position`、`list-inventory`、`find-entity`、`read-chat`、`get-block`、`get-operation`、`wait-for-events`、`stop-action`；支持容器时另有 `get-container`。
 
 两种后端已有的动作：`send-chat`、`look-at`、`move-to-position`、`follow-player`、`dig-block`、`place-block`、`open-container`、`click-slot`、`close-container`；ServerBody B 另有 `select-slot`、`drop-item`，全部启用是 11 个动作＋10 个观察／控制工具共 21 个。ClientBody v1 全部启用仍为 19 个。

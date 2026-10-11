@@ -104,7 +104,7 @@ export class BlueprintShelf {
   load(name: string): Blueprint {
     let raw: string;
     try { raw = fs.readFileSync(this.file(name), 'utf8'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new BodyError('NOT_FOUND', `没有叫「${name}」的蓝图（list-blueprints 看有哪些）`); throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new BodyError('NOT_FOUND', `没有叫「${name}」的蓝图（blueprints list 看有哪些）`); throw error; }
     const data = JSON.parse(raw.replace(/^﻿/, '')) as Blueprint;
     if (data?.version !== 1 || !Array.isArray(data.blocks) || !data.size) throw new BodyError('INVALID_ARGUMENT', `蓝图文件格式不对：${name}`);
     return data;

@@ -36,7 +36,7 @@ MCBOT 的示例附属模组：让 Bot 用[森罗厨房（Kaleidoscope Cookery）
 
 ## 座位
 
-附属模组还登记了一个 `SeatAdapter`（`kaleidoscope_cookery:seat`），让 AI 用 `sit`／`stand-up` 坐椅子和厨师凳：
+附属模组还登记了一个 `SeatAdapter`（`kaleidoscope_cookery:seat`），让 AI 用 `sit`／`get-up` 坐椅子和厨师凳：
 
 - 认的方块：`ChairBlock`（`chair_*`）和 `CookStoolBlock`（`cook_stool_*`），按类名和命名空间精确匹配；同一个标签里的长椅、垃圾桶没读过它们的类，不认。座位实体是 `entity.SitEntity`，座位方块上有 `SitEntity` 压着就算被占（和方块自己的判断一样）。
 - 椅子的 `useItemOn` 里：主手拿着地毯（`#minecraft:wool_carpets`）时右键是换色，不会坐下；厨师凳走 `useWithoutItem`，潜行时拒绝。所以核心用空手、不潜行去右键。

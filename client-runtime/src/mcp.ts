@@ -67,7 +67,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const completeComponents = z.record(z.unknown()).describe('Copy the complete components JSON object from the current observed stack; empty stack uses {}. Never omit or summarize fields.');
   const serverBlockGuard: ZodRawShape = serverObserved ? { expectedProperties: z.record(z.unknown()).describe('Copy the complete current block.properties object from get-block.') } : {};
   const serverStackGuard: ZodRawShape = serverObserved ? { expectedCount: z.number().int().nonnegative(), expectedComponents: completeComponents } : {};
-  const serverRevision: ZodRawShape = serverObserved ? { expectedRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).describe('Current container.revision from get-container details:true; reobserve after every mutation.') } : {};
+  const serverRevision: ZodRawShape = serverObserved ? { expectedRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).describe(serverObserved ? 'Current container.revision from container-menu read details:true; read again after every change.' : 'Current container.revision from get-container details:true; reobserve after every mutation.') } : {};
   const serverSlotComponents: ZodRawShape = serverObserved ? { expectedComponents: completeComponents, expectedCarriedComponents: completeComponents } : {};
   let eventCursor = 0;
   const returnedSeqs = new Set<number>();
@@ -81,6 +81,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
    */
   const register = (name: string, description: string, shape: ZodRawShape, handler: (args: any) => Promise<unknown>) => {
     const tool = toolInfo(name);
+    // The old ClientBody keeps its own tools; ServerBody has the merged ones (docs/tool_consolidation_plan.md).
+    if (serverObserved && tool.clientOnly) return;
     server.registerTool(name, { description: description + (notes.get(name) ?? ''), inputSchema: shape }, async args => {
       try {
         if (name === 'companion-mode' && args.mining) {
@@ -98,9 +100,19 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       }
     });
   };
-  register('get-status', `Read the current ${observed} snapshot.${prediction} Inspect operation status to confirm action completion. When present, operationBudget reports the current lease's remaining distinct operation IDs; stop does not replenish it. Exhaustion needs explicit release/re-claim, never automatic task replay.${entityGear}`, serverObserved ? { details: z.boolean().default(false) } : {}, async ({ details }) => {
+  // ServerBody: one read for the body (position, health, hand, companion mode); include adds the full inventory or the survival facts.
+  const survivalRead = !!body.survivalState && body.hello.capabilities.includes('survival-state');
+  const includes = (survivalRead ? ['inventory', 'survival'] : ['inventory']) as [string, ...string[]];
+  const statusText = serverObserved
+    ? `Read yourself now (server-observed): position and dimension, health and food, what is in hand, the companion mode (following/waiting, suspendedFor, away, guard) and machines still working.${entityGear} include "inventory" adds every inventory slot with its full guard (slot, id, count, components)${survivalRead ? `; include "survival" adds dangers, nearby threats${equipment ? ' (with their equipment, to judge e.g. a zombie in iron armour)' : ''}, active defense and the eating/defense policy (its revision is what set-reflexes needs). Missing threat facts do not mean safe` : ''}. details:true gives the raw snapshot.`
+    : `Read the current ${observed} snapshot.${prediction} Inspect operation status to confirm action completion. When present, operationBudget reports the current lease's remaining distinct operation IDs; stop does not replenish it. Exhaustion needs explicit release/re-claim, never automatic task replay.${entityGear}`;
+  register('get-status', statusText, serverObserved ? { details: z.boolean().default(false), include: z.array(z.enum(includes)).max(2).optional() } : {}, async ({ details, include }: { details?: boolean; include?: string[] }) => {
+    // The server's posture is the authority (sitting, standing up, a follow it ended): take its word now rather than at the next tick.
+    await companion?.refresh();
     const state = await body.observe(); events.ingest(state); const projected = { ...state, chat: currentChat(state.chat) };
-    return { ...(serverObserved && !details ? summarizeObservation(projected) as object : projected), platform: body.hello.platform, capabilities: body.hello.capabilities, ...(companion ? { companionMode: companion.read() } : {}), ...(reflexes ? { survivalPolicy: reflexes.read() } : {}), ...(options.machines?.waiting().length ? { machines: options.machines.waiting() } : {}) };
+    return { ...(serverObserved && !details ? summarizeObservation(projected) as object : projected), platform: body.hello.platform, capabilities: body.hello.capabilities, ...(companion ? { companionMode: companion.read() } : {}), ...(reflexes ? { survivalPolicy: reflexes.read() } : {}), ...(options.machines?.waiting().length ? { machines: options.machines.waiting() } : {}),
+      ...(include?.includes('inventory') ? { inventory: state.inventory } : {}),
+      ...(include?.includes('survival') && survivalRead ? { survival: { ...await body.survivalState!({ details: details === true }), ...(reflexes ? { policy: reflexes.read() } : {}) } } : {}) };
   });
   register('get-position', `Read current ${observed} position and dimension.`, {}, async () => {
     const state = await body.observe(); return { position: state.position, dimension: state.dimension, sessionId: state.sessionId, source: state.source };
@@ -123,26 +135,20 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     localStops++;
     return reflexes ? reflexes.stop({ keepCompanion }) : stopCurrent(keepCompanion ? {} : { clearGuard: true, clearPosture: true });
   });
-  if (body.survivalState && body.hello.capabilities.includes('survival-state')) register('get-survival-state', `Read current server survival facts, native dangers/threats when supported, active defense and effective program policy. Compact by default; details includes guarded inventory. Missing or incomplete threat facts do not establish safety. Reading never rearms stopped behavior.${equipment ? ' Hostile and unknown threats carry equipment (held and worn items, same format as get-status) to judge the danger, e.g. a zombie in iron armour or a skeleton with a bow.' : ''}`, { details: z.boolean().default(false) }, async args => ({ ...await body.survivalState!(args), ...(reflexes ? { policy: reflexes.read() } : {}) }));
-  if (body.assessTool && body.hello.capabilities.includes('assess-tool')) register('assess-tool', 'Read-only whole-inventory tool eligibility and estimated base speed for a loaded block. Does not equip or dig. Unknown means not established; estimates exclude unobserved equip-dependent mod hooks. Actual native mining remains authoritative.', { ...blockXyz, expectedBlock: registryId.optional(), policy: z.enum(['fastest_valid', 'conserve_durability']).optional(), minRemainingDurability: z.number().int().min(0).max(10000).optional(), dropPreference: z.enum(['any', 'silk_touch', 'no_silk_touch']).default('any') }, async args => {
-    const state = reflexes?.read(); const assessment = await body.assessTool!({ policy: state?.toolPolicy, minRemainingDurability: state?.minRemainingDurability, ...args });
-    return { ...assessment, candidates: assessment.candidates.map(({ components: _components, ...candidate }) => ({ ...candidate, componentsOmitted: candidate.componentsComplete !== false })) };
-  });
   // Interrupt windows (task-interrupts, docs/companion_state_design.md 8.4): which tasks eating and defense pause rather than stop.
   const pauseNote = body.hello.capabilities.includes('task-interrupts')
     ? ` Exception: while ${[...TOOLS].filter(([, tool]) => tool.resumable).map(([name]) => name).join(', ')} runs, automatic eating and defense (and defend-self) pause it and it carries on by itself afterwards, at most ${MAX_RESUMES} times per task (events say so); if it cannot pause at that moment (scaffold, mid-dig, swimming) automatic ones wait, unless health is at the low line.`
     : '';
   if (survival) {
-    register('prepare-item', 'Guardedly prepare the item currently in inventory slot 0..35 for use. Whole-stack native swap into hotbar, then select. Defaults to an empty hotbar slot; targetSlot explicitly permits swapping an occupied hotbar slot. Never discards or silently restores items.', { slot: z.number().int().min(0).max(35), targetSlot: z.number().int().min(0).max(8).optional() }, async args => operationResult(await survival.prepareItem(args)));
     register('eat-food', 'Consume exactly one safe food using native use duration and authoritative consumption confirmation. Optional slot refers to whole main inventory; otherwise choose food by hunger, saturation and protection policy. Unknown never retries. Auto food skips precious food (golden apple, enchanted golden apple) unless health is at the low line and no ordinary food exists; naming a slot may eat it. Precious food: eat only when the player agrees or you are about to die. Code ONLY_PRECIOUS_FOOD means only precious food is left and it is not an emergency: ask the player.', { slot: z.number().int().min(0).max(35).optional(), timeoutMs }, async args => operationResult(await survival.eat({ ...args, policy: reflexes?.read() })));
   }
   if (reflexes && body.hello.capabilities.includes('defend-entity')) register('defend-self', `One finite native defense using the same threat selection, policy, preparation and shared writer as automatic defense. Optional entityId restricts the current eligible hostile target; players, friendly, neutral and unknown targets are excluded. Stops ordinary work first, never pursues or resumes it. Low health and explosion preparation require safe retreat. Unknown remains blocked.${pauseNote}`, { entityId: z.string().uuid().optional() }, async ({ entityId }) => operationResult(await reflexes.defendSelf(entityId)));
-  if (reflexes) register('set-reflexes', `Change effective program policy with the current policy revision from get-survival-state. autoEat and supported autoDefend default on. armed:false disarms automatic behavior; armed:true explicitly rearms it. Hard stop disarms too. Reconfiguration first stops active tasks, so old policy cannot keep writing; it does not resume them. Defense takes priority over meals; each native action is bounded.${pauseNote}`, {
+  if (reflexes) register('set-reflexes', `Change effective program policy with the current policy revision from get-status include survival. autoEat and supported autoDefend default on. armed:false disarms automatic behavior; armed:true explicitly rearms it. Hard stop disarms too. Reconfiguration first stops active tasks, so old policy cannot keep writing; it does not resume them. Defense takes priority over meals; each native action is bounded.${pauseNote}`, {
     expectedRevision: z.number().int().positive(), autoEat: z.boolean().optional(), armed: z.boolean().optional(), urgentFood: z.number().int().min(0).max(20).optional(), protectedItems: z.array(registryId).max(64).optional(), toolPolicy: z.enum(['fastest_valid', 'conserve_durability']).optional(), minRemainingDurability: z.number().int().min(0).max(10000).optional(),
     ...(body.hello.capabilities.includes('defend-entity') ? { autoDefend: z.boolean().optional(), defenseRadius: z.number().finite().min(1).max(3).optional(), lowHealth: z.number().finite().min(1).max(20).optional(), excludedEntityIds: z.array(z.string().uuid()).max(64).optional(), maxAttacks: z.number().int().min(1).max(3).optional(), defenseTimeoutMs: z.number().int().min(500).max(5000).optional() } : {}),
   }, args => reflexes.configure(args));
   if (companion) {
-    register('companion-mode', `Following (or waiting in place) is a persistent state held by the game server, not a task. Tools that use the body (travel, gather, craft, build, eat, emote, sleep...) make it give way by themselves (get-companion-mode then shows suspendedFor = that tool) and it takes over again a few seconds after they end, also after sleeping, so you never pause/resume around other work; if the player is out of sight by then it waits for them to come back (away). Standing beside the player while following shows as state waiting. action pause is only a deliberate manual stop until resume. action stop ends the follow/wait for good and interrupts nothing else that is running. Sitting (sit) ends the follow/wait; stand-up and a new follow/wait are needed to carry on. action guard (needs guard) turns protection on or off, or changes its options${body.hello.capabilities.includes('guard-duty-fenced') ? ': protection is its own standing duty, kept while following, waiting, doing other work and sitting, and always for the followed player (a follow protects whoever it follows); while the body is within 16 blocks of the player it fights, while following, waiting or idle, foes within the guard radius around the player (default 8 blocks, 3-12 by the radius option) and anything already attacking the body within 8 blocks, walking out no farther than the leash (radius + 4, at most 16 blocks from the player); when waiting it goes back to its spot after the fight, when seated it walks back to the seat and sits again (if that fails the posture becomes a wait and you get an event),' + (body.hello.capabilities.includes('guard-duty-tasks') ? 'and it also stops walking, travelling, building on the ground, farming, breeding, pickups and the walk to a workstation for a fight, after which that work carries on by itself with its time limit extended by the fight; it waits for digging, eating, an open menu, a scaffold or roof, a bed or a gesture to end, meanwhile only defending itself' : 'while other work runs it only defends itself until that work ends') + '; without a follow give player; companion-mode stop and stop-action also end it' : ''}. The player's halt (stop-action) ends the follow/wait and the protection. Start persistent follow of an explicitly named visible player on ${navigation}, or wait in place. Optional pickup only pursues listed drops. Optional mining requires companion-mining capability (${body.hello.capabilities.includes('companion-mining') ? 'available' : 'unavailable on this body'}): explicitly authorize up to eight ore block IDs or tags (e.g. #c:ores for every ore, modded too; non-ores are skipped) and a finite candidate-attempt budget. Each selected visible block is guarded against live player proximity and competing player mining, then mined and picked up (the body is briefly busy; other tools get BUSY meanwhile) before following carries on by itself. No tunnels, support digging or automatic budget renewal. pickup and mining are mutually exclusive. maxBlocks caps attempted block candidates, not an item quantity promise; report confirmed mined blocks and native picked items separately, without claiming per-block drop provenance. Expiry/exhaustion disables mining but keeps following. pause/resume preserves used budget and the original deadline; unknown or blocked does not retry. Chat remains available. wait clears both options; stop-action discards intent. Only follow accepts player/distance/wander/pickup/mining. A server without the companion posture (server-posture) answers follow/wait with UNSUPPORTED: the core mod needs updating.`, {
+    register('companion-mode', `Following (or waiting in place) is a persistent state held by the game server, not a task. Tools that use the body (travel, gather, craft, build, eat, emote, sleep...) make it give way by themselves (get-status companionMode then shows suspendedFor = that tool) and it takes over again a few seconds after they end, also after sleeping, so you never pause/resume around other work; if the player is out of sight by then it waits for them to come back (away). Standing beside the player while following shows as state waiting. action pause is only a deliberate manual stop until resume. action stop ends the follow/wait for good and interrupts nothing else that is running. Sitting (sit) ends the follow/wait; get-up and a new follow/wait are needed to carry on. action guard (needs guard) turns protection on or off, or changes its options${body.hello.capabilities.includes('guard-duty-fenced') ? ': protection is its own standing duty, kept while following, waiting, doing other work and sitting, and always for the followed player (a follow protects whoever it follows); while the body is within 16 blocks of the player it fights, while following, waiting or idle, foes within the guard radius around the player (default 8 blocks, 3-12 by the radius option) and anything already attacking the body within 8 blocks, walking out no farther than the leash (radius + 4, at most 16 blocks from the player); when waiting it goes back to its spot after the fight, when seated it walks back to the seat and sits again (if that fails the posture becomes a wait and you get an event),' + (body.hello.capabilities.includes('guard-duty-tasks') ? 'and it also stops walking, travelling, building on the ground, farming, breeding, pickups and the walk to a workstation for a fight, after which that work carries on by itself with its time limit extended by the fight; it waits for digging, eating, an open menu, a scaffold or roof, a bed or a gesture to end, meanwhile only defending itself' : 'while other work runs it only defends itself until that work ends') + '; without a follow give player; companion-mode stop and stop-action also end it' : ''}. The player's halt (stop-action) ends the follow/wait and the protection. Start persistent follow of an explicitly named visible player on ${navigation}, or wait in place. Optional pickup only pursues listed drops. Optional mining requires companion-mining capability (${body.hello.capabilities.includes('companion-mining') ? 'available' : 'unavailable on this body'}): explicitly authorize up to eight ore block IDs or tags (e.g. #c:ores for every ore, modded too; non-ores are skipped) and a finite candidate-attempt budget. Each selected visible block is guarded against live player proximity and competing player mining, then mined and picked up (the body is briefly busy; other tools get BUSY meanwhile) before following carries on by itself. No tunnels, support digging or automatic budget renewal. pickup and mining are mutually exclusive. maxBlocks caps attempted block candidates, not an item quantity promise; report confirmed mined blocks and native picked items separately, without claiming per-block drop provenance. Expiry/exhaustion disables mining but keeps following. pause/resume preserves used budget and the original deadline; unknown or blocked does not retry. Chat remains available. wait clears both options; stop-action discards intent. Only follow accepts player/distance/wander/pickup/mining. A server without the companion posture (server-posture) answers follow/wait with UNSUPPORTED: the core mod needs updating.`, {
       action: z.enum((body.hello.capabilities.includes('guard-duty-fenced') ? ['follow', 'wait', 'pause', 'resume', 'stop', 'guard'] : ['follow', 'wait', 'pause', 'resume', 'stop']) as [string, ...string[]]), player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(),
       distance: z.number().finite().min(FOLLOW_DISTANCE.min).max(FOLLOW_DISTANCE.max).optional(), say: z.string().min(1).max(256).optional(),
       wander: z.boolean().optional().describe('Default true: while the followed player stands still, now and then stroll a few steps nearby and stay there until they move. Always off with pickup or mining.'),
@@ -157,11 +163,6 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     }, async args => {
       if (args.mining && !body.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '身体未声明持续陪挖保护，未降级为普通跟随');
       return companion.request(args as CompanionRequest);
-    });
-    register('get-companion-mode', 'Read the current persistent companion mode without starting, resuming or stopping any action.', {}, async () => {
-      // The server's posture is the authority (sitting, standing up, a follow it ended): take its word now rather than at the next tick.
-      await companion.refresh();
-      return companion.read();
     });
   }
   if (serverObserved && body.lookAround && body.hello.capabilities.includes('look-around')) register('look-around', `Read-only summary of loaded surroundings up to 32 blocks (8 below/above): players, creatures (hostile first), dropped items, and notable blocks with an open face (ores, logs, containers, beds, workstations, doors, crops, water/lava surfaces, spawners, portals), each with count and the nearest one's distance, compass direction, height difference and line of sight. Also biome, time phase, weather, open sky and light. Buried blocks are not reported. Use discover-resources/discover-containers for actionable targets.${equipment ? ' Each player, and the nearest of each creature kind, carries equipment (held and worn items, same format as get-status).' : ''}`, {
@@ -187,15 +188,13 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const actions: Array<{ name: ActionName; description: string; schema: ZodRawShape }> = [
     { name: 'send-chat', description: `Send normal single-line chat, no slash commands. Success means ${serverObserved ? 'broadcast by the server' : 'handed to the client connection'}.`, schema: { message: z.string().min(1).max(256) } },
     { name: 'look-at', description: 'Turn toward a world position.', schema: xyz },
-    { name: 'move-to-position', description: `Limited ordinary movement on ${navigation}, without teleporting or digging. Obstacles/hazards/timeouts fail. running means still moving; poll get-operation.${serverObserved && body.hello.capabilities.includes('travel-to') ? ' A target more than 32 blocks away is walked leg by leg as travel-to (routedVia in the result).' : ''}`, schema: { ...xyz, tolerance: z.number().min(0.25).max(3).optional(), timeoutMs } },
+    { name: 'move-to-position', description: `Limited ordinary movement on ${navigation}, without teleporting or digging. Obstacles/hazards/timeouts fail. running means still moving; poll get-operation.`, schema: { ...xyz, tolerance: z.number().min(0.25).max(3).optional(), timeoutMs } },
     { name: 'follow-player', description: 'Follow a visible player for a finite time, using ordinary movement. running lasts until stopped, failed or timed out.', schema: { player: z.string().min(1).max(16), distance: z.number().min(1).max(8).optional(), timeoutMs } },
-    { name: 'approach-player', description: 'Walk to a named nearby player using bounded safe routes on loaded level ground. expectedEntityId binds the UUID; a moved or missing recipient stops movement. running requires polling get-operation.', schema: { player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid().optional(), distance: z.number().min(1).max(1.5).optional(), timeoutMs } },
     { name: 'dig-block', description: `Dig exactly one authorized block in reach, after checking its exact state and line of sight. ${serverObserved ? 'Uses current selected tool with native survival timing and protection events; select-slot first when needed.' : 'unknown means server confirmation could not be established.'}`, schema: { ...blockXyz, expectedBlock: registryId, ...serverBlockGuard, timeoutMs } },
     { name: 'place-block', description: `Use a hotbar block against the specified support block face. x/y/z identify the SUPPORT; target is its adjacent face. expectedBlock identifies that support, slot must be hotbar 0–8.${serverObserved ? ' The target may be air or a plant such as grass, a fern or a flower, which gives way as for a player. Leave out expectedCount/expectedComponents to use the stack now in that slot. Water buckets: use-bucket.' : ''} unknown is not confirmed placement.`, schema: { ...blockXyz, face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']), slot: z.number().int().min(0).max(8), expectedItem: registryId, expectedBlock: registryId, ...serverBlockGuard, ...(serverObserved ? { expectedCount: z.number().int().nonnegative().optional(), expectedComponents: completeComponents.optional() } : {}), timeoutMs } },
     { name: 'open-container', description: serverObserved ? `Use native interaction to open a standard container in reach after checking full block state and line of sight. Special or remote menus may be unsupported.${body.hello.adapters?.length ? ` Mod containers with adapters on this server: ${body.hello.adapters.join(', ')}.` : ''}` : 'Normally interact with a standard container in reach and wait for its menu to open. Requires an empty hotbar slot; custom menus may be unsupported.', schema: { ...blockXyz, expectedBlock: registryId, ...serverBlockGuard, timeoutMs } },
     { name: 'click-slot', description: serverObserved ? 'One ordinary PICKUP click in the current menu; guard its ID, current revision, exact slot and carried item/count/full components from get-container details:true. Empty means minecraft:air, count 0, components {}. Reobserve before each next click. unknown is not confirmed transfer.' : 'One ordinary PICKUP click in the current client menu; guard its ID and exact slot/carried item/count from get-container. Empty means minecraft:air, count 0. unknown is not confirmed transfer.', schema: { containerId: z.string().min(1), ...serverRevision, ...serverSlotComponents, slot: z.number().int().min(0), expectedItem: registryId, expectedCount: z.number().int().min(0), expectedCarriedItem: registryId, expectedCarriedCount: z.number().int().min(0), button: z.union([z.literal(0), z.literal(1)]).optional() } },
     { name: 'close-container', description: serverObserved ? 'Close the currently matching menu after checking its current revision.' : 'Close the currently matching client menu.', schema: { containerId: z.string().min(1), ...serverRevision } },
-    { name: 'select-slot', description: 'Select one hotbar slot 0–8 after verifying its complete current item/count/components. Does not move inventory items.', schema: { slot: z.number().int().min(0).max(8), expectedItem: registryId, expectedCount: z.number().int().nonnegative(), expectedComponents: completeComponents, expectedMaxStackSize: z.number().int().positive().optional() } },
     { name: 'drop-item', description: 'Drop an explicitly authorized count (1–64) from the CURRENT SELECTED hotbar slot through native drop actions. Verify item/count/full components from current inventory; count cannot exceed expectedCount. Dropped items remain physical world entities.', schema: { slot: z.number().int().min(0).max(8), expectedItem: registryId, expectedCount: z.number().int().nonnegative(), expectedComponents: completeComponents, expectedMaxStackSize: z.number().int().positive().optional(), count: z.number().int().min(1).max(64) } },
   ];
   const quantity = { item: registryId, count: z.number().int().min(1).max(256).optional().describe('Exactly one of count/stacks is required (gather-resources with wholeTree takes neither). Agent selects an explicit finite goal when user omitted it.'), stacks: z.number().int().min(1).max(256).optional().describe('Resolve from an actual selected stack maxStackSize; unknown does not mean 64. Maximum resolved goal 256, never truncated.'),
@@ -212,40 +211,54 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   }
   if (serverObserved && ['pillar-up', 'dig-block', 'swap-inventory'].every(cap => body.hello.capabilities.includes(cap))) {
     const pillar = new PillarTasks(body, scheduler);
-    register('pillar-up', 'Climb straight up 1-12 blocks to reach a block overhead: jump and place a block from the inventory under the feet each time (dirt, planks or logs first, stone last). Needs headroom; stops early when blocks or room run out. Remembers the pillar: after dig-block up there, call pillar-down. gather-resources climbs trees and high resources by itself.', { blocks: z.number().int().min(1).max(12) }, async ({ blocks }) => pillar.up(blocks));
-    register('pillar-down', 'Come back down the pillar built with pillar-up, digging its blocks out one by one from the top (they drop and are picked up). Only digs blocks it placed itself.', {}, async () => pillar.down());
+    register('pillar', 'up: climb straight up 1-12 blocks to reach a block overhead: jump and place a block from the inventory under the feet each time (dirt, planks or logs first, stone last). Needs headroom; stops early when blocks or room run out. It remembers the pillar: after dig-block up there, call pillar with down:true to come back down, digging its blocks out one by one from the top (they drop and are picked up; only blocks it placed itself). gather-resources climbs trees and high resources by itself.', {
+      up: z.number().int().min(1).max(12).optional(), down: z.literal(true).optional(),
+    }, async ({ up, down }: { up?: number; down?: true }) => {
+      if ((up === undefined) === (down === undefined)) throw new BodyError('INVALID_ARGUMENT', 'up 和 down 给且只给一个');
+      return up !== undefined ? pillar.up(up) : pillar.down();
+    });
   }
   if (serverObserved && body.hello.capabilities.includes('sleep-in-bed')) {
-    register('sleep-in-bed', 'Walk to the nearest free bed within 16 blocks (around the named player, or yourself) and lie down, like a player right-clicking it. Only at night or in a thunderstorm and in the Overworld; monsters nearby, an occupied or obstructed bed fail with a code. Lying down also sets your respawn point to that bed, as for any player. A follow/wait steps aside by itself and picks up again after you wake. While asleep every action except send-chat and wake-up is refused. You get up by yourself in the morning or when hurt (event woke); wake-up gets up earlier. running requires polling get-operation.', {
+    register('sleep-in-bed', 'Walk to the nearest free bed within 16 blocks (around the named player, or yourself) and lie down, like a player right-clicking it. Only at night or in a thunderstorm and in the Overworld; monsters nearby, an occupied or obstructed bed fail with a code. Lying down also sets your respawn point to that bed, as for any player. A follow/wait steps aside by itself and picks up again after you wake. While asleep every action except send-chat and get-up is refused. You get up by yourself in the morning or when hurt (event woke); get-up gets up earlier. running requires polling get-operation.', {
       player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional().describe('Look for a bed near this player, e.g. the one who just went to bed'), timeoutMs,
     }, async args => {
       return operationResult(await body.act('sleep-in-bed', args));
     });
-    register('wake-up', 'Get out of bed now. Succeeds when already awake.', {}, async () => operationResult(await body.act('wake-up', {})));
   }
   if (serverObserved && body.hello.capabilities.includes('sit')) {
-    register('sit', 'Walk to a free chair or stool within 8 blocks (or the block at x,y,z) and sit on it, like a player right-clicking it; the body rides the seat. Only seats an installed seat add-on knows count (for example Kaleidoscope Cookery chairs and cook stools); stairs and slabs never do, and with no such add-on you get NO_SEAT. Fails with SEAT_OCCUPIED, NO_SEAT, NO_PATH, OUT_OF_REACH or SIT_REFUSED. Success is confirmed only when the body is really riding the seat. Sitting ends a follow/wait (companion-mode shows seated); protection stays on, and a hostile creature close by gets you up to fight, after which you walk back and sit again; if the seat is gone or taken you wait where you are and get an event. While seated only chatting, looking, emotes, inventory and eating work: every action that moves the body is refused with SEATED until stand-up. get-status shows sitting. running requires polling get-operation.', {
+    register('sit', 'Walk to a free chair or stool within 8 blocks (or the block at x,y,z) and sit on it, like a player right-clicking it; the body rides the seat. Only seats an installed seat add-on knows count (for example Kaleidoscope Cookery chairs and cook stools); stairs and slabs never do, and with no such add-on you get NO_SEAT. Fails with SEAT_OCCUPIED, NO_SEAT, NO_PATH, OUT_OF_REACH or SIT_REFUSED. Success is confirmed only when the body is really riding the seat. Sitting ends a follow/wait (companion-mode shows seated); protection stays on, and a hostile creature close by gets you up to fight, after which you walk back and sit again; if the seat is gone or taken you wait where you are and get an event. While seated only chatting, looking, emotes, inventory and eating work: every action that moves the body is refused with SEATED until get-up. get-status shows sitting. running requires polling get-operation.', {
       x: z.number().int().optional(), y: z.number().int().optional(), z: z.number().int().optional(), timeoutMs,
     }, async args => {
       if ([args.x, args.y, args.z].some(value => value === undefined) && [args.x, args.y, args.z].some(value => value !== undefined)) throw new BodyError('INVALID_ARGUMENT', 'x、y、z 要么都给，要么都不给');
       return operationResult(await body.act('sit', args));
     });
   }
-  if (serverObserved && body.hello.capabilities.includes('stand-up')) {
-    register('stand-up', 'Get up from the seat now. Succeeds when already standing. After this there is no follow/wait: call companion-mode follow again if the player wants you with them.', {}, async () => operationResult(await body.act('stand-up', {})));
+  if (serverObserved && (body.hello.capabilities.includes('wake-up') || body.hello.capabilities.includes('stand-up'))) {
+    register('get-up', 'Get out of bed, or up from a seat, now. Succeeds when already up. After a seat there is no follow/wait: call companion-mode follow again if the player wants you with them (after a bed it carries on by itself).', {}, async () => {
+      const asleep = (await body.observe()).sleeping === true;
+      return operationResult(await body.act(asleep || !body.hello.capabilities.includes('stand-up') ? 'wake-up' : 'stand-up', {}));
+    });
   }
   if (serverObserved && body.hello.capabilities.includes('emote')) {
     const gestures = body.hello.emotes?.builtin ?? [];
     const sources = body.hello.emotes?.sources ?? [];
     const sourceText = sources.length ? ` Add-on animations (pass source): ${sources.map(s => `${s.id}${s.hint ? ` - ${s.hint}` : ''}`).join('; ')}. An add-on animation plays for seconds (default 6) and stops when you do anything else; chatting and looking keep it going.` : '';
-    register('emote', `A small body gesture everyone in the game sees, to react like a person: ${gestures.join(', ')} (wave swings the arm, nod/shake move the head, crouch bobs down and up, spin turns around). player: turn to face that player first. About a second; don't overuse it.${sourceText} While following, you stop for the emote and then keep following.`, {
-      name: z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/).describe(sources.length ? 'A gesture name, or the animation name of the source' : 'Gesture name'),
+    register('emote', `A small body gesture everyone in the game sees, to react like a person: ${gestures.join(', ')} (wave swings the arm, nod/shake move the head, crouch bobs down and up, spin turns around). player: turn to face that player first. About a second; don't overuse it.${sourceText} While following, you stop for the emote and then keep following. Without name it only turns to look at player, or at the point x/y/z (following carries on meanwhile).`, {
+      name: z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/).optional().describe(sources.length ? 'A gesture name, or the animation name of the source' : 'Gesture name'),
       ...(sources.length ? { source: z.enum(sources.map(s => s.id) as [string, ...string[]]).optional().describe('Play an add-on animation instead of a built-in gesture') } : {}),
       player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional().describe('Face this player first (built-in gestures)'),
       seconds: z.number().min(1).max(30).optional().describe('Add-on animation length'),
+      x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(),
       say: z.string().min(1).max(256).optional(),
-    }, async ({ say, ...args }) => {
+    }, async ({ say, x, y, z: zz, ...args }) => {
       if (say) await body.act('send-chat', { message: say });
+      if (!args.name) {
+        // Only looking: the plain look-at action, which a follow keeps driving through.
+        let at = x !== undefined && y !== undefined && zz !== undefined ? { x, y, z: zz } : undefined;
+        if (args.player) { const seen = (await body.observe()).entities.find(entity => entity.type === 'minecraft:player' && entity.name === args.player); if (!seen) throw new BodyError('PLAYER_NOT_VISIBLE', `附近看不到 ${args.player}`); at = { ...seen.position, y: seen.position.y + 1.6 }; }
+        if (!at) throw new BodyError('INVALID_ARGUMENT', '给 name 做动作，或给 player／x、y、z 转过去看');
+        return operationResult(await body.act('look-at', at));
+      }
       const operation = await body.act('emote', args as import('./body.js').ActionArguments['emote']);
       const done = await settle(operation, 3000);
       return operationResult(done);
@@ -332,7 +345,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   }
   const itemHandlerMods = body.hello.itemHandlerMods ?? [];
   if (serverObserved && body.hello.capabilities.includes('machine-items') && itemHandlerMods.length) {
-    register('machine-items', `Use a machine block of an enabled mod (${itemHandlerMods.join(', ')}) through its item slots, without opening its screen: list what is in it, insert items from your inventory, or extract items into it. Stand within reach (about 4 blocks) with a clear view; vanilla blocks and machines with their own support (open-container, smelt-item) are refused. Machines often differ per side: side omitted uses the whole machine, or name a face (e.g. up for input, down for output, like a hopper); list shows which sides exist and each slot, and a machine with no whole-machine view is refused with the sides it does offer. insert needs item and count; extract needs item and/or slot, count defaults to all that fits. The result moved is what really moved: PARTIAL or NOT_ACCEPTED are not success; unknown means check the machine and your inventory before trying again.`, {
+    register('machine-items', `Use a machine block of an enabled mod (${itemHandlerMods.join(', ')}) through its item slots, without opening its screen: list what is in it, insert items from your inventory, or extract items into it. Stand within reach (about 4 blocks) with a clear view; vanilla blocks and machines with their own support (container-menu, smelt-item) are refused. Machines often differ per side: side omitted uses the whole machine, or name a face (e.g. up for input, down for output, like a hopper); list shows which sides exist and each slot, and a machine with no whole-machine view is refused with the sides it does offer. insert needs item and count; extract needs item and/or slot, count defaults to all that fits. The result moved is what really moved: PARTIAL or NOT_ACCEPTED are not success; unknown means check the machine and your inventory before trying again.`, {
       ...blockXyz, mode: z.enum(['list', 'insert', 'extract']), side: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional(),
       item: z.string().min(1).max(256).optional(), count: z.number().int().min(1).max(2304).optional(), slot: z.number().int().min(0).max(255).optional(),
       expectedBlock: z.string().min(1).max(256).optional().describe('Block id you saw there; refused with STALE_BLOCK if it changed'), say: z.string().min(1).max(256).optional(),
@@ -371,7 +384,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
         from: point, to: point, block: z.string().min(1).max(256).describe('The block; for roof the stairs'),
         ridge: z.enum(['x', 'z']).optional(), ridgeBlock: z.string().optional(), gableBlock: z.string().optional().describe('roof: block for the triangle ends (default the full block of the stairs material; "none" leaves them open)'),
       })).max(32).optional().describe('Shapes between two corners (inclusive, absolute coordinates)'),
-      blueprint: z.object({ name: z.string().min(1).max(40), origin: point.describe('Where the minimum corner goes after turning'), rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional().describe('Clockwise seen from above; facings turn with it') }).optional().describe('A saved blueprint (list-blueprints)'),
+      blueprint: z.object({ name: z.string().min(1).max(40), origin: point.describe('Where the minimum corner goes after turning'), rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional().describe('Clockwise seen from above; facings turn with it') }).optional().describe('A saved blueprint (blueprints list)'),
     };
     const cellsOf = (args: { blocks?: { x: number; y: number; z: number; block: string }[]; shapes?: Shape[]; blueprint?: { name: string; origin: { x: number; y: number; z: number }; rotation?: Rotation } }) => {
       if (args.blueprint && !shelf) throw new BodyError('UNSUPPORTED', '没有设置蓝图目录');
@@ -393,55 +406,88 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       return operationResult(await settle(await body.act('build', request), 15000));
     });
     if (shelf) {
-      register('list-blueprints', 'Saved blueprints: name, size (x/y/z), block count, description and the main materials.', {}, async () => shelf.list().map(blueprint => {
-        const counts = new Map<string, number>();
-        for (const block of blueprint.blocks) { const name = block[3].replace(/\[.*$/, '').replace(/^minecraft:/, ''); if (name !== 'air') counts.set(name, (counts.get(name) ?? 0) + 1); }
-        return { name: blueprint.name, size: blueprint.size, blocks: blueprint.blocks.length, description: blueprint.description, materials: Object.fromEntries([...counts].sort((a, b) => b[1] - a[1]).slice(0, 10)) };
-      }));
-      register('save-blueprint', 'Save a design as a blueprint for build: blocks and/or shapes (absolute or any coordinates; saved relative to their minimum corner).', {
-        name: z.string().min(1).max(40), description: z.string().max(200).optional(), blocks: design.blocks, shapes: design.shapes, overwrite: z.boolean().optional(),
-      }, async ({ name, description, overwrite, ...args }) => {
+      register('blueprints', 'Saved blueprints for build. list: name, size (x/y/z), block count, description and the main materials. save: keep a design (blocks and/or shapes, absolute or any coordinates; saved relative to their minimum corner) under name; overwrite replaces one with the same name.', {
+        action: z.enum(['list', 'save']), name: z.string().min(1).max(40).optional(), description: z.string().max(200).optional(), blocks: design.blocks, shapes: design.shapes, overwrite: z.boolean().optional(),
+      }, async ({ action, name, description, overwrite, ...args }) => {
+        if (action === 'list') return shelf.list().map(blueprint => {
+          const counts = new Map<string, number>();
+          for (const block of blueprint.blocks) { const id = block[3].replace(/\[.*$/, '').replace(/^minecraft:/, ''); if (id !== 'air') counts.set(id, (counts.get(id) ?? 0) + 1); }
+          return { name: blueprint.name, size: blueprint.size, blocks: blueprint.blocks.length, description: blueprint.description, materials: Object.fromEntries([...counts].sort((a, b) => b[1] - a[1]).slice(0, 10)) };
+        });
+        if (!name) throw new BodyError('INVALID_ARGUMENT', 'save 要给 name');
         const saved = shelf.save(name, description ?? '', cellsOf(args), overwrite === true);
         return { saved: saved.name, size: saved.size, blocks: saved.blocks.length };
       });
     }
   }
+  // go-to: every walk the model asks for, near (move-to-position), far (travel-to), to a remembered place or up to a player (approach-player).
   const canTravel = serverObserved && body.hello.capabilities.includes('travel-to');
+  const canMove = serverObserved && body.hello.capabilities.includes('move-to-position');
+  const canApproach = serverObserved && body.hello.capabilities.includes('approach-player');
+  const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/);
+  const places = options.places ?? new PlaceBook();
   const travel = async (target: { x: number; y?: number; z: number }, extra: { tolerance?: number; timeoutMs?: number; say?: string; meet?: string }) => {
     if (extra.say) await body.act('send-chat', { message: extra.say });
-    return operationResult(await body.act('travel-to', { ...target, ...(extra.tolerance !== undefined ? { tolerance: extra.tolerance } : {}), ...(extra.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}), ...(extra.meet ? { meet: extra.meet } : {}) }));
+    return operationResult(await body.act('travel-to', { ...target, ...(extra.tolerance !== undefined ? { tolerance: Math.max(1, extra.tolerance) } : {}), ...(extra.timeoutMs !== undefined ? { timeoutMs: Math.max(TRAVEL_TIMEOUT_MS.min, extra.timeoutMs) } : {}), ...(extra.meet ? { meet: extra.meet } : {}) }));
   };
-  if (canTravel) {
-    const places = options.places ?? new PlaceBook();
+  if (canTravel || canMove || canApproach) {
     // meet: going to find a player who may be walking this way too (docs/server_body_protocol.md, travel-to).
-    const canMeet = body.hello.capabilities.includes('travel-meet');
-    const walk = { tolerance: z.number().min(1).max(8).optional(), timeoutMs: z.number().int().min(TRAVEL_TIMEOUT_MS.min).max(TRAVEL_TIMEOUT_MS.max).optional(), say: z.string().min(1).max(256).optional(),
-      ...(canMeet ? { meet: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional().describe('Only when going there to find this player (they said "come find me at …", or you go back to them): the walk ends as soon as you see them within 16 blocks (result.met) and you follow them from there by itself, no companion-mode call needed. Leave it out when they walk with you.') } : {}) };
+    const canMeet = canTravel && body.hello.capabilities.includes('travel-meet');
     const meetNote = canMeet ? ' With meet it may end early as succeeded with met: the player was met on the way and is being followed.' : '';
-    register('travel-to', `Walk a long way (up to ${TRAVEL_MAX_BLOCKS} blocks) to a point, leg by leg over the surface; chunks load as the body goes. Finds the way round cliffs and out of valleys over the ground it can see (about 96 blocks around), swims across rivers and lakes like a player, steps down only one block at a time, opens and closes wooden doors; never digs or builds. A follow/wait steps aside by itself and picks up again when it ends (if the player is out of sight by then it waits for them to come back). running: the result arrives as a task event: arrived, or NO_PATH with how far it got and how close the walkable ground comes (tell the player; a cliff or deep valley may need them); stop-action ends it.${meetNote}`, { x: coordinate, y: coordinate.optional(), z: coordinate, ...walk }, async ({ x, y, z: zz, ...extra }) => travel({ x, z: zz, ...(y !== undefined ? { y } : {}) }, extra));
-    register('remember-place', 'Remember a named spot in this world for later (home/家, mine entrance, farm). Defaults to where you stand; player uses where that player stands; or give x/y/z. The same name overwrites. A place named home or 家 also makes you get a bedtime event at night when you are near it.', {
-      name: z.string().min(1).max(32), player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(), x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(), note: z.string().max(120).optional(),
-    }, async ({ name, player, x, y, z: zz, note }) => {
+    const far = canTravel ? ` Points more than 32 blocks away (up to ${TRAVEL_MAX_BLOCKS}) are walked leg by leg over the surface as chunks load: round cliffs and out of valleys, swimming across rivers and lakes, one block down at a time, through wooden doors.` : '';
+    register('go-to', `Walk somewhere: x/z (y optional) for a point${canTravel ? ', place for a remembered place (places)' : ''}${canApproach ? ', or player to walk up to a player nearby (before handing something over, or when they say come here)' : ''}. A near point is an ordinary walk on ${navigation}.${far} Never digs, builds or teleports. A follow/wait steps aside and picks up again when it ends (if the player is out of sight by then it waits for them). running: the result arrives as a task event: arrived, or NO_PATH with how far it got and how close the walkable ground comes (tell the player; a cliff or deep valley may need them); stop-action ends it.${meetNote}`, {
+      x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(),
+      ...(canTravel ? { place: z.string().min(1).max(32).optional() } : {}),
+      ...(canApproach ? { player: playerName.optional() } : {}),
+      tolerance: z.number().min(0.25).max(8).optional().describe('How close counts as there'),
+      timeoutMs: z.number().int().min(500).max(canTravel ? TRAVEL_TIMEOUT_MS.max : 120000).optional(),
+      say: z.string().min(1).max(256).optional(),
+      ...(canMeet ? { meet: playerName.optional().describe('Only when going there to find this player (they said "come find me at …", or you go back home or back to them): the walk ends as soon as you see them within 16 blocks (result.met) and you follow them from there by itself, no companion-mode call needed. Leave it out when they walk with you.') } : {}),
+    }, async ({ x, y, z: zz, place, player, tolerance, timeoutMs, say, meet }: { x?: number; y?: number; z?: number; place?: string; player?: string; tolerance?: number; timeoutMs?: number; say?: string; meet?: string }) => {
+      if ([x !== undefined || zz !== undefined, place !== undefined, player !== undefined].filter(Boolean).length !== 1) throw new BodyError('INVALID_ARGUMENT', '坐标（x、z，y 可选）、place、player 三者给且只给一个');
+      if (player !== undefined) {
+        if (meet) throw new BodyError('INVALID_ARGUMENT', 'meet 用在走去坐标或地点找人；走到身边的玩家用 player 就行');
+        if (say) await body.act('send-chat', { message: say });
+        return operationResult(await body.act('approach-player', { player, ...(timeoutMs !== undefined ? { timeoutMs: Math.min(120000, timeoutMs) } : {}) }));
+      }
+      if (place !== undefined) {
+        const found = places.get(place);
+        if (!found) throw new BodyError('NOT_FOUND', `没有记过「${place}」，先用 places 记下`);
+        if (found.dimension !== (await body.observe()).dimension) throw new BodyError('OTHER_DIMENSION', `「${found.name}」在 ${found.dimension}`);
+        return travel(found.position, { tolerance: tolerance ?? 1.5, timeoutMs, say, meet });
+      }
+      if (x === undefined || zz === undefined) throw new BodyError('INVALID_ARGUMENT', 'x 和 z 都要给');
+      const here = (await body.observe()).position;
+      // Past the 32-block walk (or with no height given, or to meet someone on the way): the leg-by-leg walk.
+      if (canTravel && (meet || y === undefined || Math.hypot(x - here.x, y - here.y, zz - here.z) > 32)) return travel({ x, z: zz, ...(y !== undefined ? { y } : {}) }, { tolerance, timeoutMs, say, meet });
+      if (y === undefined) throw new BodyError('INVALID_ARGUMENT', '要给 y');
+      if (!canMove) throw new BodyError('UNSUPPORTED', '这个身体不能走到坐标');
+      if (say) await body.act('send-chat', { message: say });
+      try {
+        return operationResult(await body.act('move-to-position', { x, y, z: zz, ...(tolerance !== undefined ? { tolerance: Math.min(3, tolerance) } : {}), ...(timeoutMs !== undefined ? { timeoutMs: Math.min(120000, timeoutMs) } : {}) }));
+      } catch (error) {
+        // A near point whose chunk is not loaded yet (behind the body, at the edge of view): the long walk loads it as it goes.
+        if (canTravel && error instanceof BodyError && error.code === 'UNLOADED') return travel({ x, y, z: zz }, { tolerance, timeoutMs });
+        throw error;
+      }
+    });
+  }
+  if (canTravel) {
+    register('places', 'Named spots in this world (home/家, mine entrance, farm); walk there with go-to place. remember: where you stand, or where player stands, or x/y/z; the same name overwrites; a place named home or 家 also gives you a bedtime event at night when you are near it. list: every place with its distance from you. forget: drop one.', {
+      action: z.enum(['remember', 'list', 'forget']), name: z.string().min(1).max(32).optional(), player: playerName.optional(),
+      x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(), note: z.string().max(120).optional(),
+    }, async ({ action, name, player, x, y, z: zz, note }: { action: 'remember' | 'list' | 'forget'; name?: string; player?: string; x?: number; y?: number; z?: number; note?: string }) => {
       const state = await body.observe();
+      if (action === 'list') return places.list().map(place => ({ ...place, ...(place.dimension === state.dimension ? { distance: Math.round(Math.hypot(place.position.x - state.position.x, place.position.z - state.position.z)) } : { otherDimension: true }) }));
+      if (!name) throw new BodyError('INVALID_ARGUMENT', `${action} 要给 name`);
+      if (action === 'forget') return { removed: places.remove(name) };
       let position = state.position;
       if (x !== undefined && y !== undefined && zz !== undefined) position = { x, y, z: zz };
       else if (player) { const found = state.entities.find(entity => entity.type === 'minecraft:player' && entity.name === player); if (!found) throw new BodyError('PLAYER_NOT_VISIBLE', `附近看不到 ${player}`); position = found.position; }
       return { saved: places.set({ name, dimension: state.dimension, position, ...(note ? { note } : {}) }) };
     });
-    register('list-places', 'List remembered places with their distance from you.', {}, async () => {
-      const state = await body.observe();
-      return places.list().map(place => ({ ...place, ...(place.dimension === state.dimension ? { distance: Math.round(Math.hypot(place.position.x - state.position.x, place.position.z - state.position.z)) } : { otherDimension: true }) }));
-    });
-    register('forget-place', 'Forget a remembered place.', { name: z.string().min(1).max(32) }, async ({ name }) => ({ removed: places.remove(name) }));
-    register('go-to-place', `Walk to a remembered place (travel-to its position). Same dimension only.${meetNote}`, { name: z.string().min(1).max(32), ...walk }, async ({ name, ...extra }) => {
-      const place = places.get(name);
-      if (!place) throw new BodyError('NOT_FOUND', `没有记过「${name}」，先 remember-place`);
-      if (place.dimension !== (await body.observe()).dimension) throw new BodyError('OTHER_DIMENSION', `「${place.name}」在 ${place.dimension}`);
-      return travel(place.position, { tolerance: 1.5, ...extra });
-    });
   }
   if (serverObserved && body.hello.capabilities.includes('nearby-blocks')) {
-    if (body.hello.capabilities.includes('approach-container')) register('approach-container', 'Walk to a discovered container using its short-lived local reference and bounded safe routes on loaded level ground. Replacement or expiration fails. running requires polling get-operation.', { containerRef: z.string().uuid(), timeoutMs }, async ({ containerRef, timeoutMs }) => operationResult(await tasks.approachContainer(containerRef, timeoutMs)));
     register('discover-containers', 'Find bounded nearby loaded containers centered on the named player, or the bot when omitted. Contents are not read. Use the returned short-lived containerRef; ask when candidates are ambiguous.', {
       centerPlayer: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(), radius: z.number().int().min(1).max(16).default(4), maxResults: z.number().int().min(1).max(16).default(8),
     }, args => tasks.discover(args));
@@ -451,23 +497,38 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     const say = { say: z.string().min(1).max(256).optional().describe('Your own natural single-line response, sent before starting the task.') };
     for (const task of [
       { name: 'container-list' as const, schema: { ...target, ...say }, description: 'Approach a referenced container when supported, open, list ONLY container items grouped by exact component variant, then close. Older bodies require reach and only guard block state. No NBT copying required.' },
-      { name: 'container-withdraw' as const, schema: { ...target, ...itemCount, ...say }, description: 'Approach when supported, withdraw a count from one sufficient container stack into an empty hotbar slot (the main inventory when the hotbar is full; result.slot says where, prepare-item brings it to hand) and close. Never drops anything to make room. Reject component ambiguity. Routes are bounded loaded level ground; older bodies require reach with state-only guards. Several items for one job: withdraw them one after another before starting.' },
+      { name: 'container-withdraw' as const, schema: { ...target, ...itemCount, ...say }, description: 'Approach when supported, withdraw a count from one sufficient container stack into an empty hotbar slot (the main inventory when the hotbar is full; result.slot says where, equip-item hand:"main" brings it to hand) and close. Never drops anything to make room. Reject component ambiguity. Routes are bounded loaded level ground; older bodies require reach with state-only guards. Several items for one job: withdraw them one after another before starting.' },
       { name: 'give-item' as const, schema: { ...recipient, ...itemCount, slot: z.number().int().min(0).max(35).optional().describe('Which inventory slot to give from, when the same item comes in variants (an enchanted pickaxe and a plain one); see list-inventory'), ...say }, description: 'Bind the named player identity, approach when supported, look, select and drop from one sufficient stack (slot picks it; a main-inventory slot is swapped into an empty hotbar slot first). Older bodies require recipient within 2 blocks. Without slot, component variants are refused (AMBIGUOUS_ITEM). Result means dropped; pickup remains unconfirmed.' },
-      { name: 'fetch-and-give' as const, schema: { ...target, ...recipient, ...itemCount, ...say }, description: 'Approach container, guarded open/withdraw/close, return to the same recipient, look/select/drop in one task when approach capabilities exist. Routes are bounded loaded level ground. Older bodies require reach and only guard block state. Partial changes remain, unknown never retries, pickup remains unconfirmed.' },
     ]) {
-      const required: ActionName[] = task.name === 'container-list' ? ['open-container', 'close-container'] : task.name === 'container-withdraw' ? ['open-container', 'click-slot', 'close-container'] : task.name === 'give-item' ? ['look-at', 'select-slot', 'drop-item'] : ['open-container', 'click-slot', 'close-container', 'look-at', 'select-slot', 'drop-item'];
+      const required: ActionName[] = task.name === 'container-list' ? ['open-container', 'close-container'] : task.name === 'container-withdraw' ? ['open-container', 'click-slot', 'close-container'] : ['look-at', 'select-slot', 'drop-item'];
       if (required.every(capability => body.hello.capabilities.includes(capability))) register(task.name, `${task.description} The whole task has a 90-second deadline including reads and actions; expiry stops further work and reports last confirmed progress. A complete source stack can move into a verified empty hotbar slot with ordinary pickup clicks; partial requests remain bounded.`, task.schema, async args => operationResult(await tasks.run(task.name, args)));
     }
   }
   const itemInteractionIds = body.hello.itemInteractions ?? [];
   const interactionIds = (body.hello.interactions ?? []).filter(id => !itemInteractionIds.includes(id));
-  if (serverObserved && body.hello.capabilities.includes('use-item') && itemInteractionIds.length) register('use-item', `Use a held item in the air through a registered interaction: ${itemInteractionIds.join(', ')}. The item must be in the hotbar (use prepare-item first). An interaction that opens a menu (e.g. a backpack) leaves it open: read it with get-container, move items with click-slot, then close-container. unknown is never retried; observe again.`, {
+  if (serverObserved && body.hello.capabilities.includes('use-item') && itemInteractionIds.length) register('use-item', `Use a held item in the air through a registered interaction: ${itemInteractionIds.join(', ')}. The item must be in the hotbar (equip-item hand:"main" first). An interaction that opens a menu (e.g. a backpack) leaves it open: container-menu read, click, then close. unknown is never retried; observe again.`, {
     interaction: z.enum(itemInteractionIds as [string, ...string[]]), item: registryId, timeoutMs,
   }, async args => operationResult(await useItem(body, args)));
-  if (serverObserved && body.hello.capabilities.includes('equip-item')) register('equip-item', 'Put on armour from the inventory: a helmet, chestplate, elytra, leggings, boots or mob head, or a backpack that is worn on the back; a shield goes into the off hand (item = its ID, from anywhere in the inventory). The piece worn there before comes off into the slot the new one came from; a backpack takes the chest slot, so it and a chestplate cannot both be worn. For anything else in the off hand (a torch, food, a map, ...) pass hand:"offhand": that item from the inventory goes into the off hand, and whatever was in the off hand goes back to the slot the new item came from. Armour and shields do not need hand. Worn armour is in the get-status inventory as slots 36 boots, 37 leggings, 38 chestplate, 39 helmet (40 is the offhand). unknown is never retried; observe again.', {
-    item: registryId, hand: z.literal('offhand').optional(),
-  }, async args => operationResult(await equipItem(body, args)));
-  if (serverObserved && body.hello.capabilities.includes('use-item-on-block') && interactionIds.length) register('interact-block', `Right-click one block in reach through a registered interaction: ${interactionIds.join(', ')}. Give exactly one of item (must be in hotbar; use prepare-item first) or emptyHand when the interaction requires it. Unregistered blocks or items are refused before any action. unknown is never retried; observe again. For timing-sensitive repeats (e.g. stirring a pot) give repeatUntil: the program repeats the same interaction until the receipt summary field equals the value, stopping at the first non-succeeded receipt.`, {
+  // equip-item: everything that puts an item in hand or on the body; hand main is the old prepare-item (and select-slot for a hotbar stack).
+  if (serverObserved && (body.hello.capabilities.includes('equip-item') || survival)) register('equip-item', `Take an item into the main hand with hand:"main": a hotbar stack is just selected, one from the main inventory is swapped into an empty hotbar slot first (targetSlot 0-8 lets it swap with an occupied one); never discards anything. Several stacks of the item (an enchanted pickaxe and a plain one): give slot (0-35, see get-status include inventory). Without hand: put on armour from the inventory: a helmet, chestplate, elytra, leggings, boots or mob head, or a backpack that is worn on the back; a shield goes into the off hand (item = its ID, from anywhere in the inventory). The piece worn there before comes off into the slot the new one came from; a backpack takes the chest slot, so it and a chestplate cannot both be worn. For anything else in the off hand (a torch, food, a map, ...) pass hand:"offhand": that item from the inventory goes into the off hand, and whatever was in the off hand goes back to the slot the new item came from. Armour and shields do not need hand. Worn armour is in the get-status inventory as slots 36 boots, 37 leggings, 38 chestplate, 39 helmet (40 is the offhand). unknown is never retried; observe again.`, {
+    item: registryId.optional(), slot: z.number().int().min(0).max(35).optional(), hand: z.enum(['main', 'offhand']).optional(), targetSlot: z.number().int().min(0).max(8).optional(),
+  }, async ({ item, slot, hand, targetSlot }: { item?: string; slot?: number; hand?: 'main' | 'offhand'; targetSlot?: number }) => {
+    if (hand === 'main') {
+      if (!survival) throw new BodyError('UNSUPPORTED', '这个身体不能把物品拿到手上');
+      if (slot === undefined) {
+        if (!item) throw new BodyError('INVALID_ARGUMENT', '给 item 或 slot');
+        const stacks = (await body.observe()).inventory.filter(stack => stack.id === item && stack.count > 0 && stack.slot >= 0 && stack.slot <= 35);
+        const chosen = stacks.find(stack => stack.slot <= 8) ?? stacks[0];
+        if (!chosen) throw new BodyError('MISSING_ITEM', `背包里没有 ${item}`);
+        slot = chosen.slot;
+      }
+      return operationResult(await survival.prepareItem({ slot, ...(targetSlot !== undefined ? { targetSlot } : {}) }));
+    }
+    if (!item) throw new BodyError('INVALID_ARGUMENT', '穿戴要给 item');
+    if (!body.hello.capabilities.includes('equip-item')) throw new BodyError('UNSUPPORTED', '身体没有声明穿装备的能力');
+    return operationResult(await equipItem(body, { item, ...(slot !== undefined ? { slot } : {}), ...(hand === 'offhand' ? { hand } : {}) }));
+  });
+  if (serverObserved && body.hello.capabilities.includes('use-item-on-block') && interactionIds.length) register('interact-block', `Right-click one block in reach through a registered interaction: ${interactionIds.join(', ')}. Give exactly one of item (must be in hotbar; equip-item hand:"main" first) or emptyHand when the interaction requires it. Unregistered blocks or items are refused before any action. unknown is never retried; observe again. For timing-sensitive repeats (e.g. stirring a pot) give repeatUntil: the program repeats the same interaction until the receipt summary field equals the value, stopping at the first non-succeeded receipt.`, {
     ...blockXyz, interaction: z.enum(interactionIds as [string, ...string[]]), item: registryId.optional(), emptyHand: z.literal(true).optional(),
     face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional(), timeoutMs,
     repeatUntil: z.object({ field: z.string().regex(/^[A-Za-z0-9_]{1,64}$/), equals: z.union([z.string().max(64), z.number(), z.boolean()]),
@@ -484,14 +545,26 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     if (!stack || stack.id !== args.expectedItem || stack.count === 0) throw new BodyError('STALE_ITEM', `快捷栏第 ${String(args.slot)} 格不是 ${String(args.expectedItem)}，先看一下背包`);
     return { ...args, expectedCount: args.expectedCount ?? stack.count, expectedComponents: args.expectedComponents ?? stack.components };
   };
+  // container-menu: the four menu steps of ServerBody in one tool; each step is checked against the old tool's own arguments.
+  if (serverObserved && ['open-container', 'click-slot', 'close-container'].every(cap => body.hello.capabilities.includes(cap))) {
+    const names = { open: 'open-container', click: 'click-slot', close: 'close-container' } as const;
+    const steps = Object.fromEntries(actions.filter(action => (Object.values(names) as string[]).includes(action.name)).map(action => [action.name, z.object(action.schema).strict()]));
+    const read = z.object({ details: z.boolean().optional() }).strict();
+    const fields: ZodRawShape = {};
+    for (const step of [...Object.values(steps), read]) for (const [key, value] of Object.entries(step.shape)) fields[key] ??= (value as z.ZodTypeAny).optional();
+    const adapters = body.hello.adapters?.length ? ` Mod containers with adapters on this server: ${body.hello.adapters.join(', ')}.` : '';
+    register('container-menu', `A container menu step by step, for what container-list and container-withdraw do not do by themselves, or a menu use-item opened (e.g. a backpack). open: the container at x/y/z in reach, after checking expectedBlock and expectedProperties (copy them from get-block) and line of sight.${adapters} read: the open menu, its slots and the carried item (details:true gives the full guards). click: one ordinary PICKUP click; guard containerId, expectedRevision, slot and item/count/full components of that slot and of the carried stack, from read details:true (empty is minecraft:air, count 0, components {}); read again before each next click. close: containerId and expectedRevision. unknown is not a confirmed transfer.`, {
+      action: z.enum(['open', 'read', 'click', 'close']), ...fields,
+    }, async ({ action, ...args }: { action: 'open' | 'read' | 'click' | 'close' } & Record<string, unknown>) => {
+      const step = action === 'read' ? read : steps[names[action]];
+      const parsed = step.safeParse(args);
+      if (!parsed.success) throw new BodyError('INVALID_ARGUMENT', `${action}：${parsed.error.issues.map(issue => `${issue.path.join('.') || '参数'} ${issue.message}`).join('；')}`);
+      if (action === 'read') { const container = (await body.observe()).container; return parsed.data.details ? container : summarizeContainer(container); }
+      return operationResult(await body.act(names[action], parsed.data as ActionArguments[typeof names[typeof action]]));
+    });
+  }
   for (const action of actions) {
     if (body.hello.capabilities.includes(action.name)) register(action.name, action.description, action.schema, async args => {
-      if (action.name === 'move-to-position' && canTravel) {
-        // Past the 32-block walk (or into chunks not loaded yet): the same leg-by-leg walk as travel-to.
-        const { x, y, z: zz, tolerance } = args as { x: number; y: number; z: number; tolerance?: number };
-        const here = (await body.observe()).position;
-        if (Math.hypot(x - here.x, y - here.y, zz - here.z) > 32) return { ...await travel({ x, y, z: zz }, { tolerance: Math.max(1, tolerance ?? 1) }), routedVia: 'travel-to' };
-      }
       const sent = action.name === 'place-block' ? await placeGuard(args) : args;
       return operationResult(await body.act(action.name, sent as ActionArguments[ActionName]));
     });

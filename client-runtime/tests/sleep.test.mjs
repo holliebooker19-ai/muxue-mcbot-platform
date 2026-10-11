@@ -28,17 +28,17 @@ const call = async (c, name, args = {}) => JSON.parse((await c.callTool({ name, 
 test('sleep-in-bed and wake-up are published only with the capability', async t => {
   const { body } = await setup(t);
   const names = (await (await client(t, body)).listTools()).tools.map(tool => tool.name);
-  assert.ok(names.includes('sleep-in-bed') && names.includes('wake-up'));
+  assert.ok(names.includes('sleep-in-bed') && names.includes('get-up') && !names.includes('wake-up'));
   const { body: old } = await setup(t, []);
   const oldNames = (await (await client(t, old)).listTools()).tools.map(tool => tool.name);
-  assert.ok(!oldNames.includes('sleep-in-bed') && !oldNames.includes('wake-up'));
+  assert.ok(!oldNames.includes('sleep-in-bed') && !oldNames.includes('get-up'));
 });
 
 test('sleep-in-bed forwards the player to search around; malformed arguments never reach the server', async t => {
   const { body, acts } = await setup(t);
   const c = await client(t, body);
   assert.equal((await call(c, 'sleep-in-bed', { player: 'muxue' })).status, 'succeeded');
-  assert.equal((await call(c, 'wake-up')).status, 'succeeded');
+  assert.equal((await call(c, 'get-up')).status, 'succeeded');
   assert.deepEqual(acts().map(act => [act.name, act.args]), [['sleep-in-bed', { player: 'muxue' }], ['wake-up', {}]]);
   await assert.rejects(body.act('sleep-in-bed', { player: 'not a name' }), { code: 'INVALID_ARGUMENT' });
   await assert.rejects(body.act('wake-up', { now: true }), { code: 'INVALID_ARGUMENT' });

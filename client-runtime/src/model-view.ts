@@ -37,7 +37,7 @@ export function summarizeObservation(state: Observation) {
     chat: state.chat.slice(-10), chatCursor: state.chatCursor,
     container: summarizeContainer(state.container), ...(state.block ? { block: state.block } : {}),
     ...(state.sleeping !== undefined ? { sleeping: state.sleeping } : {}), ...(state.sitting !== undefined ? { sitting: state.sitting } : {}), ...(state.time ? { time: state.time } : {}),
-    details: 'Compact view. Exact guarded snapshots remain available from list-inventory/get-container or get-status details:true.',
+    details: 'Compact view. Exact guarded snapshots: get-status include inventory (or details:true), container-menu read details:true.',
   };
 }
 /** storedIn is {storage id: count}; keep at most 16 numeric entries with short keys. */

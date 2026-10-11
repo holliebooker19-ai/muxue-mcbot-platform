@@ -79,24 +79,27 @@ test('server refusal result preserves failed classification and active lease; un
   assert.equal(mock.calls.filter(call => call.method === 'claim').length, 1);
 });
 
-test('B actual stdio publishes 21 capability-gated tools and requires server-only guards', async t => {
+test('B actual stdio publishes 12 capability-gated tools and requires server-only guards', async t => {
   const dir = directory(t), mock = await mockB(t);
   const connectionFile = path.join(dir, 'connection.json'); fs.writeFileSync(connectionFile, JSON.stringify(mock.connection));
   const transport = new StdioClientTransport({ command: process.execPath, args: ['--experimental-loader', pathToFileURL(path.resolve('tests/no-mineflayer-loader.mjs')).href,
     path.resolve('dist/main.js'), '--body', 'server', '--connection-file', connectionFile, '--username', 'ServerBot', '--world-id', 'test-world', '--runtime-dir', dir], stderr: 'pipe' });
   const client = new Client({ name: 'B-stdio', version: '1' }); await client.connect(transport); t.after(() => client.close());
-  const tools = (await client.listTools()).tools; assert.equal(tools.length, 21);
+  const tools = (await client.listTools()).tools; assert.equal(tools.length, 12);
   assert.ok(!tools.some(tool => ['respawn', 'memory-context'].includes(tool.name)));
   for (const [name, guards] of [
-    ['dig-block', ['expectedProperties']], ['open-container', ['expectedProperties']],
+    ['dig-block', ['expectedProperties']],
     // place-block fills a left-out stack guard from the slot as observed just before sending; the body still gets full guards.
     ['place-block', ['expectedProperties']],
-    ['click-slot', ['expectedRevision', 'expectedComponents', 'expectedCarriedComponents']],
-    ['close-container', ['expectedRevision']], ['select-slot', ['expectedComponents']], ['drop-item', ['count', 'expectedComponents']],
+    ['drop-item', ['count', 'expectedComponents']],
   ]) for (const guard of guards) assert.ok(tools.find(tool => tool.name === name).inputSchema.required.includes(guard), `${name}.${guard}`);
-  const missing = await client.callTool({ name: 'click-slot', arguments: { ...click, expectedRevision: undefined } });
-  assert.equal(missing.isError, true); assert.equal(mock.calls.filter(call => call.method === 'act').length, 0);
-  const clicked = await client.callTool({ name: 'click-slot', arguments: click }); assert.equal(clicked.isError, undefined);
+  // container-menu checks each step against the old tool's own arguments: the menu guards stay required.
+  for (const [action, args, field] of [['click', { ...click, expectedRevision: undefined }, 'expectedRevision'], ['click', { ...click, expectedCarriedComponents: undefined }, 'expectedCarriedComponents'], ['open', { x: 1, y: 2, z: 3, expectedBlock: 'minecraft:chest' }, 'expectedProperties'], ['close', { containerId: click.containerId }, 'expectedRevision']]) {
+    const missing = await client.callTool({ name: 'container-menu', arguments: { action, ...args } });
+    assert.equal(missing.isError, true, ` without `); assert.match(missing.content[0].text, new RegExp(field));
+  }
+  assert.equal(mock.calls.filter(call => call.method === 'act').length, 0);
+  const clicked = await client.callTool({ name: 'container-menu', arguments: { action: 'click', ...click } }); assert.equal(clicked.isError, undefined);
   assert.deepEqual(mock.calls.find(call => call.method === 'act').params.args, click);
   const state = JSON.parse((await client.callTool({ name: 'get-status', arguments: { details: true } })).content[0].text);
   assert.deepEqual(state.inventory[0].components, components); assert.equal(state.container.revision, 7);

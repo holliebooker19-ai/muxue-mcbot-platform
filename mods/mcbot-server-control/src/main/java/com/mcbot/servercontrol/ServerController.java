@@ -542,8 +542,8 @@ final class ServerController implements ControlSession.Game {
         // Started while the duty fights (between two steps of a gathering, say): it waits for the fight like a paused one and gets that time back.
         if(dutyDrove&&!Posture.keeps(operation.name)){dutyPaused=operation;dutyFrom=now();}
         JsonObject args=operation.args;
-        if(player.isSleeping()&&!Set.of("send-chat","wake-up").contains(operation.name)) throw error("SLEEPING","Body is asleep in a bed; call wake-up first");
-        if(NativeSeat.seated(player)&&!NativeSeat.allowedWhileSeated(operation.name)) throw error("SEATED","Body is sitting; call stand-up first");
+        if(player.isSleeping()&&!Set.of("send-chat","wake-up").contains(operation.name)) throw error("SLEEPING","Body is asleep in a bed; call get-up first");
+        if(NativeSeat.seated(player)&&!NativeSeat.allowedWhileSeated(operation.name)) throw error("SEATED","Body is sitting; call get-up first");
         // A looping add-on animation ends when the body does anything else; talking and looking keep it going.
         if(!Set.of("send-chat","look-at","emote","set-appearance").contains(operation.name)) emotes.stopAnimation();
         if(operation.name.equals("emote")) {
@@ -854,7 +854,7 @@ final class ServerController implements ControlSession.Game {
         boolean has=operation.args.has("x")||operation.args.has("y")||operation.args.has("z");
         if(has&&!(operation.args.has("x")&&operation.args.has("y")&&operation.args.has("z"))) throw error("INVALID_ARGUMENT","x, y and z go together");
         if(NativeSeat.seated(player)) {
-            if(has) throw error("ALREADY_SITTING","Body is already sitting; call stand-up before sitting somewhere else");
+            if(has) throw error("ALREADY_SITTING","Body is already sitting; call get-up before sitting somewhere else");
             operation.finish("succeeded","Body is already sitting",obj("sitting",true,"alreadySitting",true));return;
         }
         BlockPos seat;

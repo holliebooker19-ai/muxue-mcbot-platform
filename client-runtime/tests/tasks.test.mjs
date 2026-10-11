@@ -269,7 +269,7 @@ test('component ambiguity, unknown slot source and full hotbar reject before any
 test('container-withdraw with a full hotbar lands in the main inventory instead of failing or dropping anything', async () => {
   const f = fixture({ full: true, configureMenu: menu => { menu.slots.push(empty(4, { source: 'player', playerSlot: 9 })); } });
   const op = await f.tasks.run('container-withdraw', { containerRef: await f.ref(), item: 'minecraft:oak_log', count: 10 });
-  assert.equal(op.status, 'succeeded'); assert.equal(op.result.slot, 9); assert.match(op.summary, /prepare-item/);
+  assert.equal(op.status, 'succeeded'); assert.equal(op.result.slot, 9); assert.match(op.summary, /equip-item hand:main/);
   assert.equal(f.calls.some(call => call.name === 'drop-item'), false);
   // fetch-and-give still needs a hotbar slot, since it drops from the hand.
   const g = fixture({ full: true, configureMenu: menu => { menu.slots.push(empty(4, { source: 'player', playerSlot: 9 })); } });
@@ -393,17 +393,19 @@ test('actual MCP task tools accept compact references without NBT and return one
   const events = new EventJournal(), server = createMcpServer(f.body, events);
   const [left, right] = InMemoryTransport.createLinkedPair(), client = new Client({ name: 'task-test', version: '1' });
   await server.connect(left); await client.connect(right); t.after(async () => { await client.close(); await server.close(); });
-  const tools = (await client.listTools()).tools, task = tools.find(tool => tool.name === 'fetch-and-give');
-  assert.deepEqual(task.inputSchema.required.sort(), ['containerRef', 'item', 'player'].sort()); assert.equal('expectedComponents' in task.inputSchema.properties, false);
+  const tools = (await client.listTools()).tools, task = tools.find(tool => tool.name === 'container-withdraw');
+  assert.ok(!tools.some(tool => tool.name === 'fetch-and-give'), 'fetch-and-give is no tool any more: withdraw, then give');
+  assert.deepEqual(task.inputSchema.required.sort(), ['containerRef', 'item'].sort()); assert.equal('expectedComponents' in task.inputSchema.properties, false);
   assert.ok(task.inputSchema.properties.count); assert.ok(task.inputSchema.properties.stacks);
-  const call = async (name, args) => { const reply = await client.callTool({ name, arguments: args }); assert.equal(reply.isError, undefined); return JSON.parse(reply.content[0].text); };
+  const call = async (name, args) => { const reply = await client.callTool({ name, arguments: args }); assert.equal(reply.isError, undefined, reply.content[0].text); return JSON.parse(reply.content[0].text); };
   const ref = (await call('discover-containers', { centerPlayer: 'Alex' })).candidates[0].containerRef;
-  const op = await call('fetch-and-give', { containerRef: ref, item: 'minecraft:oak_log', count: 3, player: 'Alex', say: '我给你拿三个' });
-  assert.equal(op.status, 'succeeded'); assert.equal(op.result.withdrawnCount, 3); assert.equal(op.result.droppedCount, 3); assert.equal(op.result.pickup, 'unconfirmed');
+  const taken = await call('container-withdraw', { containerRef: ref, item: 'minecraft:oak_log', count: 3, say: '我给你拿三个' });
+  assert.equal(taken.status, 'succeeded'); assert.equal(taken.result.withdrawnCount, 3);
+  const op = await call('give-item', { player: 'Alex', item: 'minecraft:oak_log', count: 3 });
+  assert.equal(op.status, 'succeeded'); assert.equal(op.result.droppedCount, 3); assert.equal(op.result.pickup, 'unconfirmed');
   assert.ok(!JSON.stringify(op).includes('9007199254740993')); assert.deepEqual(events.since(0, ['task']), []);
   assert.equal((await call('get-operation', { operationId: op.operationId })).result.droppedCount, 3);
 });
-
 test('bounded task walks before token-guarded open, returns to UUID-bound recipient and drops once', async () => {
   const f = fixture({ approach: true, blocked: true });
   f.state.entities[0].position.x = 8;
@@ -498,26 +500,23 @@ test('movement waits its specified 20-second bound rather than the previous 15-s
   assert.equal(op.status, 'succeeded'); assert.equal(stops, 0); assert.equal(polls, 1);
 });
 
-test('MCP approach uses only a local containerRef, hides private token in immediate and detailed receipts', async t => {
+test('MCP container tasks use only a local containerRef and hide the private token in immediate and detailed receipts', async t => {
   const f = fixture({ approach: true }); f.body.hello.capabilities.push('nearby-blocks', 'open-container', 'close-container');
-  let operation;
-  const act = f.body.act;
-  f.body.act = async (...args) => operation = await act(...args);
-  f.body.operation = async () => operation;
   const events = new EventJournal(), server = createMcpServer(f.body, events);
   const [left, right] = InMemoryTransport.createLinkedPair(), client = new Client({ name: 'approach-test', version: '1' });
   await server.connect(left); await client.connect(right); t.after(async () => { await client.close(); await server.close(); });
   const tools = (await client.listTools()).tools;
-  const tool = tools.find(value => value.name === 'approach-container');
+  assert.ok(!tools.some(value => value.name === 'approach-container'), 'container tasks walk there themselves');
+  const tool = tools.find(value => value.name === 'container-list');
   assert.equal(tool.inputSchema.properties.targetToken, undefined); assert.deepEqual(tool.inputSchema.required, ['containerRef']);
   const call = async (name, args) => { const result = await client.callTool({ name, arguments: args }); assert.equal(result.isError, undefined); return JSON.parse(result.content[0].text); };
   const discovered = await call('discover-containers', {});
   assert.equal(discovered.candidates[0].targetToken, undefined);
-  const result = await call('approach-container', { containerRef: discovered.candidates[0].containerRef });
-  assert.equal(result.status, 'succeeded'); assert.equal(result.result.targetToken, undefined);
-  assert.equal((await call('get-operation', { operationId: result.operationId, details: true })).result.targetToken, undefined);
+  const result = await call('container-list', { containerRef: discovered.candidates[0].containerRef });
+  assert.equal(result.status, 'succeeded'); assert.equal(JSON.stringify(result).includes('targetToken'), false);
+  assert.ok(f.calls.some(call => call.name === 'approach-container'), 'it walked there with the token');
+  assert.equal(JSON.stringify(await call('get-operation', { operationId: result.operationId, details: true })).includes('targetToken'), false);
 });
-
 test('generic slot activity excludes hidden machine stacks without losing known visible contents', async () => {
   const f = fixture({ configureMenu: menu => {
     menu.type = 'example:machine';

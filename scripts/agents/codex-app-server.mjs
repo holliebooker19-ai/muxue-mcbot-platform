@@ -20,7 +20,8 @@ export const CODEX_CLIENT_TOOLS = Object.freeze([
 // ServerBody 的游戏工具就是运行端工具表里的那些（client-runtime/tool-registry.json，设计第 8.2 节）；仓库和绿色版里位置相同。
 // 按文件读而不 import：打包要求 scripts 不引用目录以外的模块。
 const TOOL_REGISTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'client-runtime', 'tool-registry.json');
-export const CODEX_SERVER_TOOLS = Object.freeze(Object.keys(JSON.parse(fs.readFileSync(TOOL_REGISTRY, 'utf8')).tools));
+// clientOnly 的是旧 ClientBody 才有的工具，ServerBody 不注册。
+export const CODEX_SERVER_TOOLS = Object.freeze(Object.entries(JSON.parse(fs.readFileSync(TOOL_REGISTRY, 'utf8')).tools).filter(([, tool]) => !tool.clientOnly).map(([name]) => name));
 
 // Windows 的 npm .ps1/.cmd shim 不能直接交给 spawn；用 Node 启动官方 npm 入口。
 export function codexCommand(env = process.env, platform = process.platform) {

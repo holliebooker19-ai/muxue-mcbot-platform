@@ -68,7 +68,7 @@ test('ServerBody 参数、提示与工具不继承旧进服/记忆路径',()=>{
     const args=parseArgs(['--agent',agent,'--body','server','--server-check-seconds','1']);assert.equal(args.serverCheckSeconds,0);
     assert.match(startupPrompt(args,true),/ServerBody/);assert.doesNotMatch(startupPrompt(args,true),/调用 memory-context 读记忆|会自动进服|会被自动下线/);
     assert.match(startupPrompt(args,true),/components/);assert.match(startupPrompt(args,true),/revision/);assert.match(startupPrompt(args,true),/死亡后控制就结束了，不自己重接；下次启动托管时会自动重生/);
-    assert.match(startupPrompt(args,true),/discover-containers → fetch-and-give/);assert.match(startupPrompt(args,true),/wholeTree:true/);assert.match(startupPrompt(args,true),/details:true/);
+    assert.match(startupPrompt(args,true),/discover-containers → container-withdraw → give-item/);assert.match(startupPrompt(args,true),/wholeTree:true/);assert.match(startupPrompt(args,true),/details:true/);
     assert.doesNotMatch(startupPrompt(args,true),/每轮先查询当前状态|完整复制状态与 components/);
     assert.equal(bodySessionScope(args,['--world-id','a','--connection-file','x']).body,'server');
   }
@@ -76,18 +76,18 @@ test('ServerBody 参数、提示与工具不继承旧进服/记忆路径',()=>{
   assert.throws(()=>parseArgs(['--agent','dsh','--body','client']),/仅接通 Codex/);
   assert.deepEqual(codexThreadConfig({}, {command:'node',args:[]},ROOT,'server').mcp_servers.minecraft.enabled_tools,CODEX_SERVER_TOOLS);
   assert.equal(CODEX_SERVER_TOOLS.includes('dig-block'),true);
-  assert.equal(CODEX_SERVER_TOOLS.includes('select-slot'),true);
   assert.equal(CODEX_SERVER_TOOLS.includes('drop-item'),true);
   assert.equal(CODEX_SERVER_TOOLS.includes('respawn'),false);
-  for(const tool of ['discover-containers','container-list','container-withdraw','give-item','fetch-and-give']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
-  for(const tool of ['approach-container','approach-player']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
-  for(const tool of ['companion-mode','get-companion-mode']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
-  for(const tool of ['discover-resources','gather-resources','collect-items','look-around','pillar-up','pillar-down','sleep-in-bed','wake-up','sit','stand-up','craft-item','smelt-item','travel-to','remember-place','list-places','forget-place','go-to-place','workstation-options','produce-item','modify-item','tend-crops','breed-animals','hunt','use-bucket']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
-  for(const tool of ['get-survival-state','assess-tool','prepare-item','eat-food','set-reflexes','defend-self']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
+  for(const tool of ['discover-containers','container-list','container-withdraw','give-item','container-menu']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
+  for(const tool of ['companion-mode','go-to','places','get-up','pillar','blueprints']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
+  for(const tool of ['discover-resources','gather-resources','collect-items','look-around','sleep-in-bed','sit','craft-item','smelt-item','workstation-options','produce-item','modify-item','tend-crops','breed-animals','hunt','use-bucket']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
+  for(const tool of ['eat-food','set-reflexes','defend-self']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
   assert.equal(CODEX_SERVER_TOOLS.includes('interact-block'),true);
   for(const tool of ['emote','equip-item','use-item']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
-  for(const tool of ['build','list-blueprints','save-blueprint','machine-items']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
-  assert.equal(CODEX_SERVER_TOOLS.length,68);
+  for(const tool of ['build','machine-items']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
+  // Merged into the tools above (docs/tool_consolidation_plan.md); the old ClientBody keeps its own names.
+  for(const tool of ['select-slot','prepare-item','approach-player','travel-to','go-to-place','move-to-position','follow-player','look-at','get-position','list-inventory','get-companion-mode','get-survival-state','remember-place','list-places','forget-place','list-blueprints','save-blueprint','pillar-up','pillar-down','wake-up','stand-up','open-container','click-slot','close-container','get-container','read-chat','assess-tool','fetch-and-give','approach-container']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),false,tool);
+  assert.equal(CODEX_SERVER_TOOLS.length,45);
 });
 
 test('持续陪伴只为受阻通知唤醒，普通状态变化不产生空闲回合',()=>{
