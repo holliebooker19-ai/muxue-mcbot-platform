@@ -22,7 +22,14 @@ import static com.mcbot.servercontrol.Protocol.*;
  * Refuses before any write without headroom, solid floor, a replaceable feet cell or a plain full block;
  * a missed placement window lands back where it started and fails with no world change.
  */
-final class NativePillar {
+final class NativePillar implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(JsonObject::new,true,null,false);}
+    /** Never stepped aside for a fight: the body is in the air or on a block it just placed. */
+    @Override public boolean interruptible(){return false;}
+    @Override public void resumeAfterGuard(long fightMs){}
+    /** Nothing of its own to release: the controller stops the body's input right after. */
+    @Override public void stop(){}
     static final long TIMEOUT_MS=3000;
     private final ControlSession.Operation operation;
     private final BodyPlayer body;
@@ -76,7 +83,7 @@ final class NativePillar {
         return !(block instanceof FallingBlock)&&!state.hasBlockEntity()&&!FlatApproach.hazard(state)&&state.isCollisionShapeFullBlock(level,at);
     }
     /** One server tick; finishes the operation itself. */
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation))throw error("LEASE_LOST","Control expired while pillaring");
         if(now()>=deadline){body.stopInput();throw error(placed?"UNKNOWN":"TIMEOUT","Pillar time limit reached");}
         double y=body.getY();

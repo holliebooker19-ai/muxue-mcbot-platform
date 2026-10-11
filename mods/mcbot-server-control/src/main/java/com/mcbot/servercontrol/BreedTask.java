@@ -26,7 +26,9 @@ import static com.mcbot.servercontrol.NativeWorkstation.*;
  * and only whole pairs are fed. Tamable animals and horses are left out (taming and owners are their own rules).
  * survey:true only counts.
  */
-final class BreedTask implements GuardDuty.Pausable {
+final class BreedTask implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(this::progress,true,"Farm task fault",false);}
     static final int MAX_RADIUS=16,WALK_MS=12_000,BABY_WAIT_MS=8_000;
     private final ControlSession.Operation operation;
     private final BodyPlayer player;
@@ -123,7 +125,7 @@ final class BreedTask implements GuardDuty.Pausable {
         return player.serverLevel().clip(new ClipContext(eye,box.getCenter(),ClipContext.Block.COLLIDER,ClipContext.Fluid.NONE,player)).getType()==HitResult.Type.MISS;
     }
 
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation)){stop();return;}
         if(!operation.status.equals("running"))return;
         if(waitUntil>0) {
@@ -177,7 +179,7 @@ final class BreedTask implements GuardDuty.Pausable {
         if(fed.isEmpty()){result.addProperty("code",early!=null?"TIMEOUT":"UNREACHABLE");operation.finish("failed",(early!=null?"TIMEOUT: ":"UNREACHABLE: ")+"fed no animal",result);return;}
         operation.finish("succeeded",(early!=null?early+"; ":"")+"Fed "+fed.size()+", "+babies().size()+" babies so far",result);
     }
-    void stop() {
+    @Override public void stop() {
         stopWalking();player.stopInput();
         try{if(player.getInventory().selected!=previousSlot)player.connection.handleSetCarriedItem(new ServerboundSetCarriedItemPacket(previousSlot));}catch(RuntimeException ignored){}
     }

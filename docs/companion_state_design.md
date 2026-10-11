@@ -451,7 +451,7 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 - `assertIdle` 除了三个任务主人，还查 `body.isBusy()`（有动作在跑、有人持有任务锁、正在停止）。原来这种情况也是 BUSY，只是由 `ServerBody.act` 报出来。
 - 实现过程中发现：10-11 清理 worker worktree 时，`client-runtime` 和 `mcp-server` 的 `node_modules` 被一起清空了。已按 lock 文件重新 `npm ci`；其他目录和绿色版没有受影响。
 
-### 8.3 4d 服务端：一个任务槽（约 1.5～2 天，行为不变）
+### 8.3 4d 服务端：一个任务槽（约 1.5～2 天，行为不变；10-11 完成，见本节末尾）
 
 新增接口 `BodyTask extends GuardDuty.Pausable`：
 
@@ -474,6 +474,18 @@ interface BodyTask extends GuardDuty.Pausable {
 
 测试：`ControlSessionTest`、`FollowCompanionTest`、`PostureTest`、`GuardDutyTest` 全过；新增 `BodyTaskTest`，覆盖共用收尾的三种失败形状。
 - 不跑隔离服 smoke（8.7 第 1 问，用户 10-11 定）。④ 全部做完打包后由用户试玩。
+
+**2026-10-11 完成（离线）**。Java `gradlew check assemble` 全过，新增 `BodyTaskTest` 16 项；没有跑隔离服，也没有进游戏。和上面设计的出入：
+- 失败形状不是四个方法，而是一个 `BodyTask.Failure` 记录（report、position、fault、stopFirst），由各任务类的 `failure()` 返回：
+  - `PickupItem` 返回 null，表示它自己收尾，抛出的异常照旧往上抛；
+  - `NativePillar` 和 `TravelTask` 的 fault 为 null，`RuntimeException` 照旧往上抛。
+- 收尾逻辑写成纯函数 `BodyTask.end`，`BodyTaskTest` 直接测它。`faultResult` 和 `UNCERTAIN_FAULT` 从 `ServerController` 搬了过去。
+- `WalkTask` 是 `ServerController` 的内部类，因为它要用控制器的 `finish`、`findPlayer`、`resources`／`targets` 和姿态。它自己 catch 并收尾，从不往外抛。
+- `NativePillar` 也实现了接口：不可被打断，`stop()` 什么都不做（原来清字段时也什么都不调）。
+- 几处细微差别，都不影响正常路径：
+  - `sleep-in-bed`、`sit` 的 `timeoutMs` 现在在占用任务槽之前校验。原来校验失败时，操作会在 `active` 里多留一拍，再被 `stop()` 清掉。
+  - 停止时，拾取任务的 `stop()` 挪到了 `posture.interrupt()` 之前，两者互不依赖。
+  - 有操作在跑、却既没有任务也没有手势时（实际走不到这里），改为直接以 failed 收尾。原来会落进走路代码，因空指针以 failed 收尾。
 
 ### 8.4 4a：进食／自卫打断后续做（服务端暂停，约 2 天）
 

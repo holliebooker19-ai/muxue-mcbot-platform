@@ -41,7 +41,9 @@ import static com.mcbot.servercontrol.NativeWorkstation.*;
  * (water within 4 blocks) into farmland with a hoe, sown in the same pass when plant is given. survey:true only counts
  * and touches nothing.
  */
-final class FarmTask implements GuardDuty.Pausable {
+final class FarmTask implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(this::progress,true,"Farm task fault",false);}
     enum Kind { CROP, WART, COCOA, BERRY, GOURD, CANE }
     record Crop(BlockPos pos,Kind kind,BlockState state) {}
     /** Put `seed` on `soil`'s `face` so that `pos` becomes `block` (replanting a harvested crop or planting empty farmland). */
@@ -274,7 +276,7 @@ final class FarmTask implements GuardDuty.Pausable {
     private Direction faceOf(Object work){return work instanceof Plant p?p.face():work instanceof Till?Direction.UP:null;}
 
     // ---------- the loop ----------
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation)){stop();return;}
         if(!operation.status.equals("running"))return;
         if(now()>=deadline){finish("Time limit reached");return;}
@@ -517,7 +519,7 @@ final class FarmTask implements GuardDuty.Pausable {
         if(nothing){result.addProperty("code",early!=null?"TIMEOUT":"UNREACHABLE");operation.finish("failed",(early!=null?"TIMEOUT: ":"UNREACHABLE: ")+(early!=null?early:"could not reach any of the work"),result);return;}
         operation.finish("succeeded",(early!=null?early+"; ":"")+"Harvested "+total+", replanted "+replanted+(tilled>0?", tilled "+tilled:"")+(planted>0?", planted "+planted:"")+(boneMealUsed>0?", bone meal "+boneMealUsed:""),result);
     }
-    void stop() {
+    @Override public void stop() {
         if(digging!=null){abortDig(digging,digFace);digging=null;}
         stopWalking();player.stopInput();
         try{select(previousSlot);}catch(RuntimeException ignored){}

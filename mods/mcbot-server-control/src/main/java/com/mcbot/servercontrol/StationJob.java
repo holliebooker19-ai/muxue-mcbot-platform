@@ -17,7 +17,9 @@ import static com.mcbot.servercontrol.NativeWorkstation.*;
  * open as expected or is busy with someone else's items is skipped (listed in the receipt) and the next one tried.
  * A job that waits (brewing) keeps the menu open and is ticked until it finishes.
  */
-abstract class StationJob implements GuardDuty.Pausable {
+abstract class StationJob implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(this::detail,true,"Station task fault",true);}
     record Station(BlockPos pos,WorkstationAdapter adapter) {}
     protected final ControlSession.Operation operation;
     protected final BodyPlayer player;
@@ -103,7 +105,7 @@ abstract class StationJob implements GuardDuty.Pausable {
         boolean all=true;for(int slot:slots)all&=quickMove(player,menu,slot);return all;
     }
 
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation)){stop();return;}
         if(!operation.status.equals("running"))return;
         if(open!=null) {
@@ -137,7 +139,7 @@ abstract class StationJob implements GuardDuty.Pausable {
         if(grace==null)grace=new GuardDuty.Grace(deadline-started);
         deadline+=grace.grant(fightMs);
     }
-    void stop() {
+    @Override public void stop() {
         if(navigation!=null)navigation.stop();navigation=null;
         try{closeMenu(player);}catch(RuntimeException ignored){}
         open=null;station=null;

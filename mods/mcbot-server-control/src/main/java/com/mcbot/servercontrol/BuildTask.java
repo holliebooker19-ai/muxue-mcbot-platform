@@ -46,7 +46,9 @@ import static com.mcbot.servercontrol.NativeWorkstation.*;
  * It builds no scaffold corridors: what still cannot be reached is reported.
  * Materials come from the inventory (plain stacks); missing ones fail the build before anything changes.
  */
-final class BuildTask implements GuardDuty.Pausable {
+final class BuildTask implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(this::progress,false,"Build task fault",false);}
     record Target(BlockPos pos,BlockState state,List<Property<?>> checked,Item item,BlockPos extra,boolean late) {
         boolean air(){return state.isAir();}
     }
@@ -228,7 +230,7 @@ final class BuildTask implements GuardDuty.Pausable {
     }
 
     // ---------- the loop ----------
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation)){stop();return;}
         if(!operation.status.equals("running"))return;
         if(now()>=deadline) {
@@ -832,7 +834,7 @@ final class BuildTask implements GuardDuty.Pausable {
         result.addProperty("code","INCOMPLETE");
         operation.finish("failed","INCOMPLETE: placed "+placed+", dug "+dug+"; "+skippedCount+" could not be done (see skippedWhy)",result);
     }
-    void stop() {
+    @Override public void stop() {
         if(digging!=null){abortDig(digging,digFace);digging=null;}
         stopWalking();player.stopInput();
     }

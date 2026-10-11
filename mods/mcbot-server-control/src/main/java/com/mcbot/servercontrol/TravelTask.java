@@ -25,7 +25,9 @@ import static com.mcbot.servercontrol.Protocol.*;
  * a leg is tried straight toward the destination, turned left and right, then shorter. MAX_FAILURES legs in a row
  * without getting closer than ever before fail the walk. Damage stops it, as any walk.
  */
-final class TravelTask implements GuardDuty.Pausable {
+final class TravelTask implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(this::progress,false,null,false);}
     static final int LEG=28,MAX_FAILURES=12,MAX_SWIM_LEG=16;
     // Wide turns walk along a cliff or back out of a dead end (a cave mouth under the hill) to find a way round.
     private static final double[] TURNS={0,35,-35,70,-70,100,-100,135,-135,0,50,-50};
@@ -168,7 +170,7 @@ final class TravelTask implements GuardDuty.Pausable {
         }
         return null;
     }
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation)){stop();return;}
         if(now()>=deadline)throw error("TIMEOUT","Travel time limit reached before the destination");
         Vec3 feet=player.position();
@@ -247,5 +249,5 @@ final class TravelTask implements GuardDuty.Pausable {
     /** Walking a leg on the ground; not while swimming across water. */
     @Override public boolean interruptible(){return swim==null&&player.onGround()&&!player.isInWater();}
     @Override public void resumeAfterGuard(long fightMs){if(navigation!=null){navigation.reset();navigation.rebaseHealth();}deadline+=grace.grant(fightMs);}
-    void stop(){if(navigation!=null)navigation.stop();navigation=null;swim=null;player.stopInput();}
+    @Override public void stop(){if(navigation!=null)navigation.stop();navigation=null;swim=null;player.stopInput();}
 }

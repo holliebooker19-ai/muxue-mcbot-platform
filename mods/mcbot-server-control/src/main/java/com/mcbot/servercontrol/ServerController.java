@@ -44,9 +44,6 @@ final class ServerController implements ControlSession.Game {
     private boolean wasConnected;
     private String lastDimension;
     private ControlSession.Operation active;
-    private long actionDeadline;
-    private ServerPlayer approachPlayer;
-    private Vec3 approachPlayerStart;
     /** Companion posture (follow, wait, seated): kept across operations and ordinary stops, cleared with the lease (docs/companion_state_design.md, section 7). */
     private Posture posture;
     private boolean postureDrove;
@@ -56,25 +53,12 @@ final class ServerController implements ControlSession.Game {
     /** When the duty took the body for the current fight, and what was running then (resumed afterwards, its limit extended). */
     private long dutyFrom;
     private ControlSession.Operation dutyPaused;
-    /** Fight time added to actionDeadline (walking, approaching, going to bed), at most the action's own time limit. */
-    private GuardDuty.Grace actionGrace;
-    private PickupItem pickup;
-    private NativeNavigation navigation;
-    private NativePillar pillar;
-    private WorkstationTask station;
-    private StationJob job;
+    /**
+     * What drives the body for the running operation (docs/companion_state_design.md 8.3): a task, a walk or a pickup;
+     * null for an emote gesture (BodyEmotes drives it) and for the native actions SurvivalActions runs.
+     */
+    private BodyTask task;
     private final SubjectRefs subjectRefs=new SubjectRefs();
-    private TravelTask travel;
-    private FarmTask farm;
-    private BuildTask build;
-    private BreedTask breed;
-    private HuntTask hunt;
-    private BlockPos sleepBed;
-    private BlockPos sitSeat;
-    private ServerPlayer followedPlayer;
-    private net.minecraft.world.entity.LivingEntity retreatTarget;
-    private Vec3 retreatOrigin;
-    private double retreatInitialDistance;
     private int lastDriveTick=Integer.MIN_VALUE;
     private final Consumer<net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post> damageListener=this::receiveDamage;
     private final Consumer<net.neoforged.neoforge.event.entity.player.AttackEntityEvent> attackGuard=SurvivalActions::guardNativeAttack;
@@ -159,16 +143,6 @@ final class ServerController implements ControlSession.Game {
     private void guardFriendlyFire(net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent event){if(GuardCombat.blocksFriendlyFire(player!=null&&event.getSource().getEntity()==player,event.getSource().getDirectEntity()!=null&&event.getSource().getDirectEntity().getTags().contains(GuardCombat.BODY_PROJECTILE_TAG),event.getEntity()==player,GuardCombat.protectedEntity(event.getEntity())))event.setCanceled(true);}
     /** An arrow the body loosed keeps its mark after the body is gone (or its owner reference is), so the guard still knows whose it is. */
     private void markBodyProjectile(net.neoforged.neoforge.event.entity.EntityJoinLevelEvent event){if(player!=null&&!event.getLevel().isClientSide()&&event.getEntity() instanceof net.minecraft.world.entity.projectile.Projectile projectile&&projectile.getOwner()==player)projectile.addTag(GuardCombat.BODY_PROJECTILE_TAG);}
-    private static final String UNCERTAIN_FAULT="Result uncertain: native calls may already have moved items. Observe the inventory and station before acting; do not retry blindly. ";
-    /** A fault in the middle of a workstation, farm or breed tick: the progress report is best effort, since the same fault may break it too. */
-    private JsonObject faultResult(RuntimeException fault,java.util.function.Supplier<JsonObject> detail) {
-        JsonObject result;
-        try{result=detail.get();}catch(RuntimeException ignored){result=null;}
-        if(result==null)result=obj();
-        result.addProperty("code","INTERNAL");result.addProperty("fault",fault.getClass().getSimpleName());
-        if(player!=null)result.add("position",position(player.position()));
-        return result;
-    }
     private void guardFarmland(net.neoforged.neoforge.event.level.BlockEvent.FarmlandTrampleEvent event){if(player!=null&&event.getEntity()==player)event.setCanceled(true);}
     JsonObject call(String method,JsonObject params) {
         reconcile();
@@ -385,20 +359,11 @@ final class ServerController implements ControlSession.Game {
     private boolean dutyMayInterrupt() {
         if(!GuardDuty.bodyFree(survival!=null&&survival.busy(),nativeWriteInProgress(),player.isSleeping(),player.isUsingItem(),dutyDrove,player.containerMenu!=player.inventoryMenu)) return false;
         if(active==null) return true;
-        GuardDuty.Pausable task=pausable();
-        if(task!=null) return task.interruptible();
-        // approach-player is not here: it fails once the player moves, and a fight moves everyone.
-        return navigation!=null&&player.onGround()&&Set.of("follow-player","move-to-position","approach-container","approach-resource","sleep-in-bed","sit").contains(active.name);
-    }
-    private GuardDuty.Pausable pausable() {
-        return pickup!=null?pickup:travel!=null?travel:build!=null?build:farm!=null?farm:breed!=null?breed:hunt!=null?hunt:station!=null?station:job;
+        return task!=null&&task.interruptible();
     }
     /** The fight is over: what was paused plans its way again; only the operation that was paused gets the time back. */
     private void resumeAfterFight(long fightMs) {
-        long extra=active==dutyPaused?fightMs:0;
-        GuardDuty.Pausable task=pausable();
-        if(task!=null){task.resumeAfterGuard(extra);return;}
-        if(navigation!=null){navigation.reset();navigation.rebaseHealth();if(actionGrace!=null)actionDeadline+=actionGrace.grant(extra);}
+        if(task!=null) task.resumeAfterGuard(active==dutyPaused?fightMs:0);
     }
     /** True when the duty drove the body this tick. */
     private boolean tickDuty(BodyPlayer body) {
@@ -485,15 +450,18 @@ final class ServerController implements ControlSession.Game {
         }catch(RuntimeException unknown){sink=null;}
         if(sink==null) {
             pickups.unknown();
+            PickupItem pickup=pickup();
             if(pickup!=null&&pickup.targets(entity))pickup.fail("PICKUP_UNKNOWN","Another mod moved the drop into storage that no installed adapter accounts for");
             return;
         }
         pickups.record(entity.getUUID().toString(),position(entity.position()),original,survival.stackValue(now),session.sessionId(),session.generation(),player.serverLevel().dimension().location().toString(),sink,thrownBy(entity));
+        PickupItem pickup=pickup();
         if(pickup!=null)pickup.picked(entity,true,portion,count,sink);
     }
     void receivePickup(ItemEntityPickupEvent.Post event) {
         if(player==null||survival==null)return;
         ItemEntity entity=event.getItemEntity();
+        PickupItem pickup=pickup();
         if(event.getPlayer()!=player&&(pickup==null||!pickup.targets(entity)))return;
         try {
             JsonObject original=survival.stackValue(event.getOriginalStack()),remaining=survival.stackValue(event.getCurrentStack());
@@ -509,6 +477,8 @@ final class ServerController implements ControlSession.Game {
             return PickupLedger.thrownBy(thrower==null?null:thrower.getUUID(),thrower instanceof Player p?p.getGameProfile().getName():null,thrower instanceof Player,player.getUUID());
         }catch(RuntimeException failure){return null;}
     }
+    /** The pickup task in the slot, for the native pickup events; null when something else runs. */
+    private PickupItem pickup(){return task instanceof PickupItem pickup?pickup:null;}
     @Override public JsonObject watch() { return obj("chat",chat,"chatCursor",chatSequence); }
     /** Gray italic host line to every player; the session already checked length, characters and rate. */
     @Override public void notice(String text) { server.getPlayerList().broadcastSystemMessage(Component.literal(text).withStyle(ChatFormatting.GRAY,ChatFormatting.ITALIC),false); }
@@ -570,33 +540,33 @@ final class ServerController implements ControlSession.Game {
         }
         if(operation.name.equals("look-at")) { look(point(args)); operation.finish("succeeded","Server view rotated",null); return; }
         if(operation.name.equals("approach-container")||operation.name.equals("approach-player")||operation.name.equals("approach-resource")) { beginApproach(operation);return; }
-        if(operation.name.equals("pickup-item")) {pickup=PickupItem.create(operation,player,session,survival,resources);active=operation;pickup.tick();if(!operation.status.equals("running"))stop();return;}
+        if(operation.name.equals("pickup-item")) {PickupItem pickup=PickupItem.create(operation,player,session,survival,resources);task=pickup;active=operation;pickup.tick();if(!operation.status.equals("running"))stop();return;}
         if(operation.name.equals("retreat-from-entity")){beginRetreat(operation);return;}
-        if(operation.name.equals("pillar-up")){requireWalkable();pillar=NativePillar.begin(operation,player,session,survival);active=operation;return;}
+        if(operation.name.equals("pillar-up")){requireWalkable();task=NativePillar.begin(operation,player,session,survival);active=operation;return;}
         if(operation.name.equals("craft-item")||operation.name.equals("smelt-item")) {
-            WorkstationTask task=WorkstationTask.create(operation,player,session);
-            try{task.start();}
-            catch(Protocol.Error e){task.stop();JsonObject result=task.detail();result.addProperty("code",e.code);operation.finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            if(operation.status.equals("running")){station=task;active=operation;}
+            WorkstationTask station=WorkstationTask.create(operation,player,session);
+            try{station.start();}
+            catch(Protocol.Error e){station.stop();JsonObject result=station.detail();result.addProperty("code",e.code);operation.finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
+            if(operation.status.equals("running")){task=station;active=operation;}
             return;
         }
         if(operation.name.equals("workstation-options")){operation.finish("succeeded","Workstation options",StationQuery.run(player,args,subjectRefs));return;}
         if(operation.name.equals("produce-item")||operation.name.equals("modify-item")) {
-            StationJob task=operation.name.equals("produce-item")?new ProduceTask(operation,player,session):new ModifyTask(operation,player,session,subjectRefs);
-            try{task.start();}
-            catch(Protocol.Error e){task.stop();JsonObject result=task.detail();result.addProperty("code",e.code);operation.finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            if(operation.status.equals("running")){job=task;active=operation;}
+            StationJob job=operation.name.equals("produce-item")?new ProduceTask(operation,player,session):new ModifyTask(operation,player,session,subjectRefs);
+            try{job.start();}
+            catch(Protocol.Error e){job.stop();JsonObject result=job.detail();result.addProperty("code",e.code);operation.finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
+            if(operation.status.equals("running")){task=job;active=operation;}
             return;
         }
-        if(operation.name.equals("travel-to")){requireWalkable();travel=new TravelTask(operation,player,session);active=operation;return;}
+        if(operation.name.equals("travel-to")){requireWalkable();task=new TravelTask(operation,player,session);active=operation;return;}
         if(operation.name.equals("build")) {
-            BuildTask task=new BuildTask(operation,player,session);
-            if(args.has("dryRun")&&bool(args,"dryRun")){operation.finish("succeeded","Build plan (nothing changed)",task.plan());return;}
+            BuildTask build=new BuildTask(operation,player,session);
+            if(args.has("dryRun")&&bool(args,"dryRun")){operation.finish("succeeded","Build plan (nothing changed)",build.plan());return;}
             // Not requireWalkable: called again right after a TIMEOUT the body may still be in the air (jumped off a
             // roof, coming down a scaffold); the task waits for it to land before it walks.
             NativeNavigation.conditions(player);if(!connected())throw error("BLOCKED","Body is not connected in authorized survival state");
-            task.start();
-            if(operation.status.equals("running")){build=task;active=operation;}
+            build.start();
+            if(operation.status.equals("running")){task=build;active=operation;}
             return;
         }
         if(operation.name.equals("tend-crops")||operation.name.equals("breed-animals")||operation.name.equals("hunt")) {
@@ -605,24 +575,25 @@ final class ServerController implements ControlSession.Game {
             else if(args.has("center"))center=point(object(args,"center"));
             boolean survey=args.has("survey")&&bool(args,"survey");
             if(operation.name.equals("tend-crops")) {
-                FarmTask task=new FarmTask(operation,player,session,center);
-                if(survey){operation.finish("succeeded","Field survey",task.survey());return;}
-                requireWalkable();task.start();
-                if(operation.status.equals("running")){farm=task;active=operation;}
+                FarmTask farm=new FarmTask(operation,player,session,center);
+                if(survey){operation.finish("succeeded","Field survey",farm.survey());return;}
+                requireWalkable();farm.start();
+                if(operation.status.equals("running")){task=farm;active=operation;}
             } else if(operation.name.equals("hunt")) {
-                HuntTask task=new HuntTask(operation,player,session,center);
-                if(survey){operation.finish("succeeded","Hunt survey",task.survey());return;}
-                requireWalkable();task.start();
-                if(operation.status.equals("running")){hunt=task;active=operation;}
+                HuntTask hunt=new HuntTask(operation,player,session,center);
+                if(survey){operation.finish("succeeded","Hunt survey",hunt.survey());return;}
+                requireWalkable();hunt.start();
+                if(operation.status.equals("running")){task=hunt;active=operation;}
             } else {
-                BreedTask task=new BreedTask(operation,player,session,center);
-                if(survey){operation.finish("succeeded","Animal survey",task.survey());return;}
-                requireWalkable();task.start();
-                if(operation.status.equals("running")){breed=task;active=operation;}
+                BreedTask breed=new BreedTask(operation,player,session,center);
+                if(survey){operation.finish("succeeded","Animal survey",breed.survey());return;}
+                requireWalkable();breed.start();
+                if(operation.status.equals("running")){task=breed;active=operation;}
             }
             return;
         }
         long timeout=(long)bounded(args,"timeoutMs",operation.name.equals("follow-player")?60_000:15_000,500,120_000);
+        ServerPlayer followed=null;
         if(operation.name.equals("move-to-position")) {
             Vec3 target=point(args);
             if(!player.serverLevel().hasChunkAt(BlockPos.containing(target))) throw error("UNLOADED","Target chunk is not loaded; travel-to walks there leg by leg");
@@ -630,10 +601,12 @@ final class ServerController implements ControlSession.Game {
             bounded(args,"tolerance",0.7,0.25,3);
         } else {
             String name=string(args,"player"); bounded(args,"distance",2.5,1,8);
-            followedPlayer=findPlayer(name);
-            if(followedPlayer==null) throw error("INVALID_ARGUMENT","Target player is not within 32 blocks in this dimension");
+            followed=findPlayer(name);
+            if(followed==null) throw error("INVALID_ARGUMENT","Target player is not within 32 blocks in this dimension");
         }
-        requireWalkable(); active=operation;navigation=new NativeNavigation(player,session,operation);actionDeadline=now()+timeout;actionGrace=new GuardDuty.Grace(timeout);
+        requireWalkable();
+        WalkTask walk=new WalkTask(operation,timeout,true);walk.followed=followed;
+        task=walk;active=operation;
     }
     static boolean atomicAction(String name){return (CAPABILITIES.contains(name)||ItemInteractions.capabilities().contains(name))&&!Set.of("nearby-blocks","nearby-resources","companion-pickup","companion-mining","survival-state","assess-tool","navigation-3d","look-around","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","server-posture").contains(name);}
     @Override public boolean nativeWriteInProgress(){return SurvivalActions.nativeWriteInProgress(player);}
@@ -651,81 +624,136 @@ final class ServerController implements ControlSession.Game {
         if(posture!=null&&tickPosture()) return;
         if(active==null) { body.stopInput(); idleGaze(body); return; }
         if(!session.mayDrive(active)) { stop(); return; }
-        if(pickup!=null){pickup.tick();if(active!=null&&!active.status.equals("running"))stop();return;}
-        if(pillar!=null){
-            try{pillar.tick();}
-            catch(Protocol.Error e){finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),obj("code",e.code,"position",position(player.position())));return;}
-            if(active!=null&&!active.status.equals("running"))stop();
-            return;
-        }
-        if(station!=null){
-            try{station.tick();}
-            catch(Protocol.Error e){JsonObject result=station.detail();result.addProperty("code",e.code);result.add("position",position(player.position()));finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            catch(RuntimeException e){finish("unknown",UNCERTAIN_FAULT+"Workstation fault: "+e.getClass().getSimpleName(),faultResult(e,station::detail));return;}
-            if(active!=null&&!active.status.equals("running"))stop();
-            return;
-        }
-        if(job!=null){
-            try{job.tick();}
-            catch(Protocol.Error e){StationJob failed=job;failed.stop();JsonObject result=failed.detail();result.addProperty("code",e.code);result.add("position",position(player.position()));finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            catch(RuntimeException e){StationJob faulted=job;JsonObject result=faultResult(e,faulted::detail);faulted.stop();finish("unknown",UNCERTAIN_FAULT+"Station task fault: "+e.getClass().getSimpleName(),result);return;}
-            if(active!=null&&!active.status.equals("running"))stop();
-            return;
-        }
-        if(build!=null){
-            try{build.tick();}
-            catch(Protocol.Error e){JsonObject result=build.progress();result.addProperty("code",e.code);finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            catch(RuntimeException e){finish("unknown",UNCERTAIN_FAULT+"Build task fault: "+e.getClass().getSimpleName(),faultResult(e,build::progress));return;}
-            if(active!=null&&!active.status.equals("running"))stop();
-            return;
-        }
-        if(hunt!=null){
-            try{hunt.tick();}
-            catch(Protocol.Error e){JsonObject result=hunt.progress();result.addProperty("code",e.code);result.add("position",position(player.position()));finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            catch(RuntimeException e){finish("unknown",UNCERTAIN_FAULT+"Hunt task fault: "+e.getClass().getSimpleName(),faultResult(e,hunt::progress));return;}
-            if(active!=null&&!active.status.equals("running"))stop();
-            return;
-        }
-        if(farm!=null||breed!=null){
-            try{if(farm!=null)farm.tick();else breed.tick();}
-            catch(Protocol.Error e){JsonObject result=farm!=null?farm.progress():breed.progress();result.addProperty("code",e.code);result.add("position",position(player.position()));finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            catch(RuntimeException e){finish("unknown",UNCERTAIN_FAULT+"Farm task fault: "+e.getClass().getSimpleName(),faultResult(e,farm!=null?farm::progress:breed::progress));return;}
-            if(active!=null&&!active.status.equals("running"))stop();
-            return;
-        }
+        if(task!=null) { tickTask(task); return; }
         if(emotes.gesturing()){
             JsonObject result=emotes.gestureResult();
             if(emotes.tickGesture(body))finish("succeeded","Emote done",result);
             return;
         }
-        if(travel!=null){
-            try{travel.tick();}
-            catch(Protocol.Error e){JsonObject result=travel.progress();result.addProperty("code",e.code);finish(e.code.equals("UNKNOWN")?"unknown":"failed",e.code+": "+e.getMessage(),result);return;}
-            if(active!=null&&!active.status.equals("running"))stop();
+        // Every operation left running has a task or a gesture: nothing else could drive this one.
+        finish("failed","Nothing drives this action any more");
+    }
+    /**
+     * One tick of the task in the slot (docs/companion_state_design.md 8.3). A refusal or fault it throws ends the
+     * operation in the shape the task declares (BodyTask.Failure); a task that finished its operation is stopped here.
+     */
+    private void tickTask(BodyTask current) {
+        try { current.tick(); }
+        catch(RuntimeException thrown) {
+            BodyTask.End end=BodyTask.end(current,thrown,()->player==null?null:position(player.position()));
+            if(end==null) throw thrown;
+            finish(end.status(),end.summary(),end.result());
             return;
         }
-        try {
-            if(active.name.equals("approach-container")||active.name.equals("approach-player")||active.name.equals("approach-resource")) {tickApproach();return;}
-            if(active.name.equals("retreat-from-entity")){tickRetreat();return;}
-            if(active.name.equals("sleep-in-bed")){tickSleep();return;}
-            if(active.name.equals("sit")){tickSit();return;}
-            if(now()>=actionDeadline) { finish(active.name.equals("follow-player")?"succeeded":"failed","Movement time limit reached"); return; }
-            Vec3 target;double tolerance;
-            if(active.name.equals("follow-player")) {
-                ServerPlayer followed=findPlayer(string(active.args,"player"));
-                if(followed==null||followed!=followedPlayer)throw error("STALE_TARGET","Followed player left or changed identity/dimension");
-                target=followed.position();tolerance=bounded(active.args,"distance",2.5,1,8);
-            } else {target=point(active.args);tolerance=bounded(active.args,"tolerance",0.7,0.25,3);}
-            if(target.distanceTo(player.position())>32)throw error("OUT_OF_REACH","Target moved beyond navigation range");
-            boolean arrived=navigation.tick(target,feet->feet.distanceTo(target)<=tolerance);
-            if(arrived&&active.name.equals("move-to-position"))finish("succeeded","Reached server-observed target");
-        } catch(Protocol.Error e) { finish("failed",e.code+": "+e.getMessage(),obj("code",e.code,"position",position(player.position()))); }
-        catch(RuntimeException e) { finish("failed","Movement failed: "+e.getClass().getSimpleName()); }
+        if(active!=null&&!active.status.equals("running"))stop();
     }
     /** Head movement only while nothing aims the body: no action and the posture standing still. */
     private void idleGaze(BodyPlayer body){
         if(now()<gazeHold||body.isSleeping()||survival!=null&&survival.busy()||nativeWriteInProgress())return;
         gaze.tick(body,speaker,spokeAt,now());
+    }
+    /**
+     * A bounded walk that ends by itself (docs/companion_state_design.md 8.3): move-to-position, follow-player,
+     * approach-container/-player/-resource, retreat-from-entity, sleep-in-bed and sit. It finishes its operation and
+     * never throws: a refusal ends it as failed with the code and position, any other fault as a movement failure.
+     */
+    private final class WalkTask implements BodyTask {
+        final ControlSession.Operation operation;
+        final NativeNavigation navigation;
+        long deadline;
+        /** Fight time added to the deadline, at most the walk's own limit; none for a retreat. */
+        final GuardDuty.Grace grace;
+        ServerPlayer followed,recipient;
+        Vec3 recipientStart,retreatOrigin;
+        BlockPos bed,seat;
+        net.minecraft.world.entity.LivingEntity threat;
+        double threatDistance;
+        WalkTask(ControlSession.Operation operation,long timeout,boolean graced) {
+            this.operation=operation;navigation=new NativeNavigation(player,session,operation);
+            deadline=now()+timeout;grace=graced?new GuardDuty.Grace(timeout):null;
+        }
+        @Override public Failure failure(){return null;}
+        // approach-player is not here: it fails once the player moves, and a fight moves everyone; a retreat never stops.
+        @Override public boolean interruptible(){return player.onGround()&&Set.of("follow-player","move-to-position","approach-container","approach-resource","sleep-in-bed","sit").contains(operation.name);}
+        @Override public void resumeAfterGuard(long fightMs){navigation.reset();navigation.rebaseHealth();if(grace!=null)deadline+=grace.grant(fightMs);}
+        @Override public void stop(){navigation.stop();}
+        @Override public void tick() {
+            try {
+                if(operation.name.equals("approach-container")||operation.name.equals("approach-player")||operation.name.equals("approach-resource")) {tickApproach();return;}
+                if(operation.name.equals("retreat-from-entity")){tickRetreat();return;}
+                if(operation.name.equals("sleep-in-bed")){tickSleep();return;}
+                if(operation.name.equals("sit")){tickSit();return;}
+                if(now()>=deadline) { finish(operation.name.equals("follow-player")?"succeeded":"failed","Movement time limit reached"); return; }
+                Vec3 target;double tolerance;
+                if(operation.name.equals("follow-player")) {
+                    ServerPlayer current=findPlayer(string(operation.args,"player"));
+                    if(current==null||current!=followed)throw error("STALE_TARGET","Followed player left or changed identity/dimension");
+                    target=current.position();tolerance=bounded(operation.args,"distance",2.5,1,8);
+                } else {target=point(operation.args);tolerance=bounded(operation.args,"tolerance",0.7,0.25,3);}
+                if(target.distanceTo(player.position())>32)throw error("OUT_OF_REACH","Target moved beyond navigation range");
+                boolean arrived=navigation.tick(target,feet->feet.distanceTo(target)<=tolerance);
+                if(arrived&&operation.name.equals("move-to-position"))finish("succeeded","Reached server-observed target");
+            } catch(Protocol.Error e) { finish("failed",e.code+": "+e.getMessage(),obj("code",e.code,"position",position(player.position()))); }
+            catch(RuntimeException e) { finish("failed","Movement failed: "+e.getClass().getSimpleName()); }
+        }
+        private void tickApproach() {
+            if(now()>=deadline)throw error("TIMEOUT","Approach time limit reached");
+            FlatApproach geometry=new FlatApproach(player);Vec3 destination;
+            java.util.function.Predicate<Vec3> goal;
+            CompanionMiningGuard miningGuard=null;
+            if(operation.name.equals("approach-container")||operation.name.equals("approach-resource")) {
+                ResourceTargets.Target resource=operation.name.equals("approach-resource")?resources.require(player,string(operation.args,"targetToken")):null;
+                BlockPos pos=resource!=null?resource.position():targets.require(player,string(operation.args,"targetToken")).position();
+                miningGuard=resource==null?null:resource.miningGuard();
+                destination=Vec3.atCenterOf(pos);
+                // A log may be reached through leaves (the gathering task breaks them before digging); ores and containers need a clear line.
+                boolean log=resource!=null&&resource.miningGuard()==null&&ResourceCatalog.kind(resource.state())==ResourceCatalog.Kind.LOG;
+                goal=log?feet->geometry.reachThroughLeaves(feet,pos):feet->geometry.containerReach(feet,pos);
+            } else {
+                ServerPlayer actual=findPlayer(string(operation.args,"player"));
+                if(actual!=recipient)throw error("STALE_TARGET","Recipient entity changed or left local range/dimension");
+                if(actual.position().distanceTo(recipientStart)>0.5)throw error("TARGET_MOVED","Recipient moved during bounded approach");
+                destination=actual.position();goal=feet->geometry.playerReach(feet,actual,bounded(operation.args,"distance",1.3,1,1.5));
+            }
+            boolean arrived;
+            if(miningGuard==null)arrived=navigation.tick(destination,goal);
+            else {
+                CompanionMiningGuard bound=miningGuard;
+                try {arrived=navigation.tick(destination,goal,bound::allows);}
+                catch(Protocol.Error failure){if(failure.code.equals("OUT_OF_REACH"))throw error("COMPANION_OUT_OF_RANGE","Mining approach left the live companion radius");throw failure;}
+            }
+            if(arrived)finish("succeeded","Reached verified interaction position",approachResult(operation,recipient));
+        }
+        private void tickSleep() {
+            if(now()>=deadline)throw error("TIMEOUT","Did not reach the bed in time");
+            var state=NativeSleep.requireFreeBed(player,bed);BlockPos at=bed;
+            if(!NativeSleep.inReach(player.position(),at,state)&&!navigation.tick(Vec3.atCenterOf(at),feet->NativeSleep.inReach(feet,at,state)))return;
+            player.stopInput();
+            finish("succeeded","Asleep in bed",NativeSleep.lieDown(player,at));
+        }
+        private void tickSit() {
+            if(now()>=deadline) throw error("TIMEOUT","Did not reach the seat in time");
+            BlockPos at=seat;NativeSeat.requireFreeSeat(player,at);
+            if(!NativeSeat.inReach(player.position(),at)&&!navigation.tick(Vec3.atCenterOf(at),feet->NativeSeat.inReach(feet,at)))return;
+            player.stopInput();
+            JsonObject result=NativeSeat.sitDown(player,at,ServerController.this::look,()->{});
+            // Sitting becomes the posture: a follow or wait ends here, the guard stays (it keeps the revision of what it replaced).
+            long revision=posture==null?0:posture.revision; clearPosture(); posture=Posture.seated(at,revision,postureView());
+            finish("succeeded","Sitting on the seat",result);
+        }
+        private void tickRetreat() {
+            if(now()>=deadline)throw error("TIMEOUT","Safe retreat time limit reached");
+            var current=ThreatSense.lookup(player,string(operation.args,"entityId"),string(operation.args,"expectedDimension"));
+            if(current!=threat)throw error("STALE_TARGET","Retreat threat identity changed");
+            ThreatSense.requireEligible(player,current);
+            Vec3 enemy=current.position(),away=retreatOrigin.subtract(enemy);double requested=bounded(operation.args,"distance",4,1.5,6);
+            if(away.horizontalDistance()<0.001)away=new Vec3(1,0,0);
+            Vec3 destination=retreatOrigin.add(new Vec3(away.x,0,away.z).normalize().scale(4));
+            double wanted=Math.max(requested,threatDistance+1),currentDistance=player.position().distanceTo(enemy);
+            java.util.function.Predicate<Vec3> allowed=feet->feet.subtract(retreatOrigin).horizontalDistance()<=4&&Math.abs(feet.y-retreatOrigin.y)<=2.5&&feet.distanceTo(enemy)>=currentDistance-0.3;
+            if(navigation.tick(destination,feet->feet.distanceTo(enemy)>=wanted,allowed))
+                finish("succeeded","Reached a verified safer retreat position",obj("entityId",current.getUUID().toString(),"position",position(player.position()),"distance",player.position().distanceTo(enemy),"requestedDistance",requested,"travelLimit",4));
+        }
     }
     private void beginApproach(ControlSession.Operation operation) {
         requireWalkable();
@@ -743,42 +771,15 @@ final class ServerController implements ControlSession.Game {
             if(recipient==null) throw error("STALE_TARGET","Recipient left local range or dimension");
             if(operation.args.has("expectedEntityId")&&!recipient.getUUID().toString().equals(string(operation.args,"expectedEntityId"))) throw error("STALE_TARGET","Recipient entity identity changed");
         }
-        approachPlayer=recipient;approachPlayerStart=recipient==null?null:recipient.position();
-        active=operation;navigation=new NativeNavigation(player,session,operation);actionDeadline=now()+timeout;actionGrace=new GuardDuty.Grace(timeout);
+        WalkTask walk=new WalkTask(operation,timeout,true);
+        walk.recipient=recipient;walk.recipientStart=recipient==null?null:recipient.position();
+        task=walk;active=operation;
     }
     private JsonObject approachResult(ControlSession.Operation operation,ServerPlayer recipient) {
         JsonObject result=obj("position",position(player.position()));
         if(operation.name.equals("approach-container")||operation.name.equals("approach-resource")) result.addProperty("targetToken",string(operation.args,"targetToken"));
         else {result.addProperty("player",recipient.getGameProfile().getName());result.addProperty("entityId",recipient.getUUID().toString());}
         return result;
-    }
-    private void tickApproach() {
-        if(now()>=actionDeadline)throw error("TIMEOUT","Approach time limit reached");
-        FlatApproach geometry=new FlatApproach(player);Vec3 destination;
-        java.util.function.Predicate<Vec3> goal;
-        CompanionMiningGuard miningGuard=null;
-        if(active.name.equals("approach-container")||active.name.equals("approach-resource")) {
-            ResourceTargets.Target resource=active.name.equals("approach-resource")?resources.require(player,string(active.args,"targetToken")):null;
-            BlockPos pos=resource!=null?resource.position():targets.require(player,string(active.args,"targetToken")).position();
-            miningGuard=resource==null?null:resource.miningGuard();
-            destination=Vec3.atCenterOf(pos);
-            // A log may be reached through leaves (the gathering task breaks them before digging); ores and containers need a clear line.
-            boolean log=resource!=null&&resource.miningGuard()==null&&ResourceCatalog.kind(resource.state())==ResourceCatalog.Kind.LOG;
-            goal=log?feet->geometry.reachThroughLeaves(feet,pos):feet->geometry.containerReach(feet,pos);
-        } else {
-            ServerPlayer actual=findPlayer(string(active.args,"player"));
-            if(actual!=approachPlayer)throw error("STALE_TARGET","Recipient entity changed or left local range/dimension");
-            if(actual.position().distanceTo(approachPlayerStart)>0.5)throw error("TARGET_MOVED","Recipient moved during bounded approach");
-            destination=actual.position();goal=feet->geometry.playerReach(feet,actual,bounded(active.args,"distance",1.3,1,1.5));
-        }
-        boolean arrived;
-        if(miningGuard==null)arrived=navigation.tick(destination,goal);
-        else {
-            CompanionMiningGuard bound=miningGuard;
-            try {arrived=navigation.tick(destination,goal,bound::allows);}
-            catch(Protocol.Error failure){if(failure.code.equals("OUT_OF_REACH"))throw error("COMPANION_OUT_OF_RANGE","Mining approach left the live companion radius");throw failure;}
-        }
-        if(arrived)finish("succeeded","Reached verified interaction position",approachResult(active,approachPlayer));
     }
     private void requireWalkable() {
         NativeNavigation.conditions(player);
@@ -798,16 +799,8 @@ final class ServerController implements ControlSession.Game {
         if(bed==null) throw error("NO_BED","No free bed within 16 blocks in loaded chunks");
         if(Vec3.atCenterOf(bed).distanceTo(player.position())>32) throw error("OUT_OF_REACH","The bed is more than 32 blocks away");
         requireWalkable();
-        sleepBed=bed;active=operation;navigation=new NativeNavigation(player,session,operation);
-        long timeout=(long)bounded(operation.args,"timeoutMs",30_000,500,120_000);
-        actionDeadline=now()+timeout;actionGrace=new GuardDuty.Grace(timeout);
-    }
-    private void tickSleep() {
-        if(now()>=actionDeadline)throw error("TIMEOUT","Did not reach the bed in time");
-        var state=NativeSleep.requireFreeBed(player,sleepBed);BlockPos bed=sleepBed;
-        if(!NativeSleep.inReach(player.position(),bed,state)&&!navigation.tick(Vec3.atCenterOf(bed),feet->NativeSleep.inReach(feet,bed,state)))return;
-        player.stopInput();
-        finish("succeeded","Asleep in bed",NativeSleep.lieDown(player,bed));
+        WalkTask walk=new WalkTask(operation,(long)bounded(operation.args,"timeoutMs",30_000,500,120_000),true);walk.bed=bed;
+        task=walk;active=operation;
     }
     /**
      * Walk to a free seat (the given block, or the nearest within 8 blocks) and sit like a player right-clicking it.
@@ -831,41 +824,18 @@ final class ServerController implements ControlSession.Game {
         }
         if(Vec3.atCenterOf(seat).distanceTo(player.position())>32) throw error("OUT_OF_REACH","The seat is more than 32 blocks away");
         requireWalkable();
-        sitSeat=seat;active=operation;navigation=new NativeNavigation(player,session,operation);
-        long timeout=(long)bounded(operation.args,"timeoutMs",30_000,500,120_000);
-        actionDeadline=now()+timeout;actionGrace=new GuardDuty.Grace(timeout);
-    }
-    private void tickSit() {
-        if(now()>=actionDeadline) throw error("TIMEOUT","Did not reach the seat in time");
-        BlockPos seat=sitSeat;NativeSeat.requireFreeSeat(player,seat);
-        if(!NativeSeat.inReach(player.position(),seat)&&!navigation.tick(Vec3.atCenterOf(seat),feet->NativeSeat.inReach(feet,seat)))return;
-        player.stopInput();
-        JsonObject result=NativeSeat.sitDown(player,seat,this::look,()->{});
-        // Sitting becomes the posture: a follow or wait ends here, the guard stays (it keeps the revision of what it replaced).
-        long revision=posture==null?0:posture.revision; clearPosture(); posture=Posture.seated(seat,revision,postureView());
-        finish("succeeded","Sitting on the seat",result);
+        WalkTask walk=new WalkTask(operation,(long)bounded(operation.args,"timeoutMs",30_000,500,120_000),true);walk.seat=seat;
+        task=walk;active=operation;
     }
     private void beginRetreat(ControlSession.Operation operation) {
         requireWalkable();bounded(operation.args,"distance",4,1.5,6);
-        retreatTarget=ThreatSense.lookup(player,string(operation.args,"entityId"),string(operation.args,"expectedDimension"));
-        ThreatSense.requireEligible(player,retreatTarget);
-        retreatInitialDistance=retreatTarget.distanceTo(player);
-        if(retreatInitialDistance>8)throw error("OUT_OF_REACH","Retreat threat must start within eight blocks");
-        retreatOrigin=player.position();active=operation;navigation=new NativeNavigation(player,session,operation);
-        actionDeadline=now()+(long)bounded(operation.args,"timeoutMs",3000,500,5000);actionGrace=null;
-    }
-    private void tickRetreat() {
-        if(now()>=actionDeadline)throw error("TIMEOUT","Safe retreat time limit reached");
-        var current=ThreatSense.lookup(player,string(active.args,"entityId"),string(active.args,"expectedDimension"));
-        if(current!=retreatTarget)throw error("STALE_TARGET","Retreat threat identity changed");
-        ThreatSense.requireEligible(player,current);
-        Vec3 enemy=current.position(),away=retreatOrigin.subtract(enemy);double requested=bounded(active.args,"distance",4,1.5,6);
-        if(away.horizontalDistance()<0.001)away=new Vec3(1,0,0);
-        Vec3 destination=retreatOrigin.add(new Vec3(away.x,0,away.z).normalize().scale(4));
-        double wanted=Math.max(requested,retreatInitialDistance+1),currentDistance=player.position().distanceTo(enemy);
-        java.util.function.Predicate<Vec3> allowed=feet->feet.subtract(retreatOrigin).horizontalDistance()<=4&&Math.abs(feet.y-retreatOrigin.y)<=2.5&&feet.distanceTo(enemy)>=currentDistance-0.3;
-        if(navigation.tick(destination,feet->feet.distanceTo(enemy)>=wanted,allowed))
-            finish("succeeded","Reached a verified safer retreat position",obj("entityId",current.getUUID().toString(),"position",position(player.position()),"distance",player.position().distanceTo(enemy),"requestedDistance",requested,"travelLimit",4));
+        var threat=ThreatSense.lookup(player,string(operation.args,"entityId"),string(operation.args,"expectedDimension"));
+        ThreatSense.requireEligible(player,threat);
+        double distance=threat.distanceTo(player);
+        if(distance>8)throw error("OUT_OF_REACH","Retreat threat must start within eight blocks");
+        WalkTask walk=new WalkTask(operation,(long)bounded(operation.args,"timeoutMs",3000,500,5000),false);
+        walk.threat=threat;walk.threatDistance=distance;walk.retreatOrigin=player.position();
+        task=walk;active=operation;
     }
     private ServerPlayer findPlayer(String name) {
         ServerPlayer target=server.getPlayerList().getPlayerByName(name);
@@ -875,7 +845,7 @@ final class ServerController implements ControlSession.Game {
         finish(status,summary,obj("position",position(player.position())));
     }
     private void finish(String status,String summary,JsonObject result) {
-        if(navigation!=null)result.add("navigation",navigation.diagnostics());
+        if(task instanceof WalkTask walk)result.add("navigation",walk.navigation.diagnostics());
         // A built-in gesture (or another KEEPS/HOLDS action) that ends normally leaves the posture driving: no 3-second pause.
         boolean quiet=active!=null&&posture!=null&&posture.endsQuietly(active.name);
         if(active!=null) active.finish(status,summary,result);
@@ -883,7 +853,7 @@ final class ServerController implements ControlSession.Game {
     }
     @Override public void stop() { stopBody(true); }
     /** Ends the running action. The posture waits RESUME_AFTER_MS before it drives again, unless the action ended normally and left it alone (finish). */
-    private void stopBody(boolean postureTail) { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;actionGrace=null;active=null;pillar=null;emotes.cancelGesture(player);if(station!=null)station.stop();station=null;if(job!=null)job.stop();job=null;if(travel!=null)travel.stop();travel=null;if(farm!=null)farm.stop();farm=null;if(build!=null)build.stop();build=null;if(breed!=null)breed.stop();breed=null;if(hunt!=null)hunt.stop();hunt=null;sleepBed=null;sitSeat=null;if(navigation!=null)navigation.stop();navigation=null;followedPlayer=null;retreatTarget=null;retreatOrigin=null;approachPlayer=null;approachPlayerStart=null; if(posture!=null&&postureTail) posture.interrupt();if(pickup!=null)pickup.stop();pickup=null; if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
+    private void stopBody(boolean postureTail) { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;active=null;emotes.cancelGesture(player);BodyTask ended=task;task=null;if(ended!=null)ended.stop(); if(posture!=null&&postureTail) posture.interrupt(); if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
     @Override public void abort(ControlSession.Operation operation) { if(active==operation) stop();else if(survival!=null) survival.abort(operation); }
     @Override public boolean leave() {
         if(player==null)return false;

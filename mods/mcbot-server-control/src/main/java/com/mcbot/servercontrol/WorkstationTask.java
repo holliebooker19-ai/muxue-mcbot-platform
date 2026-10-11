@@ -28,7 +28,9 @@ import static com.mcbot.servercontrol.NativeWorkstation.*;
  * Without a crafting grid nearby a 3x3 recipe may place a crafting table from the inventory, making one from planks
  * (or a log) in the own 2x2 grid first when there is none.
  */
-final class WorkstationTask implements GuardDuty.Pausable {
+final class WorkstationTask implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(this::detail,true,"Workstation fault",false);}
     private record Station(BlockPos pos,WorkstationAdapter adapter) {}
     private final ControlSession.Operation operation;
     private final BodyPlayer player;
@@ -318,7 +320,7 @@ final class WorkstationTask implements GuardDuty.Pausable {
         if(grace==null)grace=new GuardDuty.Grace(deadline-started);
         deadline+=grace.grant(fightMs);
     }
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation)){stop();return;}
         if(!operation.status.equals("running"))return;
         if(now()>=deadline&&furnace==null)throw error("TIMEOUT","Workstation task time limit reached");
@@ -343,7 +345,7 @@ final class WorkstationTask implements GuardDuty.Pausable {
             craftIn(menu,layout,recipesAt(adapter,state),target);station=null;
         } else smeltAt(station);
     }
-    void stop() {
+    @Override public void stop() {
         if(navigation!=null)navigation.stop();navigation=null;
         try{closeMenu(player);}catch(RuntimeException ignored){}
         furnace=null;station=null;

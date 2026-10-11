@@ -21,7 +21,9 @@ import static com.mcbot.servercontrol.NativeWorkstation.*;
  * sweep). Never players, villagers and traders, golems, owned or leashed animals, anything with a name, babies, or
  * creepers. Drops are picked up only by walking over them, as vanilla does. Stops when health falls to `lowHealth`.
  */
-final class HuntTask implements GuardDuty.Pausable {
+final class HuntTask implements BodyTask {
+    /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return new BodyTask.Failure(this::progress,true,"Hunt task fault",false);}
     static final int MAX_RADIUS=16,WALK_MS=15_000;
     private final ControlSession.Operation operation;
     private final BodyPlayer player;
@@ -92,7 +94,7 @@ final class HuntTask implements GuardDuty.Pausable {
         }
         player.connection.handleSetCarriedItem(new ServerboundSetCarriedItemPacket(best));
     }
-    void tick() {
+    @Override public void tick() {
         if(!session.mayDrive(operation)){stop();return;}
         if(!operation.status.equals("running"))return;
         if(player.getHealth()<=lowHealth){finish("LOW_HEALTH");return;}
@@ -153,5 +155,5 @@ final class HuntTask implements GuardDuty.Pausable {
         if(killed.isEmpty()){operation.finish("failed",(code!=null?code:"UNREACHABLE")+": killed none",result);return;}
         operation.finish("succeeded",(code!=null?code+": ":"")+"Killed "+what,result);
     }
-    void stop(){stopWalking();player.stopInput();target=null;}
+    @Override public void stop(){stopWalking();player.stopInput();target=null;}
 }

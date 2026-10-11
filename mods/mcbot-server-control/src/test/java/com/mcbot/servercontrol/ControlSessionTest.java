@@ -307,7 +307,7 @@ public final class ControlSessionTest {
         InteractionObservationTest.run();
         ApproachSafetyTest.run();
         SlotClickRulesTest.run();
-        FollowCompanionTest.run();PostureTest.run();
+        FollowCompanionTest.run();PostureTest.run();BodyTaskTest.run();
         ResourcePickupTest.run();
         CompanionMiningTest.run();
         CompanionPickupTest.run();

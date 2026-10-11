@@ -11,7 +11,9 @@ import net.minecraft.world.phys.*;
 import static com.mcbot.servercontrol.Protocol.*;
 
 /** Bounded approach to one real dropped entity. Vanilla collision does the pickup, the Post event confirms it. */
-final class PickupItem implements GuardDuty.Pausable {
+final class PickupItem implements BodyTask {
+    /** It ends its operation itself (fail): nothing tick throws is turned into an end for it (BodyTask, docs/companion_state_design.md 8.3). */
+    @Override public BodyTask.Failure failure(){return null;}
     interface View {
         boolean mayDrive();void refresh();Vec3 feet();float health();
         Object identity();JsonObject stack();Vec3 target();boolean available();boolean eligible();
@@ -74,7 +76,7 @@ final class PickupItem implements GuardDuty.Pausable {
     static boolean arrivalStand(Vec3 feet,Predicate<Vec3> inReach) {
         return FlatApproach.arrivalStand(feet,inReach);
     }
-    void tick() {
+    @Override public void tick() {
         if(stopped||!operation.status.equals("running")){stop();return;}
         if(!view.mayDrive()){stop();return;}
         try {
@@ -123,7 +125,7 @@ final class PickupItem implements GuardDuty.Pausable {
         view.resetNavigation();deadline+=grace.grant(fightMs);
     }
     void fail(String code,String message){operation.finish("failed",code+": "+message,result(code));stop();}
-    void stop(){stopped=true;route=null;view.cancelNavigation();view.stop();}
+    @Override public void stop(){stopped=true;route=null;view.cancelNavigation();view.stop();}
     static PickupItem create(ControlSession.Operation operation,BodyPlayer body,ControlSession session,SurvivalActions survival,ResourceTargets resources) {
         UUID uuid;
         try {uuid=UUID.fromString(string(operation.args,"entityId"));}catch(IllegalArgumentException invalid){throw error("INVALID_ARGUMENT","entityId must be a UUID");}
