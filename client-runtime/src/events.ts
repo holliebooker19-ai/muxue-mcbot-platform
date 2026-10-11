@@ -41,6 +41,7 @@ export class EventJournal {
   private notifiedOperations = new Set<string>();
   private tracedOperations = new Set<string>();
   private operationListeners: ((operation: Operation) => void)[] = [];
+  private chatListeners: ((player: string, message: string) => void)[] = [];
   private sleepers?: Set<string>;
   private asleep?: boolean;
   private home?: () => Place | undefined;
@@ -102,6 +103,8 @@ export class EventJournal {
     if (operation.status === 'running') return;
     this.traceOperation(operation);
   }
+  /** Called with every player chat line once it is an event (a player halting the body in chat, player-stop.ts). */
+  onPlayerChat(listener: (player: string, message: string) => void): void { this.chatListeners.push(listener); }
   /** Called once with every finished operation, whichever way its result arrived (machine bookkeeping). */
   onOperation(listener: (operation: Operation) => void): void { this.operationListeners.push(listener); }
   private traceOperation(operation: Operation): void {
@@ -146,6 +149,7 @@ export class EventJournal {
       if (chat.username && (chat.username === this.username || this.botPlayers.includes(chat.username))) continue;
       // Unknown plugin/system chat retains its text, but cannot become an authenticated player command.
       this.add(chat.username ? 'chat' : 'system_chat', chat.username ? `${chat.username}: ${chat.message}` : chat.message);
+      if (chat.username) for (const listener of this.chatListeners) { try { listener(chat.username, chat.message); } catch { /* a listener never breaks ingesting */ } }
     }
     this.chatCursor = Math.max(this.chatCursor ?? 0, observation.chatCursor);
     this.ingestSleep(observation);
@@ -259,6 +263,8 @@ export class EventJournal {
     if (this.asleep === true && !observation.sleeping) this.add('woke', `${observation.username} 已起床（天亮、受伤或被叫醒）。`);
     this.asleep = observation.sleeping;
   }
+  /** Hosted: the driver reads this journal and skips what the model already got (cursor and consumed files). */
+  get hosted(): boolean { return !!this.consumedFile; }
   latestSeq(): number { return this.seq; }
   deliveredSeq(): number {
     if (!this.cursorFile) return 0;

@@ -60,7 +60,9 @@ export async function lastDeath(scope, { timeoutMs = 5000 } = {}) {
   } catch { return null; }
 }
 
-export function createServerBodyControl({ scope, runtimeDir, controllerId, isStop, isNewTask,
+// revokeOnStop: whether a stop word revokes control here before onStop. The hosted driver says no while the runtime halts the
+// body in place itself (client-runtime/src/player-stop.ts) and only falls back to revoke when that is not confirmed.
+export function createServerBodyControl({ scope, runtimeDir, controllerId, isStop, isNewTask, revokeOnStop = () => true,
   onStop, onNewTask, onLost = () => {}, botPlayers = [], log = () => {}, intervalMs = 500, requestTimeoutMs = 1800 }) {
   const file = path.join(runtimeDir, `server-control-${scope.username}.json`);
   let cached = null, cursor = 0, observedCursor = 0, pending = [], stopped = false, revoking = 0, polling = false, timer = null, closed = false;
@@ -165,7 +167,9 @@ export function createServerBodyControl({ scope, runtimeDir, controllerId, isSto
       }
       // Scan stops before delivering queued work. A later stop cancels every earlier pending task.
       const stop = fresh.findLast(isStop);
-      if (stop) {
+      if (stop && !stopped && !revoking && !revokeOnStop()) {
+        Promise.resolve(onStop(stop, owner)).catch(error => log(`服务端停止收尾：${error.code || 'CONTROL_ERROR'}`));
+      } else if (stop) {
         await revoke(owner);
         if (!isCurrent(owner)) return;
         cursor = Math.max(cursor, stop.watchSeq);

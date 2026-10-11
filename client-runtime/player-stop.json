@@ -1,0 +1,6 @@
+{
+  "$comment": "What a player says in chat to halt the body (docs/companion_experience_review.md item 1). The whole message, or the name/nickname then the word; trailing spaces and !！。.,， are fine. pause: what runs stops and the follow/wait pauses where it is, protection stays. cancel: what runs, the follow/wait and protection all end. Either way the conversation goes on. addressedPause counts only after the name or nickname. Read by the runtime (src/player-stop.ts) and the hosting driver (scripts/companion.mjs).",
+  "pause": ["等一下", "等等"],
+  "cancel": ["停", "停下", "停止", "别挖", "别挖了", "别建", "别建了", "stop"],
+  "addressedPause": ["暂停"]
+}

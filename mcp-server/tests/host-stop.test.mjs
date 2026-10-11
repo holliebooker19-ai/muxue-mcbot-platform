@@ -305,7 +305,8 @@ async function fixture() {
 }
 
 for (const agent of ['claude', 'codex']) for (const channel of ['watch', 'journal']) {
-  test(`宿主/${agent}/${channel}：描述不revoke，忙时真叫停独立撤销，旧任务不重放，新任务只交付一次`, async () => {
+  // 这里没有运行端（不会发 player_stop），所以叫停等满 STOP_CONFIRM_MS 后走宿主自己的撤销：运行端卡住时的兜底。
+  test(`宿主/${agent}/${channel}：描述不revoke，忙时叫停运行端没确认就独立撤销，旧任务不重放，新任务只交付一次`, async () => {
     const f = await fixture();
     const runtime = path.join(f.dir, 'runtime'); fs.mkdirSync(runtime);
     const config = path.join(f.dir, 'mcp.json');
@@ -347,7 +348,10 @@ for (const agent of ['claude', 'codex']) for (const channel of ['watch', 'journa
       const journalBeforeStop = fs.readFileSync(F.events);
       if (channel === 'watch') f.add('小克别挖了');
       else journal('小克，停下！', 'whisper');
-      await waitFor(() => output.includes('身体控制已撤销，等待新的明确指令'), '无需模型完成的宿主撤销确认');
+      await waitFor(() => output.includes('玩家叫停：交给运行端原地停下'), '先交给运行端');
+      assert.equal(f.state.revokes, 0, '确认期内不撤销');
+      await waitFor(() => output.includes('身体控制已撤销，等待新的明确指令'), '运行端没确认，无需模型完成的宿主撤销确认', 20000);
+      assert.match(output, /玩家叫停，运行端没确认停下/);
       assert.equal(f.state.revokes, 1);
       assert.equal(f.state.claims, 1, '停止确认不自动重开旧任务');
       if (channel === 'watch') assert.deepEqual(fs.readFileSync(F.events), journalBeforeStop, 'journal冻结仍能独立叫停');
@@ -370,6 +374,50 @@ for (const agent of ['claude', 'codex']) for (const channel of ['watch', 'journa
     }
   });
 }
+
+for (const channel of ['watch', 'journal']) test(`宿主/${channel}：叫停由运行端原地停下（player_stop 确认），不撤销控制、不结束 Agent，叫停这句和确认一起交给 Agent`, async () => {
+  const f = await fixture();
+  const runtime = path.join(f.dir, 'runtime'); fs.mkdirSync(runtime);
+  const config = path.join(f.dir, 'mcp.json');
+  fs.writeFileSync(config, JSON.stringify({ mcpServers: { minecraft: { command: process.execPath,
+    args: ['not-executed.mjs', '--body', 'server', '--connection-file', f.scope.connectionFile, '--world-id', f.scope.worldId] } } }));
+  const F = runtimeFiles(runtime, f.scope.username), agentLog = path.join(f.dir, 'agent.jsonl');
+  const records = () => { try { return fs.readFileSync(agentLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse); } catch { return []; } };
+  const turns = () => records().filter(r => r.kind === 'turn');
+  let seq = 0, output = '';
+  const journal = (text, type = 'chat') => fs.appendFileSync(F.events, JSON.stringify({ session: 'regression-journal', seq: ++seq, timestamp: Date.now(), type, text }) + '\n');
+  const driver = spawn(process.execPath, [path.join(ROOT, 'scripts/companion.mjs'), '--agent', 'claude',
+    '--body', 'server', '--name', f.scope.username, '--nickname', '小克', '--mcp-config', config, '--headless'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env,
+      COMPANION_RUNTIME_DIR: runtime, COMPANION_MEMORY_DIR: path.join(f.dir, 'memory'),
+      COMPANION_AGENT_CMD: JSON.stringify([process.execPath, path.join(ROOT, 'mcp-server/tests/fixtures/fake-server-agent.mjs')]),
+      FAKE_SERVER_AGENT: 'claude', FAKE_AGENT_LOG: agentLog, FAKE_AGENT_CLOSE_DELAY_MS: '500',
+    },
+  });
+  driver.stdout.on('data', data => { output += data; }); driver.stderr.on('data', data => { output += data; });
+  const exited = new Promise((resolve, reject) => { driver.once('exit', resolve); driver.once('error', reject); });
+  try {
+    await waitFor(() => f.state.claims === 1 && turns().length === 1, '启动轮');
+    if (channel === 'watch') f.add('等一下');
+    journal('tester: 等一下');
+    await waitFor(() => output.includes('玩家叫停：交给运行端原地停下'), '交给运行端');
+    await sleep(1000);
+    assert.equal(turns().length, 1, '叫停这句自己不叫醒 Agent');
+    journal('tester 说「等一下」：build 停了，保护照旧。', 'player_stop');
+    await waitFor(() => turns().some(r => r.text.includes('player_stop')), '确认后给 Agent 一轮');
+    const turn = turns().find(r => r.text.includes('player_stop'));
+    assert.match(turn.text, /chat: tester: 等一下[\s\S]*player_stop: tester 说「等一下」/);
+    assert.match(output, /运行端已原地停下/);
+    assert.equal(f.state.revokes, 0); assert.equal(f.state.claims, 1);
+    assert.equal(records().filter(r => r.kind === 'start').length, 1, '同一个 Agent 进程');
+    assert.equal(records().filter(r => r.kind === 'stdin_closing').length, 0);
+  } finally {
+    fs.writeFileSync(F.stop, '');
+    try { await waitFor(() => driver.exitCode !== null || driver.signalCode !== null, '宿主退出', 10000); }
+    catch { driver.kill('SIGKILL'); }
+    await exited; await f.close();
+  }
+});
 
 test('真实分类器接入watch：旧watch的叫停不能撤销新租约', async () => {
   const f = await fixture();

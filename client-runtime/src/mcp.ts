@@ -2,7 +2,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z, type ZodRawShape } from 'zod';
 import { BodyError, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
-import { EventJournal } from './events.js';
+import { EventJournal, type GameEvent } from './events.js';
+import type { PlayerStop } from './player-stop.js';
 import { ContainerTasks } from './tasks.js';
 import { CompanionMode, FOLLOW_DISTANCE, hasCompanionMode, type CompanionRequest } from './companion-mode.js';
 import { GatherTasks } from './gather-tasks.js';
@@ -27,7 +28,7 @@ const registryId = z.string().regex(/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('ID
 const resourceSelector = z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('Block ID or tag: minecraft:oak_log, #minecraft:logs, #c:ores, #c:ores/iron, #c:stones');
 const timeoutMs = z.number().int().min(500).max(120000).optional();
 /** chatFloor: ServerBody claim chatCursor; chat at or before it predates this control and is withheld from the model. */
-export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; meetWatch?: MeetWatch; blueprints?: BlueprintShelf } = {}): McpServer {
+export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; meetWatch?: MeetWatch; blueprints?: BlueprintShelf; playerStop?: PlayerStop } = {}): McpServer {
   const server = new McpServer({ name: 'mcbot-client-runtime', version: '0.1.0' });
   const serverObserved = rawBody.hello.backend === 'server';
   const tasks = options.tasks ?? new ContainerTasks(rawBody, Date.now, operation => events.deliverOperation(operation));
@@ -73,6 +74,31 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const serverSlotComponents: ZodRawShape = serverObserved ? { expectedComponents: completeComponents, expectedCarriedComponents: completeComponents } : {};
   let eventCursor = 0;
   const returnedSeqs = new Set<number>();
+  /** Events the model has not had yet: not delivered by the driver, not returned by wait-for-events or along with a tool result. */
+  const freshEvents = (types?: string[]) => {
+    eventCursor = Math.max(eventCursor, events.deliveredSeq());
+    for (const seq of returnedSeqs) if (seq <= eventCursor) returnedSeqs.delete(seq);
+    return events.since(eventCursor, types, returnedSeqs);
+  };
+  /** The model got these: only the contiguous delivered prefix is confirmed to the driver; an event left out (types filter) stays pending, and the ones beyond it are remembered so they are not returned twice. */
+  const handedOver = (found: GameEvent[]) => {
+    for (const event of found) returnedSeqs.add(event.seq);
+    const before = eventCursor;
+    for (let next = events.since(eventCursor)[0]; next && returnedSeqs.has(next.seq); next = events.since(eventCursor)[0]) { eventCursor = next.seq; returnedSeqs.delete(next.seq); }
+    if (eventCursor > before) events.markConsumed(eventCursor);
+  };
+  /**
+   * Hosted: a player who speaks while the model is in the middle of a turn is heard with the next tool result, not only when
+   * the turn ends (docs/companion_experience_review.md item 4). Everything new comes along then, so the driver's cursor
+   * moves past all of it and nothing is told twice; without player chat nothing is attached.
+   */
+  const playerSpoke = () => events.hosted && freshEvents(['chat', 'player_stop']).length > 0;
+  const relayEvents = (): string | undefined => {
+    if (!playerSpoke()) return undefined;
+    const fresh = freshEvents();
+    handedOver(fresh);
+    return `【这期间的游戏事件】（工具执行时到的，像新消息一样处理）\n${fresh.map(event => `${event.type}: ${event.text}`).join('\n')}`;
+  };
   const currentChat = (chat: Observation['chat']) => options.chatFloor === undefined ? chat : chat.filter(line => line.seq > options.chatFloor!);
   /**
    * Usage notes of enabled official plugins (plugins.ts). With play guides (hosted) the tool only names its plugins and each
@@ -101,16 +127,20 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
         const followingThere = name === 'go-to' && companion?.follows(args.player) === true;
         // The walk after a followed player who went out of reach is the companion's own: whatever the model asks of the body goes first.
         if (companion?.catchingUp() && !followingThere && !looksOnly(args) && (tool.kind === 'action' || tool.kind === 'task')) await companion.endCatchUp();
+        // A player just halted the body in chat (player-stop.ts): nothing new starts until the model has heard of it, which comes with this result.
+        if (!looksOnly(args) && (tool.kind === 'action' || tool.kind === 'task') && (options.playerStop?.holding() || freshEvents(['player_stop']).length > 0)) throw new BodyError('CANCELLED', '玩家刚叫停，这次没有做；先看玩家说了什么');
         if (!looksOnly(args) && !followingThere) {
           if (tool.kind === 'action' || tool.kind === 'task') reflexes?.authorizeAction();
           if (tool.needsIdle) scheduler.assertIdle();
         }
         const result = await calls.run({ epoch: stopEpoch() }, () => handler(args));
-        // The first use of a kind of play in this session brings its guide (guides.ts), after the result itself.
+        // The first use of a kind of play in this session brings its guide (guides.ts), after the result itself; then what players said meanwhile.
         const guide = events.guides?.forTool(name, args);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }, ...(guide ? [{ type: 'text' as const, text: guide }] : [])] };
+        const relayed = name === 'wait-for-events' ? undefined : relayEvents();
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }, ...[guide, relayed].filter((text): text is string => !!text).map(text => ({ type: 'text' as const, text }))] };
       } catch (error) {
-        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ code: error instanceof BodyError ? error.code : 'ERROR', message: (error as Error).message }) }] };
+        const relayed = name === 'wait-for-events' ? undefined : relayEvents();
+        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ code: error instanceof BodyError ? error.code : 'ERROR', message: (error as Error).message }) }, ...(relayed ? [{ type: 'text' as const, text: relayed }] : [])] };
       }
     });
   };
@@ -190,16 +220,9 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     ...(body.hello.capabilities.includes('send-chat') ? { say: z.string().min(1).max(256).optional() } : {}),
   }, async ({ timeoutSeconds, types, say }) => {
     const sent = say ? await body.act('send-chat', { message: say }) : undefined;
-    eventCursor = Math.max(eventCursor, events.deliveredSeq());
-    for (const seq of returnedSeqs) if (seq <= eventCursor) returnedSeqs.delete(seq);
+    freshEvents();
     const found = await events.wait(eventCursor, timeoutSeconds * 1000, types, returnedSeqs);
-    if (found.length) {
-      // Only the contiguous delivered prefix is confirmed: an event the types filter skipped stays pending, and matches beyond it are remembered so they are not returned twice.
-      for (const event of found) returnedSeqs.add(event.seq);
-      const before = eventCursor;
-      for (let next = events.since(eventCursor)[0]; next && returnedSeqs.has(next.seq); next = events.since(eventCursor)[0]) { eventCursor = next.seq; returnedSeqs.delete(next.seq); }
-      if (eventCursor > before) events.markConsumed(eventCursor);
-    }
+    if (found.length) handedOver(found);
     return { events: found, ...(sent ? { sent } : {}) };
   });
   const actions: Array<{ name: ActionName; description: string; schema: ZodRawShape }> = [
@@ -281,10 +304,13 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       return operationResult(done);
     });
   }
-  /** Wait a little for an action that usually ends quickly; a longer one stays running and its result arrives as a task event. */
+  /**
+   * Wait a little for an action that usually ends quickly; a longer one stays running and its result arrives as a task event.
+   * A player speaking ends the wait at once: the model hears them with this result instead of after the work.
+   */
   const settle = async (operation: import('./body.js').Operation, ms: number) => {
     const end = Date.now() + ms;
-    while (operation.status === 'running' && Date.now() < end) { await new Promise(resolve => setTimeout(resolve, 250)); operation = await body.operation(operation.operationId); }
+    while (operation.status === 'running' && Date.now() < end && !playerSpoke()) { await new Promise(resolve => setTimeout(resolve, 250)); operation = await body.operation(operation.operationId); }
     return operation;
   };
   if (serverObserved && body.hello.capabilities.includes('craft-item')) {

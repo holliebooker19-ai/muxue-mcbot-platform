@@ -26,6 +26,7 @@ import { logClaimFailure } from './claim-failure.js';
 import { useGiftGear } from './gift-gear.js';
 import { loadPluginPolicy } from './plugins.js';
 import { Scheduler } from './scheduler.js';
+import { PlayerStop } from './player-stop.js';
 import { fileURLToPath } from 'node:url';
 
 async function main(): Promise<void> {
@@ -145,7 +146,12 @@ async function main(): Promise<void> {
     if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
     // Going to find a player out of sight: where they are now, as a direction and a distance, when it no longer agrees with the walk.
     const meetWatch = body.hello.capabilities.includes('far-players') ? new MeetWatch(events) : undefined;
-    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, meetWatch, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
+    // Hosted ServerBody: a player's halt words stop the body here and the agent's conversation goes on (player-stop.ts).
+    const playerStop = values.hosted && body.hello.backend === 'server'
+      ? new PlayerStop({ events, names: [values.username, values.nickname], scheduler, stopCurrent, companion, reflexes, log: text => process.stderr.write(`${text}\n`) })
+      : undefined;
+    if (playerStop) events.onPlayerChat((player, message) => playerStop.hear(player, message));
+    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, meetWatch, playerStop, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
     monitor = new RuntimeMonitor(body, events, {
       ...(values.hosted ? { heartbeatFile } : {}),
       companion,

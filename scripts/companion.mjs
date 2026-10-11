@@ -55,7 +55,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // 需要叫醒 agent 的事件；reflex（自动进食/反击）、presence（上下线说明）等只在下次一起带上
 export const WAKE_TYPES = new Set(['chat', 'whisper', 'hurt', 'low_health', 'death', 'player_joined', 'player_left',
-  'time', 'bedtime', 'spawn', 'danger', 'follow', 'player_death', 'advancement', 'player_sleep', 'woke', 'teleport', 'task', 'companion', 'survival', 'guard', 'scene', 'machine', 'gift', 'meet']);
+  'time', 'bedtime', 'spawn', 'danger', 'follow', 'player_death', 'advancement', 'player_sleep', 'woke', 'teleport', 'task', 'companion', 'survival', 'guard', 'scene', 'machine', 'gift', 'meet', 'player_stop']);
+// 玩家叫停的词（运行端 src/player-stop.ts 读同一份）：pause 暂停、cancel 取消，addressedPause 只在点名后算
+const STOP_WORDS = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'client-runtime', 'player-stop.json'), 'utf8'));
+// ServerBody 托管时，叫停交给运行端原地停下（对话不断），它发回 player_stop 事件算确认；这么久没确认（运行端卡住、停不下来）
+// 才走原来的撤销控制。时长和 Codex 连接的停止确认超时（cancelTimeoutMs）一样
+const STOP_CONFIRM_MS = 10000;
 const BATCH_DELAY_MS = 1500;
 const SERVER_CHAT_QUIET_MS = 120;
 const SERVER_CHAT_MAX_MS = 350;
@@ -189,8 +194,9 @@ export function isAddressedStop(e, { name, nickname } = {}) {
   }
   body = body.trim().toLowerCase();
   // 不剥问号、引号、括号或任意后缀；「别停」「停止以后还能继续吗」不会命中。
-  const command = /^(?:停|停下|停止|别挖(?:了)?|别建(?:了)?|等一下|等等|stop)[ \t!！。.,，]*$/;
-  if (command.test(body)) return true;
+  const word = text => text.replace(/[ \t!！。.,，]*$/, '');
+  const command = text => [...STOP_WORDS.pause, ...STOP_WORDS.cancel].includes(word(text));
+  if (command(body)) return true;
   for (const alias of [name, nickname]) {
     if (typeof alias !== 'string' || !alias.trim()) continue;
     const address = alias.trim().toLowerCase();
@@ -199,7 +205,7 @@ export function isAddressedStop(e, { name, nickname } = {}) {
     // Codex stop / Codex停下可用，Codexstop、CodexBot2等名字子串不算点名。
     if (/[a-z0-9_]$/.test(address) && /^[a-z0-9_]/.test(rest)) continue;
     const instruction = rest.replace(/^[ \t,，:：!！]+/, '');
-    if (command.test(instruction) || /^暂停[ \t!！。.,，]*$/.test(instruction)) return true;
+    if (command(instruction) || STOP_WORDS.addressedPause.includes(word(instruction))) return true;
   }
   return false;
 }
@@ -733,6 +739,7 @@ function main() {
   let busy = false;
   let turnStartedAt = 0;
   let currentTool = '', busyAckedTurn = 0;
+  let playerStopTimer = null;
   let conversationId = '';
   let session = '';
   let lastSeq = 0;
@@ -1199,7 +1206,19 @@ function main() {
     else for (const event of agentProtocol.decodeMessage(msg)) handleAgentEvent(event);
   }
 
+  // 玩家在游戏里叫停（游戏聊天经事件文件或独立聊天通道，谁先到算谁）：运行端自己会停（src/player-stop.ts），
+  // 这里只等它的 player_stop 确认；STOP_CONFIRM_MS 内没等到，就当运行端停不下来，撤销控制、结束这一轮 Agent
+  function armPlayerStop(event, owner = null) {
+    if (shuttingDown || waitingNewServerTask || cancellingActions || playerStopTimer) return;
+    info('玩家叫停：交给运行端原地停下，对话不断');
+    playerStopTimer = setTimeout(() => {
+      playerStopTimer = null;
+      void stopServerAgent('玩家叫停，运行端没确认停下', event, owner);
+    }, STOP_CONFIRM_MS);
+  }
+
   async function stopServerAgent(reason, event = null, owner = null) {
+    if (playerStopTimer) { clearTimeout(playerStopTimer); playerStopTimer = null; }
     if (shuttingDown) return;
     if (owner && !serverControl?.isCurrent(owner)) return;
     queuedServerTasks = [];
@@ -1376,9 +1395,15 @@ function main() {
     if (e.type === 'chat' || e.type === 'whisper') { out(`\x1b[32m${text}\x1b[0m`); activity('event', { type: e.type, text: e.text, ...(e.username ? { from: e.username } : {}) }); }
     else info(`事件 ${e.type}: ${e.text}`, 'event', { type: e.type });
     pendingEvents.push({ ...e, line: text });
+    // 叫停交给运行端原地停下；叫停这句本身不叫醒 Agent，等运行端停好发来的 player_stop 一起送
     if (args.body === 'server' && isAddressedStop(e, args) && !shuttingDown) {
-      void stopServerAgent('玩家叫停', e);
+      armPlayerStop(e);
       return;
+    }
+    if (e.type === 'player_stop' && playerStopTimer) {
+      clearTimeout(playerStopTimer);
+      playerStopTimer = null;
+      info('运行端已原地停下，Agent 和对话照常');
     }
     // 独立试玩身份在旧身体上叫停：原地停下并中断推理（需要连接支持 stopActions），不换会话。
     if (agentProtocol.identity === 'independent' && isAddressedStop(e, args) && !shuttingDown) {
@@ -1694,7 +1719,9 @@ function main() {
       isStop: (event) => isAddressedStop(event, args),
       isNewTask: (event) => [args.name, args.nickname].some(name => name && event.message.toLowerCase().includes(name.toLowerCase()))
         || stopFollowup(event, { lastStopBy, lastStopAt, now: Date.now() }),
-      onStop: (event, owner) => stopServerAgent('玩家叫停（独立聊天通道）', event, owner),
+      // 叫停先交给运行端原地停（不撤销）；已经撤销过控制、在等新任务时照旧走撤销（幂等），后面的叫停取消排着的新任务
+      revokeOnStop: () => waitingNewServerTask,
+      onStop: (event, owner) => waitingNewServerTask ? stopServerAgent('玩家叫停（独立聊天通道）', event, owner) : armPlayerStop(event, owner),
       onLost: (code) => { if (args.reconnect && waitingNewServerTask && !shuttingDown) shutdown(`停止后世界身份已变化（${code}），等重新连接`, RECONNECT_EXIT); },
       onNewTask: newServerTask, log: info });
     serverControl.start();
@@ -1748,7 +1775,7 @@ function main() {
       try { fs.rmSync(F.stop, { force: true }); } catch { /* 忽略 */ }
       shutdown('收到停止标记');
     }
-    // WebUI 的「叫停」：和游戏里叫停一样停下动作、中断推理，等玩家给新任务；托管不退出
+    // WebUI 的「叫停」是急停：撤销控制、结束这一轮 Agent（对话保留），等玩家给新任务；托管不退出。游戏里叫停是原地停，见 armPlayerStop
     if (fs.existsSync(F.halt)) {
       try { fs.rmSync(F.halt, { force: true }); } catch { /* 忽略 */ }
       if (args.body === 'server' && !waitingNewServerTask) {

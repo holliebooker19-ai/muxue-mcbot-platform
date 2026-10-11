@@ -131,7 +131,7 @@ export function buildPackage(opts) {
   copy(nodeLicense, path.join(stage, 'node', 'LICENSE'));
 
   const rt = path.join(stage, 'client-runtime');
-  for (const f of ['package.json', 'package-lock.json', 'README.md', 'tool-registry.json']) copy(path.join(ROOT, 'client-runtime', f), path.join(rt, f));
+  for (const f of ['package.json', 'package-lock.json', 'README.md', 'tool-registry.json', 'player-stop.json']) copy(path.join(ROOT, 'client-runtime', f), path.join(rt, f));
   copy(path.join(ROOT, 'client-runtime', 'dist'), path.join(rt, 'dist'));
   // 复制本机装好的依赖（npm ci 装的、和 lock 一致），再删掉开发依赖；prune 只删不下载
   const modules = path.join(ROOT, 'client-runtime', 'node_modules');
