@@ -137,7 +137,7 @@ try {
     const spot = await pos('Claude');
     await summon('husk', P.x + 6, P.z, 'w1', ',NoAI:1b');
     await until(async () => !(await exists('w1')), v => v, '等待中玩家身边的尸壳没被打死', 30000);
-    // get-status 的 companionMode 不显示走回去的过程: watch the body come back instead.
+    // get-status companionMode does not show the walk back: watch the body come back instead.
     const at = await until(() => pos('Claude'), p => distance(p, spot) <= 2, '打完没有回原地', 20000).catch(async () => pos('Claude'));
     const back = await mode();
     report.runs.wait = { guard: back.guard, spot, at };

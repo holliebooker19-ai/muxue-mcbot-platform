@@ -101,9 +101,9 @@ try {
   control = JSON.parse(await fs.readFile(controlFile, 'utf8'));
   const tools = (await client.listTools()).tools;
   const actions = ['dig-block', 'place-block', 'container-menu', 'equip-item', 'drop-item'];
-    // TODO(ServerBody 合并)：合并后工具数未实测，21 是旧数，待隔离服跑时确认。
-  check('actual survival MCP advertises the B actions (container-menu and equip-item replace the old ones)', tools.length === 21 && actions.every(name => tools.some(tool => tool.name === name)) && !tools.some(tool => tool.name === 'respawn'));
-  // TODO(ServerBody 合并)：click 的守卫字段现在在 container-menu 每一步里校验，不再是顶层 required，这条断言待改写。
+  // The tool count follows the capabilities (client-runtime/tool-registry.json); what matters here is that the B actions are there.
+  check('actual survival MCP advertises the B actions (container-menu and equip-item replace the old ones)', actions.every(name => tools.some(tool => tool.name === name)) && !tools.some(tool => tool.name === 'respawn'));
+  // container-menu checks each step's guards itself (mcp.ts), so they are not top-level required fields any more.
   check('container-menu advertised (click guards are checked per step)', tools.some(tool => tool.name === 'container-menu'));
   const initial = await status();
   check('authoritative inventory preserves complete components and selectedSlot', initial.source === 'server-observed' && initial.inventory.every(item => item.components && typeof item.components === 'object') && Number.isInteger(initial.selectedSlot));
@@ -118,9 +118,9 @@ try {
   const beforePlace = await stack(1);
   await success('place-block', { ...await guarded(anchor), ...stackGuard(beforePlace), face: 'up' }, 'MCP native guarded placement succeeds');
   check('placement consumes exactly one item and changes exact target', (await stack(1)).count === beforePlace.count - 1 && (await command('execute if block 516 201 512 cobblestone')).trim() === 'Test passed');
+  // A guarded stack whose components do not match is refused: drop-item still takes the stack guard (select-slot no longer is an MCP tool).
   const beforeRefusal = await stack(1);
-  // TODO(ServerBody 合并)：select-slot 的守卫拒绝没有对应的 equip-item 行为，这里仍是旧名，待决定删除或改写（不改会 unknown tool）。
-  const bad = await act('select-slot', { ...stackGuard(beforeRefusal), expectedComponents: { 'mcbot:incorrect_component': true } });
+  const bad = await act('drop-item', { ...stackGuard(beforeRefusal), expectedComponents: { 'mcbot:incorrect_component': true }, count: 1 });
   check('MCP wrong component guard reports failed operation without losing lease', bad.status === 'failed' && (await status()).connected, { status: bad.status, code: bad.result?.code });
   check('failed component guard preserves actual stack fields', isDeepStrictEqual(await stack(1), beforeRefusal));
 

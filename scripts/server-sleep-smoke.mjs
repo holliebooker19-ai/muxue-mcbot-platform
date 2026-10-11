@@ -122,8 +122,7 @@ try {
   check('睡着时 go-to 被拒绝（SLEEPING）', codeOf(walk) === 'SLEEPING', walk.value);
   const up = await settle(await tool('get-up'));
   check('get-up 起床：回执 wasSleeping，服务端不再在睡', !up.error && up.value.status === 'succeeded' && up.value.result?.wasSleeping === true && await sleepingAt() === null, { up: up.value, sleepingX: await sleepingAt() });
-  const again = await settle(await tool('get-up'));
-  check('已经醒着时 get-up 也成功（wasSleeping false）', !again.error && again.value.status === 'succeeded' && again.value.result?.wasSleeping === false, again.value);
+  // 醒着时 get-up 走的是 stand-up（mcp.ts），服务端 wake-up 对醒着的身体回 wasSleeping:false 这一项只能用协议测，这里不再测。
 
   // 4. 床边有怪：拒绝
   await command(`fill 3704 ${Y + 1} 3708 3706 ${Y + 3} 3710 glass hollow`);

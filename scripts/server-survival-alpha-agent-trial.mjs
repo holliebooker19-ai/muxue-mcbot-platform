@@ -179,7 +179,7 @@ try {
   // Food is introduced only after the model disabled automatic consumption.
   await fixture('item replace entity Claude inventory.2 with minecraft:bread 3');
   await phase('prepare-backpack-tool', context + '使用equip-item(hand:"main")将主背包slot:10的钻石镐准备到targetSlot:0。确认成功后结束这一阶段，不吃东西。', ['equip-item'], async row => {
-    assert(row.responses.some(value => ['prepare-item', 'get-operation'].includes(value.name) && value.value?.status === 'succeeded'), 'No parsed successful prepare-item operation receipt');
+    assert(row.responses.some(value => ['equip-item', 'get-operation'].includes(value.name) && value.value?.status === 'succeeded'), 'No parsed successful equip-item operation receipt');
     const preparedId = await command('data get entity Claude Inventory[{Slot:0b}].id');
     assert(/entity data:\s*"minecraft:diamond_pickaxe"\s*$/.test(preparedId), 'Independent hotbar slot 0 did not contain the prepared pickaxe');
     assert.equal(integerField(await command('data get entity Claude SelectedItemSlot')), 0);

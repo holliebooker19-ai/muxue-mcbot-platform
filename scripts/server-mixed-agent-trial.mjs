@@ -305,7 +305,7 @@ try {
   await fixture('tp Claude 2410.5 201 2422.5'); await fixture('tp C2Tester 2413 201 2422.5');
   await fixture('setblock 2411 201 2420 chest[facing=south]');
   await fixture('item replace block 2411 201 2420 container.0 with minecraft:oak_log 6');
-    // TODO(ServerBody 合并)：fetch-and-give 已删，这个阶段待改写。
+  // TODO(ServerBody 合并)：fetch-and-give 已删，这个阶段待改写。
   await finite('container-fetch-return', '小克，把附近唯一箱子里的3个橡木原木拿给C2Tester，先回应一句。', 'fetch-and-give', async phase => {
     await until(async () => (await itemCount('C2Tester', 'minecraft:oak_log')) === 3, 'Native player did not receive three logs', 10000);
     phase.recipientInventoryAuthority = await command('data get entity C2Tester Inventory');

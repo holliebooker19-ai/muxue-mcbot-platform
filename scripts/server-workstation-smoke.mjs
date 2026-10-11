@@ -156,7 +156,8 @@ try {
   const wall = (await command('execute if blocks 3840 -60 3820 3846 -57 3826 3840 -60 3820 all')).length > 0;
   check('从封闭小屋出去：开门走出去，到了门外', out.value.status === 'succeeded' && outAt[0] > 3847, { op: out.value, outAt });
   check('出门后把自己开的门关上了，墙没拆', doorClosed && await isBlock(3846, -59, 3822, 'minecraft:stone_bricks') && await isBlock(3846, -59, 3824, 'minecraft:stone_bricks'), { doorClosed, wall });
-  const back = await settle(await tool('go-to', { x: 3843.5, y: -60, z: 3823.5 }), 60000);
+  // No y: the leg-by-leg walk (travel-to), which opens doors, as before; with y a near point would be the plain move-to-position.
+  const back = await settle(await tool('go-to', { x: 3843.5, z: 3823.5 }), 60000);
   const backAt = await pos('Claude');
   const closedAgain = (await command('execute if block 3846 -60 3823 oak_door[open=false]')).includes('passed');
   check('再走回屋里：开门进去、关门', back.value.status === 'succeeded' && backAt[0] < 3846 && closedAgain, { op: back.value, backAt, closedAgain });

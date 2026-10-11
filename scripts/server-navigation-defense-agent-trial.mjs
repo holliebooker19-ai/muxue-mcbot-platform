@@ -98,8 +98,8 @@ function consumeMessage(message) {
   if (message.type === 'system' && message.subtype === 'init' && Array.isArray(message.tools)) {
     const names = message.tools.map(tool => typeof tool === 'string' ? tool : tool.name);
     assert(names.every(name => typeof name === 'string' && name.startsWith('mcp__minecraft__')), 'CLI exposed an unexpected built-in/other-server tool');
-    assert.equal(names.length, 39, 'This batch requires the full 39 Minecraft MCP tools');
-    assert(names.includes('mcp__minecraft__defend-self') && names.includes('mcp__minecraft__get-status'));
+    // The count follows the capabilities (client-runtime/tool-registry.json); this batch needs these.
+    assert(['defend-self', 'get-status', 'go-to', 'set-reflexes', 'get-operation'].every(name => names.includes(`mcp__minecraft__${name}`)), 'This batch needs defend-self, get-status, go-to, set-reflexes and get-operation');
     report.liveInitTools = names;
   }
   for (const block of message.message?.content ?? []) if (block.type === 'tool_result') {
@@ -226,7 +226,7 @@ try {
   await phase('revisioned-target-exclusion', context + `先get-status(include:["survival"])读取最新policy revision；set-reflexes使用expectedRevision，设置autoEat:false、autoDefend:true、armed:true、excludedEntityIds:["${targetId}"]。再get-status(include:["survival"])确认排除UUID和有效revision，不主动攻击被排除目标。`, ['get-status', 'set-reflexes'], async row => {
     const change = row.responses.find(response => response.name === 'set-reflexes' && response.value?.autoDefend === true && response.value.armed === true && response.value.excludedEntityIds?.includes(targetId));
     assert(change, 'Missing accepted revisioned entity-exclusion policy');
-    assert(row.responses.some(response => response.name === 'get-status' && response.value?.survival?.policy?.autoDefend === true && response.value.survival.policy.excludedEntityIds?.includes(targetId) && response.value.policy.revision === change.value.revision), 'Missing effective exclusion state read after revisioned policy update');
+    assert(row.responses.some(response => response.name === 'get-status' && response.value?.survival?.policy?.autoDefend === true && response.value.survival.policy.excludedEntityIds?.includes(targetId) && response.value.survival.policy.revision === change.value.revision), 'Missing effective exclusion state read after revisioned policy update');
     await wait(900); assert.equal(await command(`data get entity ${ownEnemy} Health`), exclusionHealth, 'Excluded hostile target was attacked automatically');
     row.independentHealthUnchanged = true;
   });
