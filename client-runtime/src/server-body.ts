@@ -300,9 +300,9 @@ export class ServerBody implements Body {
     this.fights += busyMs >= this.dutyBusy ? busyMs - this.dutyBusy : busyMs;
     this.dutyBusy = busyMs;
   }
-  fightMs(): number { return this.fights + (this.window ? this.now() - this.window.from : 0); }
-  /** The open interrupt window: its token, when it opened, and the release of task-lock steps waiting for it to close. */
-  private window?: { token: string; from: number; closed: Promise<void>; release: () => void };
+  fightMs(): number { return this.fights + (this.window?.from !== undefined ? this.now() - this.window.from : 0); }
+  /** The interrupt window: its token, when the server opened it (absent while begin is on its way), and the release of task-lock steps waiting for it to close. */
+  private window?: { token: string; from?: number; closed: Promise<void>; release: () => void };
   /**
    * Eat or defend with the running task paused, not cancelled (capability task-interrupts, docs/companion_state_design.md
    * 8.4). NOT_PAUSABLE: the task cannot pause at this moment and nothing changed. While work runs its steps go out with
@@ -316,22 +316,26 @@ export class ServerBody implements Body {
     if (!this.hello.capabilities.includes('task-interrupts')) throw new BodyError('UNSUPPORTED', '身体不支持暂停任务去进食或自卫（task-interrupts）');
     if (this.window || this.stopping) throw new BodyError('BUSY', '已有打断在进行或正在停止');
     const revision = this.revision, controlGeneration = this.controlGeneration;
+    // Held before begin goes out: a task-lock step sent while the server already opened the window would be refused BUSY there.
+    let release!: () => void;
+    const closed = new Promise<void>(resolve => { release = resolve; });
+    const window: NonNullable<ServerBody['window']> = { token: randomUUID(), closed, release };
+    this.window = window;
+    const giveUp = () => { if (this.window === window) { this.window = undefined; release(); } };
     let opened;
     try {
       opened = z.object({ open: z.literal(true), paused: z.object({ operationId: identifier, name: z.string().max(NAME_LIMIT) }).nullable() })
         .parse(await this.rpc('interrupt', { ...this.identity(), controlGeneration, action: 'begin', reason }));
       this.assertActive();
     } catch (error) {
+      giveUp();
       // A begin fenced by our own stop is expected, not lease loss (as in act).
       if (revision !== this.revision && error instanceof BodyError && error.code === 'STALE_CONTROL' && this.state === 'active') throw new BodyError('CANCELLED', '停止前的打断已被代次屏障拒绝');
       throw this.invalidate(error);
     }
     // A stop between: it ended the window on the server too.
-    if (revision !== this.revision) throw new BodyError('CANCELLED', '打断开始后已被停止');
-    let release!: () => void;
-    const closed = new Promise<void>(resolve => { release = resolve; });
-    const window = { token: randomUUID(), from: this.now(), closed, release };
-    this.window = window;
+    if (revision !== this.revision) { giveUp(); throw new BodyError('CANCELLED', '打断开始后已被停止'); }
+    window.from = this.now();
     let value: T;
     try { value = await work({ taskToken: window.token, ...(opened.paused ? { paused: opened.paused } : {}) }); }
     catch (error) { await this.endInterrupt(window, revision, controlGeneration); throw error; }
@@ -347,7 +351,7 @@ export class ServerBody implements Body {
       }
     } catch (error) { this.invalidate(error); }
     finally {
-      this.fights += this.now() - window.from;
+      this.fights += this.now() - window.from!;
       this.window = undefined; window.release();
     }
     return resumed;

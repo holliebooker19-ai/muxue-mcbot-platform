@@ -552,6 +552,7 @@ interface BodyTask extends GuardDuty.Pausable {
 - 正在自动进食（可能就在窗口里）时来了怪，自卫照旧 `stop` 抢先，被暂停的任务也一起取消。这种情况少见，没有为它做“窗口里先吃后打”。
 - 工具说明只改了 `defend-self`、`set-reflexes`（按能力加一句，列出的任务名从 `tool-registry.json` 取）；建筑、种地等任务的说明里本来就没写“会被取消”，没动。游戏指令（`scripts/companion.mjs`）那一行改成先暂停、最多两次。
 - 顺手修了一个旧错误：`defend-self` 不带 `entityId`、而且之前从没发过自卫事件时，读 `this.defenseEvent!.at` 会抛 `TypeError`，自卫被当成失败并停用本能。
+- 做 4d 运行端时发现并修正（10-11）：运行端原来要等 `begin` 的回复才在本地登记窗口。这之间采集发出的下一步，服务端已经开了窗口，会被当成窗口外的操作报 BUSY，采集因此失败。现在发 `begin` 之前就先登记，采集的下一步从那一刻起就等着；`begin` 被拒或叫停时撤掉登记、放行。窗口时长从服务端开窗的回复算起，`fightMs()` 仍然只增不减。
 
 ### 8.5 4d 运行端：一个调度器（约 2～3 天）
 
