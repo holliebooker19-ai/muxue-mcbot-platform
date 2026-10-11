@@ -141,7 +141,7 @@ test('following + self-defense that fails for certain: the posture stays, no WOR
   const failed = { operationId: randomUUID(), sessionId: 'server-session-1', name: 'defend-self', status: 'failed', summary: '没有完整可核验的原版武器或空手热栏，不使用未知Mod物品', result: { code: 'UNSAFE_WEAPON' } };
   const survival = { read: () => ({ state: 'idle' }), assertIdle() {}, cancel: () => ({}), stopped() {}, async defend() { return structuredClone(failed); } };
   const tasks = { cancel: () => ({}), stopped() {}, assertIdle() {} }, gather = { cancel() {}, stopped() {}, assertIdle() {} };
-  const stopCurrent = createActionStop(f.body, tasks, gather, f.mode, survival);
+  const stopCurrent = createActionStop(f.body, f.mode);
   const reflexes = new SurvivalReflexes(f.body, survival, f.events, { stopCurrent,
     ...companionReflexHooks(f.mode),
     ordinaryBusy: () => true });

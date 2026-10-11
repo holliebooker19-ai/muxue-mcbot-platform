@@ -6,6 +6,7 @@ import { selectFood, type SurvivalTasks } from './survival-tasks.js';
 import { pillarBlockCount, pillarDown, pillarUp, type PillarBlock, type PillarHost, type PillarPurpose } from './pillar.js';
 import type { SurvivalPolicy } from './survival-reflexes.js';
 import { fightGrace, type FightGrace } from './fight-grace.js';
+import { Scheduler, type Lease, type StopHandle } from './scheduler.js';
 
 type Context = Pick<Observation, 'instanceId' | 'sessionId' | 'worldId' | 'dimension' | 'controlGeneration'>;
 type Request = { resourceRef?: string; item: string; count?: number; stacks?: number; wholeTree?: boolean; radius?: number; say?: string; maxSteps?: number; timeoutMs?: number };
@@ -18,7 +19,7 @@ const miningOwner = (owner?: Borrowed): owner is BorrowedMining => !!owner && 'k
 const MINING_DROP_MARGIN = 1.5;
 type Reference = { context: Context; expires: number; scan: NearbyResources; radius: number; wholeTree: boolean };
 type Progress = { stage: string; item: string; requestedCount?: number; requestedStacks?: number; targetCount?: number; maxStackSize?: number; pickedUpCount?: number; lastConfirmedPickedUpCount?: number; overage: number; minedBlocks: number; steps: number; maxSteps: number; pickup: 'native-confirmed' | 'partial-or-unknown'; quantity: 'newly-picked'; totalNativePickedUpCount: number; unexpectedPickedUpCount: number; items: Array<{ item: string; count: number; maxStackSize?: number }>; code?: string; variantComponents?: ItemValue['components']; limitation?: string; pickupMovementRaces?: number; lastPickupMovementCode?: string; lastPickupMovementSummary?: string; storedIn?: Record<string, number>; pillarPlaced?: number; pillarRecovered?: number; unreachable?: number; leavesShaken?: number; leavesDecayed?: number; stuckHigh?: number; stuckInLeaves?: number; trees?: number; wholeTree?: boolean; leavesCleared?: number; climb?: 'step' | 'corner' | 'spiral'; spiralSteps?: number; spiralStop?: string };
-type Active = { grace?: FightGrace; least?: number; id: string; taskToken: string; borrowed?: Borrowed; oldGround?: Set<string>; name: Name; epoch: number; context: Context; center: Position; radius: number; deadline: number; cursor: number; allowed: Set<string>; collectedEntities: Map<string, number>; variant?: ItemValue; request: Request; progress: Progress; cancelled?: boolean; stopPending?: boolean; top?: number; trees?: Map<string, number>; focusTree?: number; pillarDebt?: number; footing?: Set<string>; pickedMark?: number };
+type Active = { grace?: FightGrace; least?: number; id: string; taskToken: string; lease: Lease; borrowed?: Borrowed; oldGround?: Set<string>; name: Name; context: Context; center: Position; radius: number; deadline: number; cursor: number; allowed: Set<string>; collectedEntities: Map<string, number>; variant?: ItemValue; request: Request; progress: Progress; halting?: boolean; top?: number; trees?: Map<string, number>; focusTree?: number; pillarDebt?: number; footing?: Set<string>; pickedMark?: number };
 const contextOf = (state: Context): Context => ({ instanceId: state.instanceId, sessionId: state.sessionId, worldId: state.worldId, dimension: state.dimension, controlGeneration: state.controlGeneration });
 const unknownCodes = new Set(['UNKNOWN', 'PICKUP_GAP', 'PICKUP_UNKNOWN', 'WORLD_CHANGED', 'LEASE_LOST', 'STALE_CONTROL', 'TRANSPORT_LOST', 'INVALID_RESPONSE', 'LEASE_EXPIRED', 'TASK_TIMEOUT', 'STOP_UNCONFIRMED']);
 type Candidate = NearbyResources['candidates'][number];
@@ -69,27 +70,30 @@ export class GatherTasks {
   private readonly references = new Map<string, Reference>();
   private readonly operations = new Map<string, Operation>();
   private active?: Active;
-  private epoch = 0;
+  private readonly scheduler: Scheduler;
+  /** The latest stop of this gathering alone (cancel), for stopped() without a handle. */
+  private stop?: StopHandle;
   private survival?: SurvivalTasks;
   private survivalPolicy?: () => SurvivalPolicy & { armed: boolean; revision: number };
-  constructor(private readonly body: Body, private readonly events: EventJournal, private readonly now = Date.now, private readonly random = Math.random) {}
+  constructor(private readonly body: Body, private readonly events: EventJournal, private readonly now = Date.now, private readonly random = Math.random) {
+    this.scheduler = Scheduler.of(body);
+    this.scheduler.onCancel(() => this.references.clear());
+  }
   useSurvival(tasks: SurvivalTasks, policy: () => SurvivalPolicy & { armed: boolean; revision: number }): void { this.survival = tasks; this.survivalPolicy = policy; }
   operation(id: string): Operation | undefined { const op = this.operations.get(id); return op && structuredClone(op); }
   assertIdle(): void { if (this.active) throw new BodyError('BUSY', '有限采集任务正在运行，请先完成或叫停'); }
-  /** The gathering running now on its own lock (not a companion errand's child), by its id and tool name; undefined otherwise. */
-  current(): { id: string; name: Name } | undefined { return this.active && !this.active.borrowed && !this.active.cancelled ? { id: this.active.id, name: this.active.name } : undefined; }
-  cancel(): void { ++this.epoch; this.references.clear(); if (this.active) { this.active.cancelled = true; this.active.stopPending = true; } }
+  /**
+   * Stop this gathering alone (a companion errand's child; a stop of everything is the scheduler's): no further step,
+   * the lock stays until stopped().
+   */
+  cancel(): StopHandle { this.references.clear(); return this.stop = this.scheduler.cancelOne(this.active?.lease); }
   /** Only release the shared write token after the independent body stop was confirmed. */
-  stopped(): void {
-    if (!this.active?.cancelled) return;
-    this.finish(this.active, 'cancelled', '用户已叫停，旧采集不恢复', 'CANCELLED');
-    if (!this.active.borrowed) this.body.releaseTask?.(this.active.taskToken); this.active = undefined;
-  }
+  stopped(handle = this.stop): void { if (handle) this.scheduler.stopped(handle); if (handle === this.stop) this.stop = undefined; }
   async discover(options: { blockIds: string[]; radius: number; maxResults: number; center?: Position; wholeTree?: boolean; trees?: number }): Promise<unknown> {
     if (!this.body.nearbyResources) throw new BodyError('UNSUPPORTED', '身体不支持有限资源观察');
-    const epoch = this.epoch;
+    const epoch = this.scheduler.epoch;
     const scan = await this.body.nearbyResources(options);
-    if (epoch !== this.epoch) throw new BodyError('CANCELLED', '叫停前资源观察已丢弃');
+    if (epoch !== this.scheduler.epoch) throw new BodyError('CANCELLED', '叫停前资源观察已丢弃');
     const resourceRef = randomUUID();
     this.references.set(resourceRef, { context: contextOf(scan), expires: this.now() + 30000, scan, radius: options.radius, wholeTree: !!options.wholeTree && scan.wholeTree === true });
     if (this.references.size > 32) this.references.delete(this.references.keys().next().value!);
@@ -106,7 +110,7 @@ export class GatherTasks {
   }
   private check(task: Active): void {
     task.borrowed?.check();
-    if (task.epoch !== this.epoch || task.cancelled) throw new BodyError('CANCELLED', '采集已叫停，未执行后续步骤');
+    if (!this.scheduler.live(task.lease)) throw new BodyError('CANCELLED', '采集已叫停，未执行后续步骤');
     task.deadline += task.grace?.take() ?? 0;
     if (this.now() >= task.deadline) throw new BodyError('TASK_TIMEOUT', '任务执行预算已到；未追加数量或候选');
   }
@@ -223,13 +227,12 @@ export class GatherTasks {
     this.validate(request, !!borrowed); this.assertIdle();
     if (!this.body.acquireTask || !this.body.releaseTask) throw new BodyError('UNSUPPORTED', '有限任务需要共享身体写锁');
     borrowed?.check();
-    const id = randomUUID(), epoch = this.epoch;
-    if (!borrowed) this.body.acquireTask(id);
+    const lease = this.scheduler.start(name, { ...(borrowed ? { lender: borrowed } : {}), retired: () => this.retired(lease) }), id = lease.id;
     const progress: Progress = { ...(request.wholeTree ? { wholeTree: true } : {}), stage: 'starting', item: request.item, requestedCount: request.count, requestedStacks: request.stacks, targetCount: request.count, pickedUpCount: 0, overage: 0, minedBlocks: 0, steps: 0, maxSteps: request.maxSteps ?? stepBudget(request), pickup: 'native-confirmed', quantity: 'newly-picked', totalNativePickedUpCount: 0, unexpectedPickedUpCount: 0, items: [] };
     let task: Active | undefined;
     try {
       // Reserve synchronously even while the initial read or chat acknowledgement is in flight.
-      task = { id, taskToken: borrowed?.taskToken ?? id, borrowed, name, epoch, context: {}, center: { x: 0, y: 0, z: 0 }, radius: request.radius ?? 4, deadline: this.now() + (request.timeoutMs ?? (request.wholeTree ? Math.min(600000, Math.max(120000, (request.count ?? 0) * 4000)) : 60000)), cursor: 0, allowed: new Set(), collectedEntities: new Map(), request, progress } as Active;
+      task = { id, taskToken: lease.token, lease, borrowed, name, context: {}, center: { x: 0, y: 0, z: 0 }, radius: request.radius ?? 4, deadline: this.now() + (request.timeoutMs ?? (request.wholeTree ? Math.min(600000, Math.max(120000, (request.count ?? 0) * 4000)) : 60000)), cursor: 0, allowed: new Set(), collectedEntities: new Map(), request, progress } as Active;
       // Fights of the guard duty push the limit back (not for companion mining, which keeps the follow's own deadline).
       if (!miningOwner(borrowed)) task.grace = fightGrace(this.body, task.deadline - this.now());
       if (miningOwner(borrowed)) { task.deadline = Math.min(task.deadline, borrowed.deadline); delete progress.requestedCount; delete progress.targetCount; progress.limitation = '单块原生破坏与本子任务新拾取分开确认；物品掉落归属未确认，不预测产量。'; }
@@ -273,7 +276,7 @@ export class GatherTasks {
           this.bind(task, borrowed.source.stack); task.progress.pickedUpCount = prior; task.progress.totalNativePickedUpCount = prior;
           task.progress.overage = Math.max(0, prior - task.progress.targetCount!);
           this.finish(task, prior >= task.progress.targetCount! ? 'succeeded' : 'failed', '选定UUID已被原生触碰收取，实际片段已确认', prior < task.progress.targetCount! ? 'TARGET_CONSUMED' : undefined);
-          this.active = undefined; return this.operation(id)!;
+          this.scheduler.end(lease); this.active = undefined; return this.operation(id)!;
         }
         // The private activity has no user count promise: freeze the current remainder plus its proven prior portion.
         const goal = current!.stack.count + prior;
@@ -295,8 +298,9 @@ export class GatherTasks {
     } catch (error) {
       if (task && !this.operations.has(id)) this.finish(task, (error as BodyError).code === 'CANCELLED' ? 'cancelled' : 'failed', (error as Error).message, error instanceof BodyError ? error.code : 'UNKNOWN');
       if (!borrowed && this.operations.has(id)) this.events.deliverOperation(this.operations.get(id)!);
-      if (this.active?.id === id && !task?.stopPending) this.active = undefined;
-      if (!borrowed && !task?.stopPending) this.body.releaseTask(id); throw error;
+      // A stopped one keeps its lease (and the lock) until the stop is confirmed.
+      if (this.scheduler.end(lease) && this.active?.id === id) this.active = undefined;
+      throw error;
     }
   }
   /** One guarded native action; force (coming down a pillar) still runs once the goal is reached or the step budget is spent. */
@@ -984,20 +988,24 @@ export class GatherTasks {
       const code = error instanceof BodyError ? error.code : 'UNKNOWN';
       if (code === 'TARGET_REACHED') this.finish(task, 'succeeded', '实际原生拾取数量已达到明确目标');
       else {
-        if (!task.borrowed && task.epoch === this.epoch && unknownCodes.has(code)) {
-          task.stopPending = true;
-          const mealStop = this.survival?.cancel();
-          try {
-            const stopped = await this.body.stop();
-            if (stopped.stopped === true && task.epoch === this.epoch) { task.stopPending = false; if (mealStop) this.survival!.stopped(mealStop); }
-          } catch {}
+        // Unsure what the body did: stop everything (a meal it borrowed too); the lock stays until the body confirms.
+        if (!task.borrowed && this.scheduler.live(task.lease) && unknownCodes.has(code)) {
+          task.halting = true;
+          await this.scheduler.halt();
         }
         this.finish(task, code === 'CANCELLED' ? 'cancelled' : unknownCodes.has(code) ? 'unknown' : 'failed', (error as Error).message, code);
       }
     } finally {
       // A settled JS runner is not proof that the native writer stopped.
-      if (!task.stopPending) { if (!task.borrowed) this.body.releaseTask?.(task.taskToken); if (this.active?.id === task.id) this.active = undefined; }
+      if (this.scheduler.end(task.lease) && this.active?.id === task.id) this.active = undefined;
     }
+  }
+  /** A confirmed stop retired the lease: the gathering ends as stopped (unless its own unknown result already ended it). */
+  private retired(lease: Lease): void {
+    const task = this.active;
+    if (task?.lease !== lease) return;
+    if (!task.halting) this.finish(task, 'cancelled', '用户已叫停，旧采集不恢复', 'CANCELLED');
+    this.active = undefined;
   }
   private remember(task: Active, status: Operation['status'], summary: string): Operation {
     const op = { operationId: task.id, name: task.name, sessionId: task.context.sessionId ?? '', controlGeneration: task.context.controlGeneration, status, summary, result: structuredClone(task.progress) };

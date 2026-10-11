@@ -10,6 +10,7 @@ import { SurvivalReflexes } from '../dist/survival-reflexes.js';
 import { RuntimeMonitor } from '../dist/lifecycle.js';
 import { EventJournal } from '../dist/events.js';
 import { createActionStop } from '../dist/action-stop.js';
+import { Scheduler } from '../dist/scheduler.js';
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const gate = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -46,10 +47,11 @@ function fixture(runtimeDir) {
   };
   const events = new EventJournal(runtimeDir, 'ServerBot'), tasks = new SurvivalTasks(body, Date.now, operation => events.recordOperation(operation));
   let cancels = 0, confirms = 0;
-  const containers = { cancel() { cancels++; return {}; }, stopped() { confirms++; }, assertIdle() {} };
-  const gather = { cancel() { cancels++; }, stopped() { confirms++; }, assertIdle() {} };
+  // Every task of the body stops through its one scheduler (design 8.5): count its cancel and confirmation.
+  const scheduler = Scheduler.of(body), cancel = scheduler.cancel.bind(scheduler), confirm = scheduler.stopped.bind(scheduler);
+  scheduler.cancel = () => { cancels++; return cancel(); }; scheduler.stopped = handle => { confirms++; return confirm(handle); };
   const companion = { async stop() { cancels++; return body.stop(); } };
-  const options = { stopCurrent: createActionStop(body, containers, gather, companion, tasks), ordinaryBusy: () => body.isBusy() };
+  const options = { stopCurrent: createActionStop(body, companion), ordinaryBusy: () => body.isBusy() };
   const reflexes = new SurvivalReflexes(body, tasks, events, options);
   return { body, state, calls, tasks, reflexes, options, events, released, setBusy(v) { busy = v; }, owner: () => owner, reads: () => reads, cancels: () => cancels, confirms: () => confirms };
 }
@@ -185,11 +187,11 @@ test('unknown native defense side effects preserve ownership and block all next 
   await assert.rejects(f.tasks.defend({ policy }), { code: 'BUSY' }); assert.equal(f.calls.filter(c => c.name === 'defend-entity').length, 1);
 });
 
-test('automatic defense cancels container/gather/companion then waits stop confirmation before acquiring shared owner', async () => {
+test('automatic defense cancels the scheduler and companion then waits stop confirmation before acquiring shared owner', async () => {
   const f = fixture(), stopped = gate(); f.setBusy(true); f.body.beforeStop = () => stopped.promise;
-  await f.reflexes.tick(); assert.equal(f.cancels(), 3); assert.equal(f.confirms(), 0); assert.equal(f.owner(), undefined); assert.equal(f.reflexes.read().phase, 'defending');
+  await f.reflexes.tick(); assert.equal(f.cancels(), 2); assert.equal(f.confirms(), 0); assert.equal(f.owner(), undefined); assert.equal(f.reflexes.read().phase, 'defending');
   assert.throws(() => f.reflexes.authorizeAction(), { code: 'BUSY' }); stopped.resolve(); await until(() => f.reflexes.read().phase === 'idle');
-  assert.equal(f.confirms(), 2); assert.equal(f.calls.filter(c => c.name === 'defend-entity').length, 1);
+  assert.equal(f.confirms(), 1); assert.equal(f.calls.filter(c => c.name === 'defend-entity').length, 1);
   assert.equal(f.reflexes.read().lastDefense.operation.result.stopRequestedAt <= f.reflexes.read().lastDefense.operation.result.stopConfirmedAt, true);
 });
 

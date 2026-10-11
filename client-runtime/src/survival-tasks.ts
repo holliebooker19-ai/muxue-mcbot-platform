@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { BodyError, type ActionArguments, type ActionName, type Body, type FoodCandidate, type ItemStack, type ItemValue, type Operation, type SurvivalState, type Threat } from './body.js';
+import { Scheduler, type Lease, type StopHandle } from './scheduler.js';
 
 export type SurvivalContext = Pick<SurvivalState, 'instanceId' | 'sessionId' | 'worldId' | 'dimension' | 'controlGeneration'>;
 export interface BorrowedSurvivalTask { taskToken: string; check(): void; context?: Partial<SurvivalContext> & Pick<SurvivalContext, 'sessionId' | 'worldId' | 'dimension'> }
@@ -10,7 +10,7 @@ export interface PrepareItemRequest { slot: number; targetSlot?: number; expecte
 export interface EatRequest { slot?: number; targetSlot?: number; timeoutMs?: number; policy?: FoodPolicy }
 export interface DefensePolicy { defenseRadius: number; excludedEntityIds: readonly string[]; lowHealth: number; maxAttacks: number; defenseTimeoutMs: number }
 export interface DefendRequest { entityId?: string; previouslyObserved?: boolean; policy: DefensePolicy; check?: () => void; sensedAt?: number; stopRequestedAt?: number; stopConfirmedAt?: number }
-export interface SurvivalStopHandle { readonly epoch: number; readonly taskId?: string }
+export type SurvivalStopHandle = StopHandle;
 export interface SurvivalProgress {
   stage: string; sourceSlot?: number; hotbarSlot?: number; item?: string; swapped: boolean; prepared: boolean;
   consumedCount: number; consumption: 'not-started' | 'confirmed' | 'unconfirmed';
@@ -99,43 +99,31 @@ export function selectThreat(state: SurvivalState, policy: DefensePolicy, entity
 }
 type Name = 'prepare-item' | 'eat' | 'defend-self';
 interface Active {
-  id: string; name: Name; token: string; epoch: number; borrowed?: BorrowedSurvivalTask; cancelled: boolean; blocked: boolean;
+  id: string; name: Name; token: string; lease: Lease; borrowed?: BorrowedSurvivalTask;
   context?: SurvivalContext; deadline: number; tick?: number; inFlight: boolean; progress: SurvivalProgress;
 }
 const UNCERTAIN = new Set(['UNKNOWN', 'WORLD_CHANGED', 'LEASE_LOST', 'LEASE_EXPIRED', 'STALE_CONTROL', 'TRANSPORT_LOST', 'INVALID_RESPONSE', 'TASK_TIMEOUT', 'STOP_UNCONFIRMED', 'READ_FAILED']);
 
 /** One finite inventory/use transaction; no independent reflex timer, retry, restoration or parent lock release. */
 export class SurvivalTasks {
-  private epoch = 0;
+  private readonly scheduler: Scheduler;
   private active?: Active;
-  private stopping?: SurvivalStopHandle;
   private readonly operations = new Map<string, Operation>();
   private lastResult?: Operation;
   private latestStartedId?: string;
   private notificationFailed = false;
-  constructor(private readonly body: Body, private readonly now = Date.now, private readonly onResult?: (operation: Operation) => void) {}
-  assertIdle(): void { if (this.active || this.stopping) throw new BodyError('BUSY', '生存任务运行或停止尚未确认'); }
+  constructor(private readonly body: Body, private readonly now = Date.now, private readonly onResult?: (operation: Operation) => void) { this.scheduler = Scheduler.of(body); }
+  assertIdle(): void { if (this.active || this.scheduler.stopPending) throw new BodyError('BUSY', '生存任务运行或停止尚未确认'); }
   operation(id: string): Operation | undefined { const operation = this.operations.get(id); return operation && structuredClone(operation); }
   read(): { state: 'idle' | 'running' | 'blocked' | 'stopping'; task?: { operationId: string; name: Name; progress: SurvivalProgress }; lastResult?: Operation; notificationFailed?: boolean } {
-    return structuredClone({ state: this.stopping ? 'stopping' : this.active?.blocked ? 'blocked' : this.active ? 'running' : 'idle',
+    return structuredClone({ state: this.scheduler.stopPending ? 'stopping' : this.active?.lease.blocked ? 'blocked' : this.active ? 'running' : 'idle',
       ...(this.active ? { task: { operationId: this.active.id, name: this.active.name, progress: this.active.progress } } : {}),
       ...(this.lastResult ? { lastResult: this.lastResult } : {}), ...(this.notificationFailed ? { notificationFailed: true } : {}) });
   }
-  cancel(): SurvivalStopHandle {
-    this.epoch++;
-    if (this.active) this.active.cancelled = true;
-    return this.stopping = Object.freeze({ epoch: this.epoch, taskId: this.active?.id });
-  }
+  /** A stop of everything (the scheduler's): the running task stops before its next step. */
+  cancel(): SurvivalStopHandle { return this.scheduler.cancel(); }
   /** Called only after the matching Body stop ACK; a late runner cannot release a replacement owner. */
-  stopped(handle: SurvivalStopHandle): boolean {
-    if (!this.stopping || this.stopping !== handle) return false;
-    const active = this.active;
-    if (active && active.id === handle.taskId && active.cancelled) {
-      if (!active.borrowed) this.body.releaseTask!(active.token);
-      this.active = undefined;
-    }
-    this.stopping = undefined; return true;
-  }
+  stopped(handle: SurvivalStopHandle): boolean { return this.scheduler.stopped(handle); }
   async prepareItem(request: PrepareItemRequest, borrowed?: BorrowedSurvivalTask): Promise<Operation> {
     this.validateSlots(request); return this.run('prepare-item', borrowed, 15000, async task => {
       const state = await this.state(task), source = this.stack(state, request.slot);
@@ -249,7 +237,7 @@ export class SurvivalTasks {
     if (!validSlot(request.slot) || (request.targetSlot !== undefined && !validSlot(request.targetSlot, 8))) throw new BodyError('INVALID_ARGUMENT', '主背包槽应为0–35，目标热栏应为0–8');
   }
   private check(task: Active): void {
-    if (task.cancelled || this.active !== task || task.epoch !== this.epoch) throw new BodyError('CANCELLED', '任务已取消，未继续准备／进食');
+    if (!this.scheduler.live(task.lease) || this.active !== task) throw new BodyError('CANCELLED', '任务已取消，未继续准备／进食');
     task.borrowed?.check();
     if (this.now() >= task.deadline) throw new BodyError('TASK_TIMEOUT', '有限生存任务超过执行期限');
   }
@@ -384,8 +372,8 @@ export class SurvivalTasks {
   private async run(name: Name, borrowed: BorrowedSurvivalTask | undefined, timeoutMs: number, work: (task: Active) => Promise<void>): Promise<Operation> {
     this.assertIdle(); borrowed?.check();
     if (!borrowed && (!this.body.acquireTask || !this.body.releaseTask)) throw new BodyError('UNSUPPORTED', '生存任务需要共享身体写锁');
-    const id = randomUUID(); if (!borrowed) this.body.acquireTask!(id);
-    const task: Active = { id, name, token: borrowed?.taskToken ?? id, epoch: this.epoch, borrowed, cancelled: false, blocked: false,
+    const lease = this.scheduler.start(name, { ...(borrowed ? { lender: borrowed } : {}), retired: () => { if (this.active?.lease === lease) this.active = undefined; } });
+    const task: Active = { id: lease.id, name, token: lease.token, lease, borrowed,
       deadline: this.now() + timeoutMs, inFlight: false, progress: { stage: 'starting', swapped: false, prepared: false, consumedCount: 0, consumption: 'not-started' } };
     this.active = task;
     this.latestStartedId = task.id;
@@ -395,19 +383,17 @@ export class SurvivalTasks {
       operation = this.record(task, 'succeeded', name === 'eat' ? '原生消费一次已确认；未恢复旧工具或重试' : name === 'defend-self' ? '有限原生防卫已结束；不追击或恢复旧任务' : '物品已准备在热栏，完整栈已核验');
     } catch (error) {
       const code = error instanceof BodyError ? error.code : 'UNKNOWN'; task.progress.code = code;
-      const cancelled = task.cancelled || this.active !== task || task.epoch !== this.epoch || code === 'CANCELLED';
+      const cancelled = !this.scheduler.live(lease) || this.active !== task || code === 'CANCELLED';
       let status: Operation['status'] = cancelled ? 'cancelled' : UNCERTAIN.has(code) || task.inFlight ? 'unknown' : 'failed';
-      if (code === 'TASK_TIMEOUT' && !borrowed && task.inFlight && this.active === task && !task.cancelled) {
-        const handle = this.cancel();
-        try { const result = await this.body.stop(); if (result.stopped !== true) throw new BodyError('STOP_UNCONFIRMED', '停止未确认'); this.stopped(handle); }
-        catch { task.progress.code = 'STOP_UNCONFIRMED'; task.progress.requiresStop = true; }
+      if (code === 'TASK_TIMEOUT' && !borrowed && task.inFlight && this.active === task && this.scheduler.live(lease)) {
+        if (!await this.scheduler.halt()) { task.progress.code = 'STOP_UNCONFIRMED'; task.progress.requiresStop = true; }
         status = 'unknown';
-      } else if (status === 'unknown') { task.blocked = true; task.progress.requiresStop = true; }
+      } else if (status === 'unknown') { this.scheduler.block(lease); task.progress.requiresStop = true; }
       task.progress.stage = status === 'cancelled' ? 'cancelled' : status === 'unknown' ? 'blocked' : 'failed';
       operation = this.record(task, status, (error as Error).message);
     } finally {
       // Neither old cancellation nor an unknown write can release a replacement or borrowed owner.
-      if (this.active === task && !task.cancelled && !task.blocked) { if (!task.borrowed) this.body.releaseTask!(task.token); this.active = undefined; }
+      if (this.active === task && this.scheduler.end(lease)) this.active = undefined;
     }
     // Reporting cannot change the game result or cause an automatic second execution.
     try { this.onResult?.(structuredClone(operation)); if (this.latestStartedId === task.id) this.notificationFailed = false; }

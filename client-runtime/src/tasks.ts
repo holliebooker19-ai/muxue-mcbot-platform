@@ -1,40 +1,34 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { fightGrace, type FightGrace } from './fight-grace.js';
+import { Scheduler, type Lease, type StopHandle } from './scheduler.js';
 import { BodyError, type Body, type Observation, type Operation, type ActionName, type ActionArguments, type Container, type ItemStack, type NearbyBlocks } from './body.js';
 
 type Context = Pick<Observation, 'instanceId' | 'sessionId' | 'worldId' | 'dimension' | 'controlGeneration'>;
 type Target = { context: Context; expires: number; block: NearbyBlocks['candidates'][number] };
 type Request = { containerRef?: string; item?: string; count?: number; stacks?: number; player?: string; slot?: number; say?: string };
 type TaskName = 'container-list' | 'container-withdraw' | 'give-item' | 'fetch-and-give';
-type StopHandle = { epoch: number; taskId?: string };
 /** fail rejects `expired`; grace moves deadline (and the timer) back by guard fights, see stretch. */
 type Limit = { deadline: number; expired: Promise<never>; timer: ReturnType<typeof setTimeout>; fail: () => void; grace?: FightGrace };
-type TaskOwner = { id: string; epoch: number; cancelled: boolean; limit: Limit };
+type TaskOwner = { lease: Lease; epoch: number; limit: Limit };
 type Progress = { requestedCount: number; maxStackSize?: number; withdrawnCount: number; heldCount?: number; droppedCount: number; slot?: number; carriedCount?: number; lastConfirmedHeldCount?: number; lastConfirmedCarriedCount?: number; counts?: string; pickup: 'unconfirmed'; player?: string; item?: string; items?: unknown[]; stage: string; code?: string; cleanup?: string; containerProtection?: 'instance-bound' | 'state-only' };
 /** A bounded task runner. Authoritative snapshots and target tokens stay inside the task boundary. */
 export class ContainerTasks {
   private readonly targets = new Map<string, Target>();
   private readonly operations = new Map<string, Operation>();
-  private epoch = 0;
+  private readonly scheduler: Scheduler;
   private active?: TaskOwner;
-  private stopping?: StopHandle;
   constructor(private readonly body: Body, private readonly now = Date.now, private readonly onResult?: (operation: Operation) => void,
-    private readonly limits: { timeoutMs?: number; stopTimeoutMs?: number } = {}) {}
-  assertIdle(): void { if (this.active || this.stopping) throw new BodyError('BUSY', '容器任务运行或停止尚未确认；请等待或叫停'); }
-  cancel(): StopHandle {
-    this.epoch++; this.targets.clear();
-    if (this.active) this.active.cancelled = true;
-    return this.stopping = { epoch: this.epoch, taskId: this.active?.id };
+    private readonly limits: { timeoutMs?: number; stopTimeoutMs?: number } = {}) {
+    this.scheduler = Scheduler.of(body);
+    this.scheduler.onCancel(() => this.targets.clear());
   }
+  assertIdle(): void { if (this.active || this.scheduler.stopPending) throw new BodyError('BUSY', '容器任务运行或停止尚未确认；请等待或叫停'); }
+  /** A stop of everything (the scheduler's): the running task stops before its next step. */
+  cancel(): StopHandle { return this.scheduler.cancel(); }
   /** Only the matching latest Body stop confirmation can retire this cancelled owner's lock. */
-  stopped(handle: StopHandle): boolean {
-    if (this.stopping !== handle) return false;
-    if (this.active?.id === handle.taskId && this.active?.cancelled) {
-      this.body.releaseTask!(this.active.id); this.active = undefined;
-    }
-    this.stopping = undefined; return true;
-  }
+  stopped(handle: StopHandle): boolean { return this.scheduler.stopped(handle); }
+  private get epoch(): number { return this.scheduler.epoch; }
   operation(id: string): Operation | undefined { return this.operations.get(id); }
   async discover(options: { centerPlayer?: string; radius: number; maxResults: number }): Promise<unknown> {
     if (!this.body.nearbyBlocks) throw new BodyError('UNSUPPORTED', '身体不支持附近容器发现');
@@ -95,15 +89,10 @@ export class ContainerTasks {
   }
   private async timeout(id: string, epoch: number): Promise<void> {
     // An external stop may have retired this owner and started another task already.
-    if (epoch !== this.epoch || this.active?.id !== id) throw new BodyError('CANCELLED', '任务已由外部停止，后续步骤未执行');
-    const stopping = this.cancel();
+    if (epoch !== this.epoch || this.active?.lease.id !== id) throw new BodyError('CANCELLED', '任务已由外部停止，后续步骤未执行');
     const limit = this.limit(this.limits.stopTimeoutMs ?? 5000, '停止确认超过等待期限', false);
     try {
-      const result = await Promise.race([this.body.stop(), limit.expired]);
-      if (result.stopped !== true) throw new BodyError('STOP_UNCONFIRMED', '身体停止未确认');
-      this.stopped(stopping);
-    } catch {
-      throw new BodyError('STOP_UNCONFIRMED', '任务超时后的身体停止未确认；保留写锁，请明确叫停后再开始');
+      if (!await this.scheduler.halt(() => Promise.race([this.body.stop(), limit.expired]))) throw new BodyError('STOP_UNCONFIRMED', '任务超时后的身体停止未确认；保留写锁，请明确叫停后再开始');
     } finally { clearTimeout(limit.timer); }
   }
   private async observe(epoch: number, context?: Context): Promise<Observation> {
@@ -126,7 +115,7 @@ export class ContainerTasks {
       }
       // Known partial drop evidence remains useful even when externally cancelled or failed.
       // Never deliver an old task's receipt into a newly acquired owner.
-      if (!this.active || this.active.id === token) this.onResult?.(op);
+      if (!this.active || this.active.lease.id === token) this.onResult?.(op);
       return op;
     } finally { clearTimeout(limit.timer); }
   }
@@ -183,9 +172,9 @@ export class ContainerTasks {
     this.assertIdle();
     if (!this.body.acquireTask || !this.body.releaseTask) throw new BodyError('UNSUPPORTED', '容器任务需要共享身体写锁');
     if (this.body.pendingOperations().length) throw new BodyError('BUSY', '已有身体动作运行；请先完成或停止');
-    const id = randomUUID(), epoch = this.epoch;
-    this.body.acquireTask(id);
-    const owner: TaskOwner = { id, epoch, cancelled: false, limit: this.limit(this.limits.timeoutMs ?? 90000, '容器任务达到总等待期限，后续步骤未执行') };
+    const epoch = this.epoch;
+    const lease = this.scheduler.start(name, { retired: () => { if (this.active?.lease === lease) this.active = undefined; } }), id = lease.id;
+    const owner: TaskOwner = { lease, epoch, limit: this.limit(this.limits.timeoutMs ?? 90000, '容器任务达到总等待期限，后续步骤未执行') };
     this.active = owner;
     let context: Context | undefined;
     let ownedMenu: string | undefined;
@@ -374,7 +363,7 @@ export class ContainerTasks {
       clearTimeout(owner.limit.timer);
       // cancel fences old steps immediately; even a settled old run retains its lock until stopped(handle).
       // A late finally from a confirmed stop must never release or clear the newly started task.
-      if (this.active?.id === id && !this.active.cancelled) { this.body.releaseTask(id); this.active = undefined; }
+      if (this.active === owner && this.scheduler.end(lease)) this.active = undefined;
     }
   }
   private record(id: string, context: Context, name: TaskName, status: Operation['status'], summary: string, result: Progress): Operation {

@@ -17,7 +17,7 @@ import type { MachineWatch } from './machines.js';
 import { BlueprintShelf, resolveCells, type Rotation, type Shape } from './blueprints.js';
 import { pluginNotes } from './plugins.js';
 import { toolInfo, looksOnly, TOOLS } from './tool-registry.js';
-import { bodyWork, type BodyWork } from './work.js';
+import { Scheduler } from './scheduler.js';
 
 const coordinate = z.coerce.number().finite();
 const xyz = { x: coordinate, y: coordinate, z: coordinate };
@@ -26,16 +26,18 @@ const registryId = z.string().regex(/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('Na
 const resourceSelector = z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('A block ID (minecraft:oak_log, biomesoplenty:fir_log) or a block tag (#minecraft:logs, #c:ores, #c:ores/iron, #c:stones)');
 const timeoutMs = z.number().int().min(500).max(120000).optional();
 /** chatFloor: ServerBody claim chatCursor; chat at or before it predates this control and is withheld from the model. */
-export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; blueprints?: BlueprintShelf; work?: BodyWork } = {}): McpServer {
+export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; blueprints?: BlueprintShelf } = {}): McpServer {
   const server = new McpServer({ name: 'mcbot-client-runtime', version: '0.1.0' });
   const serverObserved = rawBody.hello.backend === 'server';
   const tasks = options.tasks ?? new ContainerTasks(rawBody, Date.now, operation => events.deliverOperation(operation));
   const gather = options.gather ?? new GatherTasks(rawBody, events);
   const companion = hasCompanionMode(rawBody.hello) ? options.companion ?? new CompanionMode(rawBody, events, gather) : undefined;
   const survival = options.survival ?? (['survival-state', 'swap-inventory', 'eat-item'].every(cap => rawBody.hello.capabilities.includes(cap)) ? new SurvivalTasks(rawBody, Date.now, operation => events.recordOperation(operation)) : undefined);
-  const stopCurrent = options.stopCurrent ?? createActionStop(rawBody, tasks, gather, companion, survival);
-  const work = options.work ?? bodyWork(rawBody, tasks, gather, survival, companion);
-  const reflexes = options.reflexes ?? (survival ? new SurvivalReflexes(rawBody, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: work.busy }) : undefined);
+  const stopCurrent = options.stopCurrent ?? createActionStop(rawBody, companion);
+  // The one busy check and task lock of this body (docs/companion_state_design.md 8.5).
+  const scheduler = Scheduler.of(rawBody);
+  if (companion) scheduler.useCompanion(companion);
+  const reflexes = options.reflexes ?? (survival ? new SurvivalReflexes(rawBody, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: () => scheduler.busy(), running: () => scheduler.current() }) : undefined);
   if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
   /** A stop (explicit, reflex preemption or reconfiguration) ends every tool call admitted before it: their later body.act submissions are refused. */
   let localStops = 0;
@@ -87,7 +89,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
         }
         if (!looksOnly(args)) {
           if (tool.kind === 'action' || tool.kind === 'task') reflexes?.authorizeAction();
-          if (tool.needsIdle) work.assertIdle();
+          if (tool.needsIdle) scheduler.assertIdle();
         }
         const result = await calls.run({ epoch: stopEpoch() }, () => handler(args));
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
@@ -207,7 +209,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     }
   }
   if (serverObserved && ['pillar-up', 'dig-block', 'swap-inventory'].every(cap => body.hello.capabilities.includes(cap))) {
-    const pillar = new PillarTasks(body, work.assertIdle);
+    const pillar = new PillarTasks(body, scheduler);
     register('pillar-up', 'Climb straight up 1-12 blocks to reach a block overhead: jump and place a block from the inventory under the feet each time (dirt, planks or logs first, stone last). Needs headroom; stops early when blocks or room run out. Remembers the pillar: after dig-block up there, call pillar-down. gather-resources climbs trees and high resources by itself.', { blocks: z.number().int().min(1).max(12) }, async ({ blocks }) => pillar.up(blocks));
     register('pillar-down', 'Come back down the pillar built with pillar-up, digging its blocks out one by one from the top (they drop and are picked up). Only digs blocks it placed itself.', {}, async () => pillar.down());
   }

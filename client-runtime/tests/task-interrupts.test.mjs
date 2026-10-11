@@ -4,7 +4,6 @@ import { ServerBody } from '../dist/server-body.js';
 import { BodyError } from '../dist/body.js';
 import { SurvivalReflexes, MAX_RESUMES } from '../dist/survival-reflexes.js';
 import { EventJournal } from '../dist/events.js';
-import { runningWork } from '../dist/work.js';
 import { mockServerControl, serverCapabilities } from './mock-server-control.mjs';
 
 // Eating or defense pauses a resumable task instead of cancelling it (docs/companion_state_design.md 8.4, capability task-interrupts).
@@ -164,12 +163,4 @@ test('automatic defense pauses the task too, and explicit defend-self never wait
   const explicit = reflexFixture({ threat: true }); explicit.pausable = false;
   await explicit.reflexes.defendSelf();
   assert.deepEqual(explicit.calls, ['begin:defend', 'stop', 'defend:own']);
-});
-
-test('runningWork names the gathering on its own lock, else the one server operation', () => {
-  const body = ops => ({ pendingOperations: () => ops });
-  const op = (operationId, name) => ({ operationId, name, status: 'running' });
-  assert.deepEqual(runningWork(body([op('o', 'build')]), { current: () => ({ id: 'g', name: 'gather-resources' }) }), { id: 'g', name: 'gather-resources' });
-  assert.deepEqual(runningWork(body([op('o', 'build'), op('c', 'send-chat')]), { current: () => undefined }), { id: 'o', name: 'build' });
-  assert.equal(runningWork(body([]), { current: () => undefined }), undefined);
 });

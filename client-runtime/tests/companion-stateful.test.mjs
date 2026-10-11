@@ -37,7 +37,7 @@ test('self defense stops a raw body action while the posture is giving way, and 
   const f = await fixture(t); await f.follow();
   const tasks = new ContainerTasks(f.body), gather = new GatherTasks(f.body, f.events);
   const survival = new SurvivalTasks(f.body);
-  const stop = createActionStop(f.body, tasks, gather, f.mode, survival);
+  const stop = createActionStop(f.body, f.mode);
   const bodyBusy = () => f.body.isBusy() || f.body.pendingOperations().length > 0;
   f.body.hello.capabilities.push('survival-state', 'defend-entity', 'retreat-from-entity');
   const threat = { entityId: randomUUID(), type: 'minecraft:zombie', classification: 'hostile', hostilitySource: 'vanilla_hostile_allowlist',
@@ -196,7 +196,7 @@ test('after the task the posture waits for a player who is out of sight (away), 
 test('cancelling work that a reflex preempts keeps the follow, while an explicit stop still discards it', async t => {
   const f = await fixture(t); await f.follow();
   const tasks = new ContainerTasks(f.body), gather = new GatherTasks(f.body, f.events);
-  const stop = createActionStop(f.body, tasks, gather, f.mode);
+  const stop = createActionStop(f.body, f.mode);
   await f.call('move-to-position', moveTo);
   await stop();
   assert.equal(f.mode.snapshot().intent, 'follow'); assert.equal(f.server.current.action, 'follow');

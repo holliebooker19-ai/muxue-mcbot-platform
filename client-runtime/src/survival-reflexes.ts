@@ -3,11 +3,10 @@ import type { EventJournal } from './events.js';
 import { gearLabel } from './model-view.js';
 import { selectFood, selectThreat, threatRefusal, type BorrowedSurvivalTask, type DefensePolicy, type SurvivalTasks } from './survival-tasks.js';
 import { TOOLS } from './tool-registry.js';
+import type { RunningWork } from './scheduler.js';
 
 /** How often one task may be paused for eating or defense and carry on; the next interrupt stops it as before (docs/companion_state_design.md 8.4). */
 export const MAX_RESUMES = 2;
-/** What runs now that eating or defense has to make room beside: a server operation or a gathering, by its id and tool name. */
-export interface RunningWork { id: string; name: string }
 type Room = { kind: 'pause'; work: RunningWork; count: number } | { kind: 'wait' } | { kind: 'stop'; note?: string };
 
 export interface SurvivalPolicy extends DefensePolicy {

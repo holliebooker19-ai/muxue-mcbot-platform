@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
 import { BodyError, type ActionArguments, type ActionName, type Body, type ItemStack, type ItemValue, type Observation, type Position } from './body.js';
+import type { Scheduler } from './scheduler.js';
 
 /** What the pillar is for: chopping a tree stands on logs first; anything else on soft blocks first. */
 export type PillarPurpose = 'log' | 'other';
@@ -92,29 +92,28 @@ export async function pillarDown(host: PillarHost, block: PillarBlock): Promise<
  */
 export class PillarTasks {
   private placed: PillarBlock[] = [];
-  private running = false;
-  constructor(private readonly body: Body, private readonly idle: () => void) {}
+  /** body: the one its steps go out through (the MCP stop fence); scheduler: that body's (Scheduler.of the raw body). */
+  constructor(private readonly body: Body, private readonly scheduler: Scheduler) {}
   get height(): number { return this.placed.length; }
-  private async locked<T>(work: (host: PillarHost) => Promise<T>): Promise<T> {
-    if (this.running) throw new BodyError('BUSY', '正在垫高或下来');
-    this.idle();
+  private async locked<T>(tool: 'pillar-up' | 'pillar-down', work: (host: PillarHost) => Promise<T>): Promise<T> {
+    this.scheduler.assertIdle();
     if (!this.body.acquireTask || !this.body.releaseTask) throw new BodyError('UNSUPPORTED', '垫高需要共享身体写锁');
-    const token = randomUUID();
-    this.body.acquireTask(token); this.running = true;
+    const lease = this.scheduler.start(tool);
     try {
       return await work({
         observe: block => this.body.observe(block),
         run: async (name, args) => {
-          let op = await this.body.act(name, args, token);
+          if (!this.scheduler.live(lease)) throw new BodyError('CANCELLED', '垫高已叫停，后续步骤未执行');
+          let op = await this.body.act(name, args, lease.token);
           while (op.status === 'running') { await delay(50); op = await this.body.operation(op.operationId); }
           if (op.status !== 'succeeded') throw new BodyError(op.status === 'unknown' ? 'UNKNOWN' : (op.result as { code?: string } | undefined)?.code ?? 'STEP_FAILED', op.summary);
           return op.result;
         },
       });
-    } finally { this.running = false; this.body.releaseTask(token); }
+    } finally { this.scheduler.end(lease); }
   }
   async up(blocks: number, purpose: PillarPurpose = 'other'): Promise<{ placed: number; height: number; position: Position; stopped?: string }> {
-    return this.locked(async host => {
+    return this.locked('pillar-up', async host => {
       let done = 0, stopped: string | undefined;
       // A pillar left from before that is no longer under the feet cannot be come down by digging: forget it.
       const state = await host.observe();
@@ -128,7 +127,7 @@ export class PillarTasks {
     });
   }
   async down(): Promise<{ recovered: number; height: number; position: Position }> {
-    return this.locked(async host => {
+    return this.locked('pillar-down', async host => {
       if (this.placed.length === 0) throw new BodyError('NOT_FOUND', '没有记着自己搭的柱子，不往下挖');
       let recovered = 0;
       while (this.placed.length) {
