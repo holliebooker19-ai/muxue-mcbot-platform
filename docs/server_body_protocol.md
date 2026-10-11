@@ -404,7 +404,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - 原版玩家死后 20 tick 会被移出世界（移除原因 `KILLED`），但仍留在玩家列表里，直到 `PERFORM_RESPAWN` 换成新实体。以前服务端把“已移除”当成身体不在了：死后超过 1 秒才复活时，会先让身体下线、再读死亡存档上线（聊天栏出现退出、加入）。现在 `KILLED` 的尸体照常原地复活（`NativeRespawn.present`）。
 - `hello.lastDeath`：最近一次死亡的原版死亡消息（`message`，即聊天栏那句）、维度、位置和时间（毫秒），一直保留到下次死亡；从没死过时没有这个字段。只读，不影响控制。
 - 托管重连（驱动器 `--reconnect`）启动时，驱动器不等玩家开口，马上给 Agent 一轮：复活的带上 30 分钟内的死因和死的地方。断开前的陪伴状态不再经过驱动器（8m 第二步，2026-10-11 起）。
-- 陪伴状态由运行端写在 `runtime/posture-<名字>.json`（跟随谁、原地等、保护谁，以及保护开没开）。身体丢了不清，只有明确结束才清：`companion-mode stop`、没跟随时 `guard:false`、`stop-action`、玩家叫停、托管真的停止。有 `server-posture` 时由**运行端**启动时读一次就删（`client-runtime/src/posture.ts`），超过一小时、或早于 `session-<名字>.json` 里最近一次叫停（`lastStopAt`）的不用；然后运行端自己先按「陪伴姿态」一节去捡死亡掉落，再恢复跟随／等待／保护（坐着不恢复），结果用一条【死后恢复】事件告诉 Agent。
+- 陪伴状态由运行端写在 `runtime/posture-<名字>.json`（跟随谁、原地等、保护谁，以及保护开没开）。身体丢了不清，只有明确结束才清：`companion-mode stop`、没跟随时 `guard:false`、`stop-action`、玩家叫停、托管真的停止。有 `server-posture` 时由**运行端**启动时读一次就删（`client-runtime/src/posture.ts`），超过一小时、或早于 `session-<名字>.json` 里最近一次叫停（`lastStopAt`）的不用；然后运行端自己先按「陪伴姿态」一节去捡死亡掉落，再恢复跟随／等待／保护（坐着不恢复；记录时跟随／等待是手动暂停或受阻的，记录里带 `state: paused|blocked`（受阻带 `code`），这种不自动接上，只恢复保护并在事件里说明原因），结果用一条【死后恢复】事件告诉 Agent。
 
 ### 保护用弓（2026-10-11 试玩反馈修正）
 
@@ -487,7 +487,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 | `waiting` | 原地等（`action:"wait"`） |
 | `seated` | 坐在座位上 |
 | `guarding` | 常驻保护占着身体在打；打完回到原来的状态 |
-| `suspended` | 有操作在跑，姿态让给它：`suspendedFor`是操作名。操作结束后，身体空闲满`RESUME_AFTER_MS`（3000）才接上，期间`resumeInMs`是剩余毫秒；中间来了新操作就重新计时 |
+| `suspended` | 有操作在跑，姿态让给它：`suspendedFor`是操作名。操作结束后，身体空闲满`RESUME_AFTER_MS`（3000）才接上，期间`resumeInMs`是剩余毫秒；中间来了新操作就重新计时。带附加动画的 `emote` 操作本身马上结束，但动画（`BodyEmotes`，`seconds` 秒）还在播时也算占着身体，`suspendedFor` 是 `emote`，播完再等 3 秒（2026-10-11） |
 | `away` | 跟的人下线、死了、换了维度，或离开 32 格（`GuardDuty.PLAYER_RANGE`，保护判断玩家在不在也用它）；回来自动接上。`reason`为`PLAYER_AWAY` |
 | `blocked` | 走不到玩家身边；每隔 3 秒（`FollowCompanion.UNREACHABLE_RETRY_MS`），或玩家挪开 2 格（`UNREACHABLE_SHIFT`）就再试。`reason`是导航给的码：`NO_PATH`，或此刻不能走路时的`BLOCKED`（在岩浆里、骑着东西等）；某一刻内部出错时为`INTERNAL`，下一刻照常再试 |
 

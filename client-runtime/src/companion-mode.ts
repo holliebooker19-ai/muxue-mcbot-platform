@@ -49,7 +49,8 @@ export interface CompanionState {
  * (after a death, a closed game, a restart) can set it again. Only an explicit end clears it (companion-mode stop, stop-action,
  * the host on a player's stop); losing the body does not.
  */
-export interface Posture { action: 'follow' | 'wait' | 'guard' | 'seated'; player?: string; guard: boolean; distance?: number; wander?: boolean }
+/** state: the follow/wait was paused by hand or blocked (with its code) when recorded; such a record is not set going again by itself. */
+export interface Posture { action: 'follow' | 'wait' | 'guard' | 'seated'; player?: string; guard: boolean; distance?: number; wander?: boolean; state?: 'paused' | 'blocked'; code?: string }
 export interface CompanionRequest { action: 'follow' | 'wait' | 'pause' | 'resume' | 'stop' | 'guard'; player?: string; distance?: number; wander?: boolean; guard?: GuardOptions | boolean; pickup?: PickupOptions; mining?: MiningOptions; say?: string }
 /** Control itself is gone or cannot be trusted: the body is closed. */
 const controlLost = new Set(['WRONG_INSTANCE', 'STALE_CONTROL', 'LEASE_LOST', 'LEASE_EXPIRED', 'TRANSPORT_LOST', 'INVALID_RESPONSE', 'STOP_UNCONFIRMED', 'HOST_LOST', 'CLOSED']);
@@ -215,7 +216,10 @@ export class CompanionMode {
     if (this.intent) {
       const { action, player, distance, wander } = this.intent;
       const who = player ?? this.duty?.player;
-      return { action, ...(who ? { player: who } : {}), guard, ...(action === 'follow' ? { distance, ...(wander === false ? { wander } : {}) } : {}) };
+      // Paused or blocked: the intent is kept for an explicit resume, but nothing runs; the record says so, so a restart does not start it.
+      const { state, code } = this.value;
+      const held = state === 'paused' || state === 'blocked' ? { state, ...(state === 'blocked' && code ? { code } : {}) } : {};
+      return { action, ...(who ? { player: who } : {}), guard, ...(action === 'follow' ? { distance, ...(wander === false ? { wander } : {}) } : {}), ...held };
     }
     if (this.dutyMode() && this.duty) return { action: 'guard', player: this.duty.player, guard: true };
     return undefined;
@@ -792,6 +796,14 @@ export class CompanionMode {
       if (held.action === 'seated') {
         if (held.guard && held.player && near) await this.request({ action: 'guard', player: held.player, guard: true });
         return `之前是坐着的，坐姿不自动恢复（复活点离座位远）${held.guard && near ? '；保护已恢复' : ''}，想坐回去自己用 sit`;
+      }
+      if (held.state && (held.action === 'follow' || held.action === 'wait')) {
+        // Paused by hand or blocked: it was not running then, so it is not started now (only an explicit resume ran it, and that intent is gone). Protection is the player's standing wish and comes back.
+        const guarded = held.guard && !!held.player && near;
+        if (guarded) await this.request({ action: 'guard', player: held.player!, guard: true });
+        const what = held.action === 'follow' ? `跟随 ${held.player}` : '原地等待';
+        const why = held.state === 'paused' ? '是暂停着的' : `受阻停着（${held.code ?? '原因不明'}）`;
+        return `之前的${what}${why}，没有自动接上${guarded ? '；保护已恢复' : ''}；要接着就重新用 companion-mode ${held.action}`;
       }
       if (!held.player && held.action !== 'wait') return `之前在${held.action === 'follow' ? '跟随' : '保护'}，但记录里没有玩家，没恢复`;
       if (held.action === 'wait') {

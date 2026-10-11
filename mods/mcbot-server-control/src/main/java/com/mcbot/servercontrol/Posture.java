@@ -58,6 +58,14 @@ final class Posture {
         if(KEEPS.contains(action))return false;
         return !(kind==Kind.SEATED&&NativeSeat.allowedWhileSeated(action));
     }
+    /**
+     * What the posture gives way to now: the first running action that takes the body, else an add-on animation still playing
+     * after its emote operation finished (BodyEmotes; walking off would cut a looping animation short), else null.
+     */
+    String yieldTo(java.util.List<String> running,boolean animating) {
+        for(String action:running) if(suspendedBy(action)) return action;
+        return animating&&suspendedBy("emote")?"emote":null;
+    }
     /** After a fight while waiting the guard walks back to where it stood (the 10-10 rule); following and seated postures take the body back themselves. */
     boolean guardWalksBack(){return kind==Kind.WAIT;}
     /** The followed name now belongs to someone else: the posture is over (the controller drops it). */

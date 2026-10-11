@@ -422,7 +422,7 @@ final class ServerController implements ControlSession.Game {
     /** True when the posture drove the body this tick; it yields to a running action unless that action keeps it. */
     private boolean tickPosture() {
         Posture current=posture;
-        String running=session.running().stream().filter(current::suspendedBy).findFirst().orElse(null);
+        String running=current.yieldTo(session.running(),emotes.playing()!=null);
         boolean drove;
         try { drove=current.tick(running); }
         catch(RuntimeException fault) { drove=false; current.halt(); }

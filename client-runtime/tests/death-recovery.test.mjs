@@ -137,6 +137,16 @@ test('a seat is reported, never restored; its protection is', async t => {
   assert.equal(f.calls('posture').length, 0, 'no follow or wait invented for a seat');
 });
 
+test('a follow that was paused or blocked is not started again; its protection is, and the model is told why', async t => {
+  const paused = await setup(t);
+  await paused.recover(held({ state: 'paused' }), paused.death({}, { remaining: 0 }));
+  assert.equal(paused.calls('posture').length, 0, 'no follow set'); assert.equal(paused.mode.snapshot().guardEnabled, true);
+  assert.match(paused.note(), /跟随 Alex是暂停着的，没有自动接上；保护已恢复/);
+  const blocked = await setup(t);
+  await blocked.recover(held({ action: 'wait', player: undefined, guard: false, state: 'blocked', code: 'NO_PATH' }), blocked.death({}, { remaining: 0 }));
+  assert.equal(blocked.calls('posture').length, 0, 'no wait set'); assert.match(blocked.note(), /原地等待受阻停着（NO_PATH），没有自动接上/);
+});
+
 test('a wait is set again where the body stands now, and the player who is not around keeps a follow from being set', async t => {
   const waiting = await setup(t);
   await waiting.recover(held({ action: 'wait', player: undefined, guard: false }), waiting.death({}, { remaining: 0 }));

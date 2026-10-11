@@ -19,6 +19,8 @@ export const HELD_POSTURE_MAX_AGE_MS = 60 * 60 * 1000;
 /** A record stamped later than now by more than this is not believed (taken over from the driver's old reader). */
 const CLOCK_SKEW_MS = 60000;
 const GAME_NAME = /^[A-Za-z0-9_]{1,16}$/;
+/** A blocked record's code goes into the model's text: only the shape of our error codes (BodyError, server codes) is kept. */
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 export interface HeldPosture extends Posture { at: number }
 
 /**
@@ -40,5 +42,7 @@ export function takeHeldPosture(file: string, stopRecord: string, now = Date.now
   try { stoppedAt = Number(JSON.parse(fs.readFileSync(stopRecord, 'utf8'))?.lastStopAt) || 0; } catch { /* no session record: the player never stopped it */ }
   if (stoppedAt > 0 && p.at <= stoppedAt) return null;
   const distance = typeof p.distance === 'number' && p.distance >= FOLLOW_DISTANCE.min && p.distance <= FOLLOW_DISTANCE.max ? p.distance : undefined;
-  return { action: p.action as Posture['action'], ...(p.player ? { player: p.player } : {}), guard: p.guard === true, ...(distance !== undefined ? { distance } : {}), ...(p.wander === false ? { wander: false } : {}), at: p.at };
+  const state = p.state === 'paused' || p.state === 'blocked' ? p.state : undefined;
+  const code = state === 'blocked' && typeof p.code === 'string' && ERROR_CODE.test(p.code) ? p.code : undefined;
+  return { action: p.action as Posture['action'], ...(p.player ? { player: p.player } : {}), guard: p.guard === true, ...(distance !== undefined ? { distance } : {}), ...(p.wander === false ? { wander: false } : {}), ...(state ? { state } : {}), ...(code ? { code } : {}), at: p.at };
 }

@@ -17,7 +17,7 @@ final class PostureTest {
         final ControlSession session=new ControlSession(this,terrain.time::get,"world","Bot");
         final JsonObject auth;
         Posture posture;
-        boolean immediate=true,fighting,wasFighting,seated,standUps;
+        boolean immediate=true,fighting,wasFighting,seated,standUps,animating;
         int seatSteps,seatWalkStops;
         String seatFailure;
         ControlSession.Operation active;
@@ -73,7 +73,7 @@ final class PostureTest {
             if(fighting){posture.guarding();wasFighting=true;terrain.physics();return false;}
             if(wasFighting){wasFighting=false;posture.resumeAfterGuard();}
             Posture current=posture;
-            String running=session.running().stream().filter(current::suspendedBy).findFirst().orElse(null);
+            String running=current.yieldTo(session.running(),animating);
             boolean drove=current.tick(running);
             if(current.ended())posture=null;
             terrain.physics();return drove;
@@ -103,6 +103,15 @@ final class PostureTest {
         f.act("select-slot");
         check(f.tick(50)&&f.state().equals("following"),"select-slot running: the posture keeps driving");
         f.finish();f.immediate=true;
+        // An add-on animation outlives its emote operation: the posture waits for it to end, then the usual pause.
+        f.act("emote");f.animating=true;
+        check(!f.tick(50)&&f.state().equals("suspended")&&f.posture.json().get("suspendedFor").getAsString().equals("emote"),"emote finished but its animation plays: suspended for emote");
+        f.terrain.time.addAndGet(Posture.RESUME_AFTER_MS*2);
+        check(!f.tick(50)&&f.state().equals("suspended"),"a long animation is never cut by the pause running out");
+        f.animating=false;
+        check(!f.tick(50)&&f.state().equals("suspended"),"animation over: still the pause after it");
+        f.terrain.time.addAndGet(Posture.RESUME_AFTER_MS);
+        check(f.tick(50)&&f.state().equals("following"),"RESUME_AFTER_MS after the animation: follows again");
         // An ordinary stop keeps the posture; clearPosture ends it.
         f.session.call("stop",f.auth);
         check(f.posture!=null&&f.state().equals("suspended"),"an ordinary stop keeps the posture and pauses it");
