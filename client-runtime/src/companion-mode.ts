@@ -1,21 +1,15 @@
-import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { BodyError, type Body, type BodyHello, type Observation, type Operation, type GroundItem, type Components, type PickupReceipt, type GuardOptions, type GuardDutyState, type PostureState, type PostureRequest, type StopOptions } from './body.js';
+import { BodyError, type Body, type BodyHello, type Observation, type Operation, type GuardOptions, type GuardDutyState, type PostureState, type PostureRequest, type StopOptions } from './body.js';
 import type { EventJournal } from './events.js';
-import { GatherTasks, type BorrowedMining } from './gather-tasks.js';
+import { GatherTasks } from './gather-tasks.js';
+import { CompanionErrands, type PickupOptions, type PickupState, type MiningOptions, type MiningState } from './companion-errands.js';
+
+export type { PickupOptions, PickupState, MiningOptions, MiningState };
 
 /** What a follow/wait belongs to. A plain stop moves the control generation on without ending the posture, so the generation is not part of it. */
-type Identity = Pick<Observation, 'instanceId' | 'sessionId' | 'worldId' | 'dimension'>;
+export type Identity = Pick<Observation, 'instanceId' | 'sessionId' | 'worldId' | 'dimension'>;
 /** The identity plus the control generation: what a child pickup/mining task is bound to for its short life. */
-type Context = Identity & Pick<Observation, 'controlGeneration'>;
-export interface PickupOptions { items: string[]; radius?: number }
-export interface PickupState { items: string[]; radius: number; pickedUpCount?: number; lastConfirmedPickedUpCount?: number; lastItem?: string; code?: string; lastCode?: string; countStatus: 'confirmed' | 'partial-or-unknown'; totals: Array<{ item: string; count: number; maxStackSize: number; variant: number; storedIn?: string }> }
-export interface MiningOptions { blockIds: string[]; maxBlocks: number; radius?: number; durationMs?: number }
-export interface MiningState { blockIds: string[]; maxBlocks: number; radius: number; durationMs: number; deadline: number; attemptedBlocks: number; remainingBlocks: number; minedBlocks: number; active: boolean; disabledReason?: string; lastCode?: string; countStatus: 'confirmed' | 'partial-or-unknown'; dropAttribution: 'unconfirmed'; newPickedByItem: Array<{ item: string; count: number; maxStackSize: number; variant: number; storedIn?: string }> }
-type MiningTracker = { state: MiningState; lastScanAt: number; attempted: Set<string>; cursor: number; variants: Array<{ item: string; count: number; maxStackSize: number; components: Components; storedIn?: string }>; child?: symbol; childMined: number };
-// Ores by block ID or tag (#c:ores, modded too); the body scans only ores whatever else is named.
-const miningSelector = /^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/;
-type PickupTracker = { state: PickupState; cursor: number; count: number; variants: Array<{ item: string; count: number; maxStackSize: number; components: Components; storedIn?: string }>; attempted: Set<string>; pending?: { item: GroundItem; cursor: number; receipts: PickupReceipt[] } };
+export type Context = Identity & Pick<Observation, 'controlGeneration'>;
 type Intent = { action: 'follow' | 'wait'; player?: string; expectedEntityId?: string; distance?: number; wander?: boolean; context: Identity; pickup?: { items: string[]; radius: number } };
 /** The follow distance the player may ask for, and the one used when nothing is said (the posture method takes the same range). */
 export const FOLLOW_DISTANCE = { min: 1.5, max: 6, initial: 2.5 } as const;
@@ -59,28 +53,23 @@ const controlLost = new Set(['WRONG_INSTANCE', 'STALE_CONTROL', 'LEASE_LOST', 'L
  * The body stays under control and keeps its guard duty; the server drops a posture itself when its body changes.
  */
 const intentEnded = new Set(['CANCELLED', 'WORLD_CHANGED']);
-const contextOf = (state: Context): Context => ({ instanceId: state.instanceId, sessionId: state.sessionId, worldId: state.worldId, dimension: state.dimension, controlGeneration: state.controlGeneration });
 const identityOf = (state: Identity): Identity => ({ instanceId: state.instanceId, sessionId: state.sessionId, worldId: state.worldId, dimension: state.dimension });
 
 /**
  * Follow and wait are the server's posture (docs/server_body_protocol.md, "陪伴姿态"): this class asks for it, translates what the
- * server reports into state and events, and runs the two child jobs that need the model-free loop (pickup, mining) as ordinary
- * operations. Giving way to other operations and taking over again is the server's; nothing here steps aside or resumes.
+ * server reports into state and events. Picking up and mining beside the player are its errands (CompanionErrands). Giving way
+ * to other operations and taking over again is the server's; nothing here steps aside or resumes.
  */
 export class CompanionMode {
   private value: CompanionState = { state: 'idle' };
   private intent?: Intent;
-  private token?: string;
   private epoch = 0;
   private observationRevision = 0;
   private changing?: symbol;
   private stopping?: Promise<{ stopped: true }>;
   private stopUnconfirmed = false;
   private terminal?: Operation;
-  private pickup?: PickupTracker;
-  private mining?: MiningTracker;
-  private childActive = false;
-  private readonly gather: GatherTasks;
+  private readonly errands: CompanionErrands;
   /** Guard used by follow when the request does not say: the runtime's setting (on by default), false turns it off. */
   guardDefaults: GuardOptions | false = {};
   private lastGuard?: GuardState;
@@ -105,8 +94,15 @@ export class CompanionMode {
   private postureSaid?: string;
   /** While an explicit end is under way, what is left of the posture on the way out (the guard after the follow) is not a new one. */
   private endingPosture = 0;
-  constructor(private readonly body: Body, private readonly events: EventJournal, gather?: GatherTasks, private readonly now = Date.now) { this.gather = gather ?? new GatherTasks(body, events, now); }
-  snapshot(): CompanionState { return structuredClone({ ...this.value, ...(this.dutyMode() ? this.dutyView() : {}), ...(this.pickup ? { pickup: this.pickupState() } : {}), ...(this.mining ? { mining: this.miningState() } : {}) }); }
+  constructor(private readonly body: Body, private readonly events: EventJournal, gather?: GatherTasks, private readonly now = Date.now) {
+    this.errands = new CompanionErrands(body, events, gather ?? new GatherTasks(body, events, now), {
+      epoch: () => this.epoch, check: epoch => this.check(epoch), observe: (epoch, expected) => this.observe(epoch, expected), intent: () => this.intent,
+      identity: (state, player, expectedEntityId) => this.identity(state, player, expectedEntityId),
+      show: (state, activity) => this.publish({ ...this.base(state, 'active'), activity }, false),
+      describe: () => this.base(this.value.state), block: (error, epoch, operation) => this.block(error, epoch, operation),
+    }, now);
+  }
+  snapshot(): CompanionState { return structuredClone({ ...this.value, ...(this.dutyMode() ? this.dutyView() : {}), ...this.errands.view() }); }
   /** The body keeps protection as its own standing duty (guard-duty-fenced). */
   private dutyMode(): boolean { return this.body.hello.capabilities.includes('guard-duty-fenced') && !!this.body.setGuard; }
   private postureMode(): boolean { return this.body.hello.capabilities.includes('server-posture') && !!this.body.setPosture; }
@@ -156,43 +152,9 @@ export class CompanionMode {
   /** True while the guard duty is fighting (or walking back) for the player. */
   guardFighting(): boolean { return this.dutyMode() && !!this.duty && !!this.dutyState?.covering && this.dutyState.state !== 'idle'; }
   /** The companion itself holds the body: a child pickup/mining, a protection fight, or the posture giving way to an operation. */
-  busy(): boolean { return this.childActive || this.guardFighting() || !!this.value.suspendedFor; }
+  busy(): boolean { return this.errands.running || this.guardFighting() || !!this.value.suspendedFor; }
   /** How many explicit ends there have been; a changed count means someone ended the posture on purpose. */
   explicitStopCount(): number { return this.explicitStops; }
-  private miningState(): MiningState {
-    const mining = this.mining!;
-    return { ...mining.state, remainingBlocks: Math.max(0, mining.state.maxBlocks - mining.state.attemptedBlocks), newPickedByItem: mining.variants.map(({ components: _private, ...item }, index) => ({ ...item, variant: index + 1 })) };
-  }
-  private initMining(state: Observation, options?: MiningOptions): void {
-    if (!options) { this.mining = undefined; return; }
-    if (state.pickupCursor === undefined || state.pickupOldestCursor === undefined || !state.pickupReceipts || !state.groundItems) throw new BodyError('UNSUPPORTED', '持续陪挖缺少原生收据／地面观察');
-    const durationMs = options.durationMs ?? 300000;
-    this.mining = { state: { blockIds: [...options.blockIds], maxBlocks: options.maxBlocks, radius: options.radius ?? 4, durationMs, deadline: this.now() + durationMs, attemptedBlocks: 0, remainingBlocks: options.maxBlocks, minedBlocks: 0, active: true, countStatus: 'confirmed', dropAttribution: 'unconfirmed', newPickedByItem: [] }, lastScanAt: -Infinity, attempted: new Set(), cursor: state.pickupCursor, variants: [], childMined: 0 };
-  }
-  private ingestMining(state: Observation): void {
-    const mining = this.mining; if (!mining) return;
-    if (state.pickupCursor === undefined || state.pickupOldestCursor === undefined || !state.pickupReceipts || mining.cursor < state.pickupOldestCursor || state.pickupCursor < mining.cursor) throw new BodyError('PICKUP_GAP', '陪挖拾取收据出现历史缺口；只保留最后确认数量');
-    for (const receipt of [...state.pickupReceipts].sort((a, b) => a.seq - b.seq)) {
-      if (receipt.seq <= mining.cursor) continue;
-      if (receipt.seq !== mining.cursor + 1 || receipt.seq > state.pickupCursor || receipt.stack.count !== receipt.pickedUpCount || !Number.isSafeInteger(receipt.pickedUpCount) || receipt.pickedUpCount < 1) throw new BodyError('PICKUP_GAP', '陪挖收据序列或实际数量不完整');
-      if (receipt.sessionId !== this.intent?.context.sessionId || receipt.dimension !== this.intent?.context.dimension) throw new BodyError('WORLD_CHANGED', '陪挖收据不属于当前模式的会话');
-      if (receipt.stack.components === undefined || receipt.stack.maxStackSize === undefined) throw new BodyError('PICKUP_UNKNOWN', '陪挖收据缺少实际组件或上限');
-      let variant = mining.variants.find(item => item.item === receipt.stack.id && item.maxStackSize === receipt.stack.maxStackSize && item.storedIn === receipt.storedIn && isDeepStrictEqual(item.components, receipt.stack.components));
-      if (!variant) { if (mining.variants.length >= 64) throw new BodyError('PICKUP_UNKNOWN', '陪挖实际拾取变体账本超过有限上限'); variant = { item: receipt.stack.id, count: 0, maxStackSize: receipt.stack.maxStackSize, components: structuredClone(receipt.stack.components), ...(receipt.storedIn ? { storedIn: receipt.storedIn } : {}) }; mining.variants.push(variant); }
-      variant.count += receipt.pickedUpCount; mining.cursor = receipt.seq;
-    }
-    if (mining.cursor !== state.pickupCursor) throw new BodyError('PICKUP_GAP', '陪挖最新游标缺少完整收据');
-  }
-  private disableMining(reason: string): void {
-    if (!this.mining?.state.active) return;
-    this.mining.state.active = false; this.mining.state.disabledReason = reason;
-    this.events.add('companion', JSON.stringify({ ...this.base(this.value.state), mining: this.miningState(), reason: '陪挖预算已到，仅关闭采矿并保留原跟随；恢复不会补充预算' }));
-  }
-  private pickupState(): PickupState | undefined {
-    if (!this.pickup) return undefined;
-    const { state, count, variants } = this.pickup;
-    return { ...state, ...(state.countStatus === 'confirmed' ? { pickedUpCount: count } : { pickedUpCount: undefined, lastConfirmedPickedUpCount: count }), totals: variants.map(({ components: _private, ...item }, i) => ({ ...item, variant: i + 1 })) };
-  }
   read(): CompanionState { if (this.terminal) this.events.deliverOperation(this.terminal); return this.snapshot(); }
   observationEpoch(): number | null { return this.changing || this.stopping ? null : this.observationRevision; }
   /** Take the server's word now (get-companion-mode): the same reading the monitor does every tick. */
@@ -241,12 +203,6 @@ export class CompanionMode {
     if (notify) this.events.add('companion_state', JSON.stringify(value), value.operationId);
   }
   private check(epoch: number): void { if (epoch !== this.epoch) throw new BodyError('CANCELLED', '陪伴指令已撤销，未恢复旧动作'); }
-  private release(owner = this.token): void { if (this.token !== owner) return; if (owner) this.body.releaseTask?.(owner); this.token = undefined; }
-  private acquire(): void {
-    if (this.token) return;
-    if (!this.body.acquireTask || !this.body.releaseTask) throw new BodyError('UNSUPPORTED', '陪拾取／陪挖和死后捡回需要共享任务写锁');
-    const token = randomUUID(); this.body.acquireTask(token); this.token = token;
-  }
   /** expected: the fields of the context (or identity) the observation must still show. */
   private async observe(epoch: number, expected?: Partial<Context>): Promise<Observation> {
     this.check(epoch); const state = await this.body.observe(); this.check(epoch);
@@ -275,36 +231,11 @@ export class CompanionMode {
       ? { suspendedFor: posture.suspendedFor, reason: `暂时让开去做 ${posture.suspendedFor}，做完自动接着${intent.action === 'wait' ? '等' : '跟'}；不用 pause／resume，想结束用 companion-mode stop` }
       : posture.state === 'away' ? { away: true, reason: `${who} 不在附近（太远、下线、死了或在别的维度），回到附近会自动接上；想不跟了用 companion-mode stop，或重新 follow` }
       : posture.state === 'blocked' ? { reason: `走不到 ${who} 身边（${posture.reason ?? 'NO_PATH'}），过几秒会自己再试` } : {};
-    return { ...this.base(waiting ? 'waiting' : 'following', 'active'), ...(this.pickup || this.mining ? { activity: 'following' as const } : {}), ...note };
-  }
-  private initPickup(state: Observation, options?: PickupOptions): void {
-    if (!options) { this.pickup = undefined; return; }
-    if (state.pickupCursor === undefined || state.pickupOldestCursor === undefined || !state.pickupReceipts || !state.groundItems) throw new BodyError('UNSUPPORTED', '持续拾取缺少原生收据／地面观察');
-    this.pickup = { state: { items: [...options.items], radius: options.radius ?? 3, pickedUpCount: 0, countStatus: 'confirmed', totals: [] }, cursor: state.pickupCursor, count: 0, variants: [], attempted: new Set() };
-  }
-  private ingestPickup(state: Observation): void {
-    const pickup = this.pickup; if (!pickup) return;
-    if (state.pickupCursor === undefined || state.pickupOldestCursor === undefined || !state.pickupReceipts) throw new BodyError('UNSUPPORTED', '持续拾取缺少原生收据');
-    if (pickup.cursor < state.pickupOldestCursor || state.pickupCursor < pickup.cursor) throw new BodyError('PICKUP_GAP', '持续拾取收据历史缺口；仅保留最后确认数量');
-    for (const receipt of [...state.pickupReceipts].sort((a, b) => a.seq - b.seq)) {
-      if (receipt.seq <= pickup.cursor) continue;
-      if (receipt.seq !== pickup.cursor + 1 || receipt.seq > state.pickupCursor || receipt.stack.count !== receipt.pickedUpCount || receipt.pickedUpCount < 1 || !Number.isSafeInteger(receipt.pickedUpCount)) throw new BodyError('PICKUP_GAP', '持续拾取收据数量或序列不完整');
-      if (receipt.sessionId !== this.intent?.context.sessionId || receipt.dimension !== this.intent?.context.dimension) throw new BodyError('WORLD_CHANGED', '拾取收据不属于当前陪伴会话');
-      pickup.cursor = receipt.seq;
-      if (pickup.pending && receipt.entityId === pickup.pending.item.entityId && receipt.seq > pickup.pending.cursor) pickup.pending.receipts.push(structuredClone(receipt));
-      // Item selection limits active pursuit; ordinary Minecraft collision pickup is not physically disabled.
-      if (!pickup.state.items.includes(receipt.stack.id)) continue;
-      if (receipt.stack.components === undefined || receipt.stack.maxStackSize === undefined) throw new BodyError('PICKUP_UNKNOWN', '拾取片段缺少实际组件或堆叠上限');
-      pickup.count += receipt.pickedUpCount; pickup.state.lastItem = receipt.stack.id;
-      let variant = pickup.variants.find(item => item.item === receipt.stack.id && item.maxStackSize === receipt.stack.maxStackSize && item.storedIn === receipt.storedIn && isDeepStrictEqual(item.components, receipt.stack.components));
-      if (!variant) { variant = { item: receipt.stack.id, count: 0, maxStackSize: receipt.stack.maxStackSize, components: structuredClone(receipt.stack.components), ...(receipt.storedIn ? { storedIn: receipt.storedIn } : {}) }; pickup.variants.push(variant); }
-      variant.count += receipt.pickedUpCount;
-    }
-    if (pickup.cursor !== state.pickupCursor) throw new BodyError('PICKUP_GAP', '持续拾取最新游标没有完整收据');
+    return { ...this.base(waiting ? 'waiting' : 'following', 'active'), ...(this.errands.configured() ? { activity: 'following' as const } : {}), ...note };
   }
   private async say(epoch: number, message?: string): Promise<void> {
     if (!message) return;
-    const sent = await this.body.act('send-chat', { message }, this.token); this.check(epoch);
+    const sent = await this.body.act('send-chat', { message }, this.errands.token); this.check(epoch);
     if (sent.status !== 'succeeded') throw new BodyError(sent.status === 'unknown' ? 'INVALID_RESPONSE' : 'CHAT_FAILED', sent.summary);
   }
   /** What the posture method gets for an intent: the player is the one the observation showed, never a name alone. */
@@ -321,17 +252,7 @@ export class CompanionMode {
     if (request.action === 'stop') return this.endCompanion(request.say);
     if (request.action === 'guard') return this.requestDuty(request);
     this.requirePosture();
-    if (request.pickup && request.mining) throw new BodyError('INVALID_ARGUMENT', '首版持续拾取与陪挖配置互斥；陪挖自行收取新观察的掉落');
-    if (request.mining) {
-      if (!['companion-mining', 'nearby-resources', 'approach-resource', 'dig-block', 'pickup-item', 'select-slot', 'assess-tool'].every(cap => this.body.hello.capabilities.includes(cap))) throw new BodyError('UNSUPPORTED', '游戏端没有完整持续陪挖／工具及玩家边界保护能力');
-      const { blockIds, maxBlocks, radius = 4, durationMs = 300000 } = request.mining;
-      if (!Array.isArray(blockIds) || blockIds.length < 1 || blockIds.length > 8 || new Set(blockIds).size !== blockIds.length || blockIds.some(id => typeof id !== 'string' || !miningSelector.test(id)) || !Number.isInteger(maxBlocks) || maxBlocks < 1 || maxBlocks > 32 || !Number.isInteger(radius) || radius < 3 || radius > 4 || !Number.isInteger(durationMs) || durationMs < 10000 || durationMs > 600000 || (request.distance ?? FOLLOW_DISTANCE.initial) > radius) throw new BodyError('INVALID_ARGUMENT', '陪挖需要1..8个矿石ID或标签（如 #c:ores）、maxBlocks 1..32、整数半径3..4和durationMs 10000..600000；跟随距离不能超过半径');
-    }
-    if (request.pickup) {
-      if (!['companion-pickup', 'pickup-item'].every(cap => this.body.hello.capabilities.includes(cap))) throw new BodyError('UNSUPPORTED', '游戏端没有持续拾取玩家边界保护能力');
-      const radius = request.pickup.radius ?? 3;
-      if (!Array.isArray(request.pickup.items) || request.pickup.items.length < 1 || request.pickup.items.length > 8 || request.pickup.items.some(item => !/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/.test(item)) || !Number.isFinite(radius) || radius < 1.5 || radius > 4 || (request.distance ?? FOLLOW_DISTANCE.initial) > radius) throw new BodyError('INVALID_ARGUMENT', '拾取需要1..8个明确物品ID、1.5..4半径，跟随距离不能大于拾取半径');
-    }
+    this.errands.validate(request, request.distance ?? FOLLOW_DISTANCE.initial);
     if ((request.action === 'resume' || request.action === 'pause') && !this.intent) throw new BodyError('NO_COMPANION_INTENT', '没有可暂停或恢复的陪伴意图；需要新的明确指令');
     if (request.action === 'resume' && !['paused', 'blocked'].includes(this.value.state)) throw new BodyError('INVALID_STATE', '只有手动暂停或受阻的陪伴可显式恢复；让开去做事的跟随会自己接上');
     if (request.action === 'pause' && this.value.state === 'paused') { await this.say(this.epoch, request.say); return this.snapshot(); }
@@ -340,12 +261,12 @@ export class CompanionMode {
     const replacing = request.action === 'follow' || request.action === 'wait';
     try {
       // Our own child job (pickup, mining) goes before anything is set; the model's operations are not ours and keep running.
-      if (this.childActive) { this.gather.cancel(); this.childActive = false; await this.body.stop(); this.check(epoch); this.gather.stopped(); this.release(); }
+      if (this.errands.running) { const handle = this.errands.cancel(); await this.body.stop(); this.errands.stopped(handle); this.check(epoch); }
       if (replacing) this.intent = undefined;
       const initial = await this.observe(epoch);
       if (request.action === 'pause') {
         await this.setPosture({ off: true }); this.check(epoch);
-        await this.say(epoch, request.say); this.check(epoch); this.release();
+        await this.say(epoch, request.say); this.check(epoch); this.errands.release();
         this.publish(this.base('paused')); return this.snapshot();
       }
       if (initial.container) throw new BodyError('BUSY', '请先关闭当前菜单，再开始陪伴');
@@ -353,22 +274,20 @@ export class CompanionMode {
       if (request.action === 'follow') {
         const guard = this.guardFor(request.guard);
         next = { action: 'follow', player: request.player!, expectedEntityId: this.identity(initial, request.player!), distance: request.distance ?? FOLLOW_DISTANCE.initial, wander: request.wander !== false && !request.pickup && !request.mining, context: identityOf(initial), ...(request.pickup ? { pickup: { items: [...request.pickup.items], radius: request.pickup.radius ?? 3 } } : {}) };
-        this.initPickup(initial, request.pickup);
-        this.initMining(initial, request.mining);
+        this.errands.set(initial, request.pickup, request.mining);
         if (this.dutyMode()) {
           // Whoever is followed is whoever is protected. Protection is a standing duty: set with the follow, kept through operations and a later wait.
           if (guard) await this.setDuty(request.player!, next.expectedEntityId!, guard);
           else if (request.guard === false || (this.duty && this.duty.player !== request.player)) await this.setDuty();
           this.check(epoch);
         }
-      } else if (request.action === 'wait') { next = { action: 'wait', context: identityOf(initial) }; this.pickup = undefined; this.mining = undefined; }
+      } else if (request.action === 'wait') { next = { action: 'wait', context: identityOf(initial) }; this.errands.clear(); }
       else {
         // resume: the same player, and the same world, as when it was paused or blocked
         next = this.intent!;
         if (!isDeepStrictEqual(identityOf(initial), next.context)) throw new BodyError('WORLD_CHANGED', '陪伴会话／世界／维度改变；旧意图已废弃');
         if (next.action === 'follow') this.identity(initial, next.player!, next.expectedEntityId);
-        if (this.pickup) { this.pickup.cursor = initial.pickupCursor!; this.pickup.attempted.clear(); this.pickup.state.code = undefined; }
-        if (this.mining) { this.ingestMining(initial); if (this.now() >= this.mining.state.deadline) this.disableMining('DURATION_BUDGET'); }
+        this.errands.resume(initial);
       }
       await this.say(epoch, request.say);
       this.check(epoch);
@@ -376,7 +295,7 @@ export class CompanionMode {
       if (!reply) throw new BodyError('INVALID_RESPONSE', '姿态回执缺少状态');
       if (reply.action === 'seated') {
         // Waiting while seated changes nothing (a follow stands the body up): the seat stays, nothing of this request is held.
-        this.intent = undefined; this.pickup = undefined; this.mining = undefined;
+        this.intent = undefined; this.errands.clear();
         this.publish({ state: 'stopped', reason: '正坐着：wait 不改变姿态，站起来（stand-up）后才能等或跟随', seated: true }); return this.snapshot();
       }
       if (next.action === 'follow' && (reply.player !== next.player || reply.entityId !== next.expectedEntityId)) throw new BodyError('INVALID_RESPONSE', '姿态回执缺少完整状态或目标身份');
@@ -475,41 +394,13 @@ export class CompanionMode {
     const epoch = this.epoch;
     try {
       if (this.intent && (!state.connected || state.health <= 0 || !isDeepStrictEqual(identityOf(state), this.intent.context))) throw new BodyError('WORLD_CHANGED', '陪伴会话改变；旧意图已废弃');
-      if (this.childActive) return;
+      if (this.errands.running) return;
       this.observePosture(state);
-      const intent = this.intent;
       // Paused by hand or blocked: nothing of ours runs on the body and the server holds no posture.
-      if (!intent || ['paused', 'blocked'].includes(this.value.state)) return;
-      if (this.pickup) this.ingestPickup(state);
-      if (this.mining) this.ingestMining(state);
-      if (this.mining?.state.active) {
-        if (this.now() >= this.mining.state.deadline) this.disableMining('DURATION_BUDGET');
-        else if (this.mining.state.attemptedBlocks >= this.mining.state.maxBlocks) this.disableMining('BLOCK_BUDGET');
-        else if (this.value.state === 'waiting' && this.value.stage === 'active' && this.now() - this.mining.lastScanAt >= 2000) {
-          this.identity(state, intent.player!, intent.expectedEntityId);
-          const target = state.entities.find(entity => entity.id === intent.expectedEntityId)!;
-          if (Math.hypot(state.position.x - target.position.x, state.position.y - target.position.y, state.position.z - target.position.z) <= this.mining.state.radius) {
-            const mining = this.mining, child = Symbol(); mining.lastScanAt = this.now();
-            if (this.startChild()) { mining.child = child; mining.childMined = 0; void this.mineBlock(epoch, mining, child, contextOf(state)); }
-          }
-        }
-      }
-      if (this.pickup && this.value.state === 'waiting' && this.value.stage === 'active' && !this.childActive) {
-        const target = state.entities.find(entity => entity.id === intent.expectedEntityId && entity.name === intent.player && entity.type === 'minecraft:player');
-        if (!target) throw new BodyError('STALE_COMPANION', '陪伴玩家身份或在线状态改变');
-        const radius = this.pickup.state.radius;
-        if (Math.hypot(state.position.x - target.position.x, state.position.y - target.position.y, state.position.z - target.position.z) > radius) return;
-        const item = state.groundItems?.find(item => this.pickup!.state.items.includes(item.stack.id) && item.visibility === 'visible' && !this.pickup!.attempted.has(item.entityId) && Math.hypot(item.position.x - target.position.x, item.position.y - target.position.y, item.position.z - target.position.z) <= radius);
-        if (item && this.startChild()) { this.pickup.attempted.add(item.entityId); this.pickup.pending = { item: structuredClone(item), cursor: this.pickup.cursor, receipts: [] }; void this.pickupItem(epoch, structuredClone(item), contextOf(state)); }
-      }
-    } catch (error) { if (epoch === this.epoch && observedEpoch === this.observationRevision) { if (this.pickup || this.mining) await this.block(error as Error, epoch); else this.fail(error as Error); } }
+      if (!this.intent || ['paused', 'blocked'].includes(this.value.state)) return;
+      this.errands.tick(state, epoch, this.value.state === 'waiting' && this.value.stage === 'active');
+    } catch (error) { if (epoch === this.epoch && observedEpoch === this.observationRevision) { if (this.errands.configured()) await this.block(error as Error, epoch); else this.fail(error as Error); } }
   }
-  /** A child job needs the body to itself for a moment (the task lock); when the model holds it the child waits for the next look. */
-  private startChild(): boolean {
-    try { this.acquire(); } catch { return false; }
-    this.childActive = true; return true;
-  }
-  private endChild(): void { this.childActive = false; this.release(); }
   /** Translate the server's posture into state and events. Never sends anything. */
   private observePosture(state: Observation): void {
     const posture = state.posture;
@@ -529,7 +420,7 @@ export class CompanionMode {
       if (!this.value.seated) {
         // sit succeeded: the follow/wait is over, the guard duty stays
         const had = !!this.intent;
-        this.intent = undefined; this.pickup = undefined; this.mining = undefined; this.awayNoted = false;
+        this.intent = undefined; this.errands.clear(); this.awayNoted = false;
         this.publish(had ? { state: 'stopped', reason: `已坐下，跟随／等待结束${this.dutyMode() && this.duty ? '，保护保留' : ''}；站起来后要再跟随需要新的 follow`, seated: true } : { ...this.value, seated: true }, false);
       }
       return;
@@ -559,110 +450,26 @@ export class CompanionMode {
   private endedByServer(before?: PostureState): void {
     const what = before?.action === 'wait' ? '等待' : '跟随';
     const reason = before?.action === 'wait' ? '服务端结束了原地等待' : `${this.intent?.player ?? '玩家'} 的身份对不上（同名但不是原来那位），服务端结束了跟随`;
-    ++this.epoch; this.intent = undefined; this.pickup = undefined; this.mining = undefined; this.awayNoted = false;
-    if (this.childActive) { this.gather.cancel(); this.childActive = false; this.release(); }
+    ++this.epoch; this.intent = undefined; this.errands.clear(); this.awayNoted = false;
+    if (this.errands.running) this.errands.halt();
     this.publish({ state: 'stopped', code: 'POSTURE_ENDED', reason: `${reason}；要${what}得重新发出明确指令` }, false);
     this.recordPosture(!this.posture());
     this.events.add('companion', JSON.stringify(this.snapshot()));
   }
-  private async mineBlock(epoch: number, mining: MiningTracker, child: symbol, context: Context): Promise<void> {
-    let unknownChild = false;
-    const check = () => { this.check(epoch); if (this.mining !== mining || mining.child !== child) throw new BodyError('CANCELLED', '旧陪挖子任务已被取代'); if (this.now() >= mining.state.deadline) throw new BodyError('MINING_DURATION', '陪挖总时间已到，未开始后续步骤'); };
-    try {
-      check();
-      const state = await this.observe(epoch, context); check();
-      this.identity(state, this.intent!.player!, this.intent!.expectedEntityId);
-      const target = state.entities.find(entity => entity.id === this.intent!.expectedEntityId)!;
-      const companionMiningGuard = { player: this.intent!.player!, expectedEntityId: this.intent!.expectedEntityId!, maxDistance: mining.state.radius };
-      this.publish({ ...this.base('waiting', 'active'), activity: 'mining' }, false);
-      const scan = await this.body.nearbyResources!({ blockIds: mining.state.blockIds, radius: mining.state.radius, maxResults: 32, companionMiningGuard }); check();
-      if (!isDeepStrictEqual(contextOf(scan), context)) throw new BodyError('WORLD_CHANGED', '陪挖扫描不属于开始时的权威代次');
-      const fresh = await this.observe(epoch, context); check(); this.ingestMining(fresh);
-      this.identity(fresh, companionMiningGuard.player, companionMiningGuard.expectedEntityId);
-      const latestPlayer = fresh.entities.find(entity => entity.id === companionMiningGuard.expectedEntityId)!;
-      if (!isDeepStrictEqual(latestPlayer.position, target.position)) throw new BodyError('COMPANION_OUT_OF_RANGE', '陪挖扫描期间玩家已移动；此轮未选定矿石');
-      const positionKey = (point: { x: number; y: number; z: number }) => `${point.x},${point.y},${point.z}`;
-      const candidate = scan.candidates.find(candidate => candidate.kind === 'ore' && candidate.visible && candidate.targetToken && !mining.attempted.has(positionKey(candidate.position))
-        && Math.hypot(candidate.position.x + 0.5 - latestPlayer.position.x, candidate.position.y + 0.5 - latestPlayer.position.y, candidate.position.z + 0.5 - latestPlayer.position.z) >= 2);
-      if (!candidate) { await this.returnFromMining(epoch, mining, child, false); return; }
-      mining.attempted.add(positionKey(candidate.position)); mining.state.attemptedBlocks++;
-      const owner: BorrowedMining = { kind: 'mining', taskToken: this.token!, context, center: scan.center, companionGuard: companionMiningGuard, candidate: structuredClone(candidate), deadline: mining.state.deadline, check,
-        onProgress: operation => {
-          if (epoch !== this.epoch || this.mining !== mining || mining.child !== child) return;
-          if (operation.status === 'unknown') unknownChild = true;
-          const result = operation.result as { minedBlocks?: number } | undefined;
-          if (Number.isInteger(result?.minedBlocks) && result!.minedBlocks! >= mining.childMined && result!.minedBlocks! <= 1) { mining.state.minedBlocks += result!.minedBlocks! - mining.childMined; mining.childMined = result!.minedBlocks!; }
-        } };
-      const result = await this.gather.mineCompanionBlock(candidate, owner);
-      if (result.status === 'unknown') { unknownChild = true; throw new BodyError('UNKNOWN', result.summary); }
-      check();
-      const latest = await this.observe(epoch); check(); this.ingestMining(latest);
-      if (result.status !== 'succeeded') throw new BodyError((result.result as { code?: string } | undefined)?.code ?? (result.status === 'cancelled' ? 'CANCELLED' : 'STEP_FAILED'), result.summary);
-      await this.returnFromMining(epoch, mining, child, false);
-    } catch (error) {
-      if (epoch !== this.epoch || this.mining !== mining || mining.child !== child) return;
-      if (unknownChild) { mining.state.lastCode = 'UNKNOWN'; await this.block(new BodyError('UNKNOWN', (error as Error).message), epoch); return; }
-      const code = error instanceof BodyError ? error.code : 'INVALID_RESPONSE'; mining.state.lastCode = code;
-      if (code === 'MINING_DURATION' || code === 'TASK_TIMEOUT' && this.now() >= mining.state.deadline || code === 'COMPANION_OUT_OF_RANGE') {
-        try { await this.returnFromMining(epoch, mining, child); } catch (stopError) { if (epoch === this.epoch) await this.block(stopError as Error, epoch); }
-      } else await this.block(error as Error, epoch);
-    }
-  }
-  /** The child job is over. stop: it ended abnormally, so whatever it left running is cancelled first; the posture takes over by itself afterwards. */
-  private async returnFromMining(epoch: number, mining: MiningTracker, child: symbol, stop = true): Promise<void> {
-    this.check(epoch); if (this.mining !== mining || mining.child !== child) throw new BodyError('CANCELLED', '旧陪挖收尾不能恢复新意图');
-    if (stop) { this.gather.cancel(); await this.body.stop(); this.check(epoch); this.gather.stopped(); }
-    mining.child = undefined; this.endChild();
-    if (this.now() >= mining.state.deadline) this.disableMining('DURATION_BUDGET');
-    else if (mining.state.attemptedBlocks >= mining.state.maxBlocks) this.disableMining('BLOCK_BUDGET');
-    this.publish({ ...this.base('following', 'active'), activity: 'following' }, false);
-  }
-  private async pickupItem(epoch: number, item: GroundItem, context: Context): Promise<void> {
-    let child: Operation | undefined;
-    try {
-      const state = await this.observe(epoch, context); this.check(epoch);
-      this.identity(state, this.intent!.player!, this.intent!.expectedEntityId);
-      const target = state.entities.find(entity => entity.id === this.intent!.expectedEntityId)!;
-      const radius = this.pickup!.state.radius;
-      this.publish({ ...this.base('waiting', 'active'), activity: 'picking-up' }, false);
-      child = await this.gather.collectCompanionItem(item, { taskToken: this.token!, context, entityId: item.entityId, source: item, center: target.position, companionGuard: { player: this.intent!.player!, expectedEntityId: this.intent!.expectedEntityId!, maxDistance: radius }, check: () => this.check(epoch), priorPicked: snapshot => {
-        this.check(epoch); this.ingestPickup(snapshot);
-        const pending = this.pickup!.pending!;
-        if (pending.cursor < snapshot.pickupOldestCursor!) throw new BodyError('PICKUP_GAP', '选定UUID的收据窗口已缺失');
-        for (const receipt of pending.receipts) {
-          if (receipt.stack.id !== item.stack.id || !isDeepStrictEqual(receipt.stack.components, item.stack.components)) throw new BodyError('VARIANT_CHANGED', '选定UUID自然收取时组件变体已改变');
-          if (receipt.stack.maxStackSize !== item.stack.maxStackSize) throw new BodyError('MAX_STACK_CHANGED', '选定UUID自然收取时有效上限已改变');
-        }
-        return pending.receipts.reduce((sum, receipt) => sum + receipt.pickedUpCount, 0);
-      } });
-      this.check(epoch);
-      const latest = await this.observe(epoch); this.ingestPickup(latest);
-      if (child.status !== 'succeeded') {
-        const code = (child.result as { code?: string } | undefined)?.code ?? (child.status === 'unknown' ? 'UNKNOWN' : 'STEP_FAILED');
-        if (!['COMPANION_OUT_OF_RANGE', 'TARGET_CONSUMED', 'PICKUP_MERGED'].includes(code) || child.status === 'unknown') throw new BodyError(code, child.summary);
-        this.identity(latest, this.intent!.player!, this.intent!.expectedEntityId);
-        this.pickup!.state.lastCode = code;
-      }
-      this.pickup!.pending = undefined;
-      this.endChild();
-      this.publish({ ...this.base('following', 'active'), activity: 'following' }, false);
-    } catch (error) { if (epoch === this.epoch) await this.block(error as Error, epoch, child); }
-  }
   /** A scheduling failure may happen while the child is still running: stop before unlocking. The posture goes off too: a blocked mode never carries on by itself, only an explicit resume does. */
   private async block(error: Error, epoch: number, operation?: Operation): Promise<void> {
     if (epoch !== this.epoch) return;
-    this.childActive = false; this.gather.cancel();
+    const handle = this.errands.cancel();
     const blockedEpoch = ++this.epoch, owner = this.beginChange();
     let stopConfirmed = false;
     try {
       const result = await this.body.stop();
       if (result.stopped !== true) throw new BodyError('STOP_UNCONFIRMED', '阻断收尾停止未确认；保留陪伴写锁');
-      stopConfirmed = true; this.check(blockedEpoch); this.gather.stopped();
+      stopConfirmed = true; this.errands.stopped(handle); this.check(blockedEpoch);
       await this.setPosture({ off: true }); this.check(blockedEpoch);
       const state = await this.observe(blockedEpoch);
       if (this.intent && !isDeepStrictEqual(identityOf(state), this.intent.context)) throw new BodyError('WORLD_CHANGED', '阻断收尾不能采用外部会话');
-      if (this.pickup) { try { this.ingestPickup(state); } catch { this.pickup.state.countStatus = 'partial-or-unknown'; } }
-      if (this.mining) { try { this.ingestMining(state); } catch { this.mining.state.countStatus = 'partial-or-unknown'; } }
+      this.errands.settle(state);
       this.fail(error, operation);
     } catch (stopError) { if (blockedEpoch === this.epoch) { this.stopUnconfirmed = !stopConfirmed; this.fail(stopError as Error, undefined, !stopConfirmed); } }
     finally { this.finishChange(owner); }
@@ -670,27 +477,20 @@ export class CompanionMode {
   /** Lease/process loss is terminal and closes the body; a discarded intent (WORLD_CHANGED, CANCELLED) only ends the follow/wait. No persisted or automatic resume. */
   fail(error: Error, operation?: Operation, controlLostNow = false): void {
     const code = error instanceof BodyError ? error.code : 'INVALID_RESPONSE';
-    if (['idle', 'stopped'].includes(this.value.state) && !this.intent && !this.token && !this.duty) { if (controlLostNow) ++this.dutyRevision; return; }
+    if (['idle', 'stopped'].includes(this.value.state) && !this.intent && !this.errands.token && !this.duty) { if (controlLostNow) ++this.dutyRevision; return; }
     ++this.epoch;
     this.observationRevision++;
-    if (this.childActive) { this.gather.cancel(); this.childActive = false; }
-    if (this.pickup) {
-      this.pickup.state.code = code;
-      if (['PICKUP_GAP', 'PICKUP_UNKNOWN', 'UNKNOWN', 'WORLD_CHANGED', 'LEASE_LOST', 'LEASE_EXPIRED', 'INVALID_RESPONSE', 'TRANSPORT_LOST'].includes(code)) this.pickup.state.countStatus = 'partial-or-unknown';
-    }
-    if (this.mining) {
-      this.mining.state.lastCode = code;
-      if (['PICKUP_GAP', 'PICKUP_UNKNOWN', 'UNKNOWN', 'WORLD_CHANGED', 'LEASE_LOST', 'LEASE_EXPIRED', 'INVALID_RESPONSE', 'TRANSPORT_LOST', 'STOP_UNCONFIRMED'].includes(code)) this.mining.state.countStatus = 'partial-or-unknown';
-    }
+    if (this.errands.running) this.errands.cancel();
+    this.errands.failed(code);
     const lost = controlLostNow || controlLost.has(code), terminal = lost || intentEnded.has(code);
     if (terminal) this.intent = undefined;
     if (lost) { ++this.dutyRevision; this.clearDutyState(); }
-    if (!this.stopUnconfirmed) this.release(); this.terminal = operation;
+    if (!this.stopUnconfirmed) this.errands.release(); this.terminal = operation;
     this.publish({ ...this.base(terminal ? 'stopped' : 'blocked'), ...(operation ? { operationId: operation.operationId } : {}), code, reason: error.message }, false);
     const failureState = this.snapshot();
     if (operation) this.events.notifyCompanionOperation(operation, failureState);
     else this.events.add('companion', JSON.stringify(failureState));
-    if (terminal) this.pickup = undefined;
+    if (terminal) this.errands.dropPickup();
     // An untrusted running receipt or lost control cannot leave an unowned movement behind. A discarded follow/wait is not
     // that: closing here used to end the whole body (the next read said LEASE_LOST and the host disconnected).
     if (lost) void this.body.close().catch(() => {});
@@ -708,21 +508,21 @@ export class CompanionMode {
     ++this.epoch;
     if (ending) { this.intent = undefined; this.seen = undefined; this.awayNoted = false; }
     const owner = this.beginChange();
-    const token = this.token, miningState = ending && this.mining ? { ...this.miningState(), active: false, disabledReason: 'STOPPED' } : undefined;
-    if (this.childActive) { this.gather.cancel(); this.childActive = false; if (this.pickup) this.pickup.pending = undefined; if (this.mining) this.mining.child = undefined; }
+    const mining = ending ? this.errands.view().mining : undefined, miningState = mining ? { ...mining, active: false, disabledReason: 'STOPPED' } : undefined;
+    // The errand's child and the death recovery stop with it; the lock goes back once the body confirms.
+    const handle = this.errands.cancel();
     this.terminal = undefined;
     if (ending) {
-      this.pickup = undefined;
-      this.mining = undefined;
+      this.errands.clear();
       if (this.value.state !== 'idle' && this.value.state !== 'stopped') this.publish({ state: 'stopped', ...(reason ? { reason } : {}), ...(miningState ? { mining: miningState } : {}) });
-    } else if (this.intent && this.value.activity && this.value.activity !== 'following') this.publish({ ...this.base(this.intent.action === 'wait' ? 'waiting' : 'following', 'active'), ...(this.pickup || this.mining ? { activity: 'following' as const } : {}) }, false);
+    } else if (this.intent && this.value.activity && this.value.activity !== 'following') this.publish({ ...this.base(this.intent.action === 'wait' ? 'waiting' : 'following', 'active'), ...(this.errands.configured() ? { activity: 'following' as const } : {}) }, false);
     const stopping = (async () => {
       try {
         const result = await this.body.stop(options);
         if (result.stopped !== true) throw new BodyError('STOP_UNCONFIRMED', '身体停止未确认；保留陪伴写锁');
         // A guard setting made after this stop was sent wins on the server too; keep its local state.
         if (dutyRevision === this.dutyRevision && options.clearGuard) this.clearDutyState();
-        this.gather.stopped(); this.stopUnconfirmed = false; this.release(token); return result;
+        this.errands.stopped(handle); this.stopUnconfirmed = false; return result;
       } catch (error) { this.stopUnconfirmed = true; throw error; }
     })().finally(() => { if (options.clearGuard || ending) this.endingPosture--; if (this.stopping === stopping) this.stopping = undefined; this.finishChange(owner); });
     this.stopping = stopping;
@@ -757,24 +557,24 @@ export class CompanionMode {
       const postureRevision = ++this.postureRevision, ended = ++this.epoch;
       this.explicitStops++;
       // Our own child job goes with it; whatever the model has running is not ours.
-      if (this.childActive) { this.gather.cancel(); this.childActive = false; await this.body.stop(); this.check(ended); this.gather.stopped(); }
+      if (this.errands.running) { const handle = this.errands.cancel(); await this.body.stop(); this.errands.stopped(handle); this.check(ended); }
       if (this.postureMode()) { await this.setPosture({ off: true }, postureRevision); this.check(ended); }
-      this.intent = undefined; this.terminal = undefined; this.pickup = undefined; this.mining = undefined; this.seen = undefined; this.awayNoted = false;
-      this.release();
+      this.intent = undefined; this.terminal = undefined; this.errands.clear(); this.seen = undefined; this.awayNoted = false;
+      this.errands.release();
       this.publish({ state: 'stopped', reason: message });
     } finally { this.finishChange(owner); }
     return this.snapshot();
   }
   /**
-   * Run `work` with the body held for it (the task lock) and fenced like a child job: a stop of any kind makes its `check` throw CANCELLED.
+   * Run `work` with the body held for it (the errands' lock) and fenced like a child job: a stop of any kind makes its `check` throw CANCELLED.
    * companion-mode requests wait (BUSY) until it is over. Used by the death recovery, which has to walk and pick up before the posture is set.
    */
   async exclusive<T>(work: (task: { token: string; check: () => void }) => Promise<T>): Promise<T> {
-    if (this.changing || this.stopping || this.stopUnconfirmed || this.recovering || this.childActive) throw new BodyError('BUSY', '陪伴模式正在切换或停止尚未确认');
-    this.acquire(); const token = this.token!, epoch = this.epoch;
+    if (this.changing || this.stopping || this.stopUnconfirmed || this.recovering || this.errands.running) throw new BodyError('BUSY', '陪伴模式正在切换或停止尚未确认');
+    const lease = this.errands.hold(), epoch = this.epoch;
     this.recovering = true;
-    try { return await work({ token, check: () => this.check(epoch) }); }
-    finally { this.recovering = false; this.release(token); }
+    try { return await work({ token: lease.token, check: () => { this.check(epoch); this.errands.check(lease); } }); }
+    finally { this.recovering = false; this.errands.release(); }
   }
   /** Set the protection a held posture had, before the walk to the dropped items (the standing duty fights for the player while the body is near them). Best effort. */
   async restoreGuard(held: Posture): Promise<void> {

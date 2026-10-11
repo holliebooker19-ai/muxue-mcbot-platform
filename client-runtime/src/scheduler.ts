@@ -13,8 +13,10 @@ export interface Lease {
   readonly tool: string;
   /** The body task lock it acts with: its own id, or the lender's token when borrowed. */
   readonly token: string;
-  /** Runs on another holder's lock (a gathering's meal, a companion errand, an interrupt window): never takes or gives back the body lock. */
+  /** Runs on another holder's lock (a gathering's meal, a companion errand's child, an interrupt window): never takes or gives back the body lock. */
   readonly borrowed: boolean;
+  /** Only holds the lock for what runs on it (the companion's errands, the death recovery): current() looks past it to that work. */
+  readonly holder: boolean;
   /** Stopped: no further step; the lease (and the lock) stays until the stop is confirmed (stopped). */
   readonly cancelled: boolean;
   /** Its last write is unknown: it keeps the lease (and the lock) until an explicit stop is confirmed. */
@@ -22,7 +24,8 @@ export interface Lease {
 }
 /** What one cancel caught; only its own confirmation retires those leases. everything: a stop of all of them (cancel, not cancelOne). */
 export interface StopHandle { readonly leases: readonly Lease[]; readonly everything: boolean }
-type Held = { -readonly [K in keyof Lease]: Lease[K] } & { retired?: () => void };
+/** parent: the lease whose lock a borrowed one runs on, when that lock is a lease here; stopping the parent stops it too. */
+type Held = { -readonly [K in keyof Lease]: Lease[K] } & { retired?: () => void; parent?: Held };
 
 /**
  * The one place that holds the running tasks of a body: the task lock, the stop fence, borrowing and the busy check
@@ -54,7 +57,7 @@ export class Scheduler {
   assertIdle(): void {
     const held = [...this.leases][0];
     if (held || this.stopping) throw new BodyError('BUSY', `已有任务在跑${held ? `（${held.tool}）` : ''}或停止尚未确认；先查询或叫停`);
-    // Whatever holds the shared write lock outside the scheduler (a companion errand) or an action in flight.
+    // An action in flight, or the task lock taken outside the scheduler (an interrupt window).
     if (this.body.isBusy?.() === true) throw new BodyError('BUSY', '已有身体动作或任务在跑；先查询或叫停');
   }
   /** Busy in the wider sense of reflexes and gift gear: also a running action, a companion errand, a guard fight or a stepped-aside posture. */
@@ -67,19 +70,21 @@ export class Scheduler {
    * agent started on the server. Whether it may pause is the reflexes' call.
    */
   current(): RunningWork | undefined {
-    const own = [...this.leases].find(lease => !lease.borrowed && !lease.cancelled);
+    const own = [...this.leases].find(lease => !lease.borrowed && !lease.holder && !lease.cancelled);
     if (own) return { id: own.id, name: own.tool };
     const pending = this.body.pendingOperations().filter(op => op.name !== 'send-chat');
     return pending.length === 1 ? { id: pending[0].operationId, name: pending[0].name } : undefined;
   }
   /**
    * Hold a task. Without lender it takes the body task lock (BUSY from the body when someone has it); with one it acts on
-   * that token and never takes or gives back the lock. retired: called when a confirmed stop retires the lease.
+   * that token and never takes or gives back the lock; when that token is a lease of this scheduler, it is its child.
+   * holder: see Lease. retired: called when a confirmed stop retires the lease.
    */
-  start(tool: string, options: { lender?: { taskToken: string }; retired?: () => void } = {}): Lease {
-    const id = randomUUID();
-    if (!options.lender) this.body.acquireTask!(id);
-    const lease: Held = { id, tool, token: options.lender?.taskToken ?? id, borrowed: !!options.lender, cancelled: false, blocked: false, retired: options.retired };
+  start(tool: string, options: { lender?: { taskToken: string }; holder?: boolean; retired?: () => void } = {}): Lease {
+    const id = randomUUID(), lender = options.lender;
+    if (!lender) this.body.acquireTask!(id);
+    const parent = lender && [...this.leases].find(lease => !lease.borrowed && lease.token === lender.taskToken);
+    const lease: Held = { id, tool, token: lender?.taskToken ?? id, borrowed: !!lender, holder: options.holder === true, cancelled: false, blocked: false, retired: options.retired, ...(parent ? { parent } : {}) };
     this.leases.add(lease);
     return lease;
   }
@@ -102,9 +107,10 @@ export class Scheduler {
     for (const hook of this.cancelHooks) hook();
     return this.stopping = this.catch([...this.leases], true);
   }
-  /** Stop one task (a companion errand's child): the others and the stop fence of everything are untouched. */
+  /** Stop one task with what runs on its lock (a companion errand and its child): the others and the stop fence of everything are untouched. */
   cancelOne(lease?: Lease): StopHandle {
-    return this.catch(lease && this.leases.has(lease as Held) ? [lease as Held] : [], false);
+    const held = lease as Held | undefined;
+    return this.catch(held && this.leases.has(held) ? [held, ...[...this.leases].filter(other => other.parent === held)] : [], false);
   }
   /**
    * Called after the body confirmed the stop. A stop of everything counts only if it is the latest one, so an older

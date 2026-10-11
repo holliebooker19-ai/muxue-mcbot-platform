@@ -584,7 +584,7 @@ interface BodyTask extends GuardDuty.Pausable {
 - 测试只改了构造方式，例外是 `survival-defense.test.mjs` 里“叫停了几个主人”的计数：原来是三个主人各自取消和确认，现在是一个调度器，断言从 3／2 改成 2／1，意思不变（先取消，确认后才放锁）。`runningWork` 的测试搬进了 `scheduler.test.mjs`。
 - 做这一块时发现 4a 的一个竞态，单独修了，见 8.4 末尾。
 
-### 8.6 4c：陪挖、陪捡搬出 CompanionMode（约 1.5 天）
+### 8.6 4c：陪挖、陪捡搬出 CompanionMode（约 1.5 天；10-11 完成，见本节末尾）
 
 - 新增 `companion-errands.ts`（`CompanionErrands`）：根据姿态观察（`waiting`／`active`、离玩家多远）决定什么时候去挖、去捡，通过调度器的借锁跑子任务。`mineBlock`、`returnFromMining`、`pickupItem`、预算和收据游标都搬过去。
 - `CompanionMode` 只留姿态和保护的翻译：`request`、`update` → `observePosture`、事件、`stop`。`childActive` 和它对 `GatherTasks` 的直接引用都去掉。
@@ -593,6 +593,20 @@ interface BodyTask extends GuardDuty.Pausable {
   - `unknown` 和 `blocked` 不重试；
   - `get-companion-mode` 里的 `mining`／`pickup` 字段照旧。
 - 测试：`companion-*` 系列全过，新增 `companion-errands.test.mjs`。
+
+**2026-10-11 完成（离线）**。运行端 505 项（新增 `companion-errands.test.mjs` 6 项，`scheduler.test.mjs` 多 1 项）、`mcp-server` 726 项（另有 1 项跳过）通过；没有进游戏。`CompanionMode` 从 822 行减到 623 行。和上面设计的出入：
+- 陪伴的锁也交给了调度器。它是一份只占锁、本身不算“正在跑的任务”的租约（`holder`），工具名记作 `companion-mode`。
+  - 陪挖陪捡的子任务（一次采集）借这把锁跑，调度器把它记成这份租约的子租约：停这把锁，子任务一起停；锁同样要等停止确认后才放。
+  - 死后捡回用的是同一把锁。
+- `current()` 会跳过这种租约，所以 4a 判断“现在跑的是什么”的结果和原来一样：死后捡回时的长途走，仍然可以被进食暂停后接着走；陪挖陪捡的子任务仍然照旧取消。
+- 采集的 `cancel()` 改回和其他任务主人一样“停全部”；`cancelOne` 只剩陪伴自己用。
+- 陪挖陪捡、死后捡回期间，模型的工具仍报 BUSY，提示文字改成带上 `companion-mode`（原来是“已有身体动作或任务在跑”）。
+- `CompanionErrands` 通过一个小接口 `ErrandHost` 向 `CompanionMode` 要它需要的东西：撤销代次、观察、跟随的是谁、显示当前在做什么、出错时阻断。阻断（停身体、关姿态、报告）仍由 `CompanionMode` 做。拾取、陪挖选项的参数校验也搬进了 `CompanionErrands`。
+- 几处收紧，正常路径不受影响：
+  - 服务端自己结束跟随（玩家身份对不上）时，原来只清掉本地状态、直接放锁，子任务正在跑的那一步会在没有锁的情况下跑完；现在先停身体，确认后才放锁。
+  - 停止一经确认就放锁，不再先查撤销代次。原来代次刚好变了时，锁可能一直留着。
+  - 死后捡回被叫停、停止却没确认时，原来照样放锁；现在等确认。
+  - 停陪伴的子任务时，模型手上的资源观察（`nearby-resources` 的引用）不再一起作废。
 
 ### 8.7 要你定的（10-11 已答）
 

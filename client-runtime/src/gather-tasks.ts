@@ -71,7 +71,7 @@ export class GatherTasks {
   private readonly operations = new Map<string, Operation>();
   private active?: Active;
   private readonly scheduler: Scheduler;
-  /** The latest stop of this gathering alone (cancel), for stopped() without a handle. */
+  /** The latest stop asked through this owner (cancel), for stopped() without a handle. */
   private stop?: StopHandle;
   private survival?: SurvivalTasks;
   private survivalPolicy?: () => SurvivalPolicy & { armed: boolean; revision: number };
@@ -82,11 +82,8 @@ export class GatherTasks {
   useSurvival(tasks: SurvivalTasks, policy: () => SurvivalPolicy & { armed: boolean; revision: number }): void { this.survival = tasks; this.survivalPolicy = policy; }
   operation(id: string): Operation | undefined { const op = this.operations.get(id); return op && structuredClone(op); }
   assertIdle(): void { if (this.active) throw new BodyError('BUSY', '有限采集任务正在运行，请先完成或叫停'); }
-  /**
-   * Stop this gathering alone (a companion errand's child; a stop of everything is the scheduler's): no further step,
-   * the lock stays until stopped().
-   */
-  cancel(): StopHandle { this.references.clear(); return this.stop = this.scheduler.cancelOne(this.active?.lease); }
+  /** The scheduler's stop of everything (references go with it): no further step, the lock stays until stopped(). */
+  cancel(): StopHandle { return this.stop = this.scheduler.cancel(); }
   /** Only release the shared write token after the independent body stop was confirmed. */
   stopped(handle = this.stop): void { if (handle) this.scheduler.stopped(handle); if (handle === this.stop) this.stop = undefined; }
   async discover(options: { blockIds: string[]; radius: number; maxResults: number; center?: Position; wholeTree?: boolean; trees?: number }): Promise<unknown> {

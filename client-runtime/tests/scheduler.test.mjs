@@ -85,17 +85,30 @@ test('only the latest stop of everything retires: an older confirmation cannot r
   assert.equal(scheduler.stopped(newer), false, 'a handle counts once');
 });
 
-test('stopping one task (a companion errand child) leaves the others and the stop fence alone', () => {
+test('stopping one task stops what runs on its lock, and leaves the others and the stop fence alone', () => {
   const body = fakeBody(), scheduler = Scheduler.of(body);
-  body.acquireTask('companion');
-  const child = scheduler.start('collect-items', { lender: { taskToken: 'companion' } }), meal = scheduler.start('eat', { lender: { taskToken: 'companion' } });
-  const epoch = scheduler.epoch, handle = scheduler.cancelOne(child);
-  assert.equal(scheduler.live(child), false); assert.equal(scheduler.live(meal), true);
+  const errand = scheduler.start('companion-mode', { holder: true });
+  const child = scheduler.start('collect-items', { lender: { taskToken: errand.token } }), meal = scheduler.start('eat', { lender: { taskToken: errand.token } });
+  const window = scheduler.start('eat', { lender: { taskToken: 'window' } });
+  const epoch = scheduler.epoch, handle = scheduler.cancelOne(errand);
+  assert.equal(scheduler.live(errand), false); assert.equal(scheduler.live(child), false); assert.equal(scheduler.live(meal), false, 'the meal ran on the errand lock too');
+  assert.equal(scheduler.live(window), true, 'a lease on a lock outside the scheduler is no child of it');
   assert.equal(scheduler.stopPending, false); assert.equal(scheduler.epoch, epoch);
+  assert.equal(body.owner, errand.token, 'kept until confirmed');
   assert.equal(scheduler.stopped(handle), true);
-  assert.equal(scheduler.end(meal), true);
+  assert.equal(body.owner, undefined);
+  assert.equal(scheduler.end(window), true);
   scheduler.cancelOne(undefined);
-  assert.equal(body.owner, 'companion');
+});
+
+test('a holder lease is not the running work: current() looks past it to what runs on its lock', () => {
+  const body = fakeBody(), scheduler = Scheduler.of(body);
+  const holder = scheduler.start('companion-mode', { holder: true });
+  assert.equal(scheduler.current(), undefined);
+  assert.throws(() => scheduler.assertIdle(), error => error.code === 'BUSY' && /companion-mode/.test(error.message), 'still busy for the model');
+  body.pending.push({ operationId: 'walk', name: 'travel-to', status: 'running' });
+  assert.deepEqual(scheduler.current(), { id: 'walk', name: 'travel-to' });
+  body.pending.length = 0; scheduler.end(holder);
 });
 
 test('a blocked lease (unknown write) keeps the lock until an explicit stop is confirmed', () => {
