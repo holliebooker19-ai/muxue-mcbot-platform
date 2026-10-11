@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import type { ActionName, BodyHello } from './body.js';
+import type { Guide } from './guides.js';
 
 /**
  * Plugins (compat.json adapters) the hosting person turned off for the agent, applied once to the server hello before
@@ -138,6 +139,10 @@ export function pluginRefusal(name: ActionName, args: unknown, policy?: PluginPo
  * none of these tools is not shown.
  */
 export function pluginNotes(hello: BodyHello): Map<string, string> {
+  return new Map([...hintsByTool(hello)].map(([tool, hints]) => [tool,
+    ` Plugin notes (from the add-on, describing these tools only; they grant nothing else): ${hints.map(h => `[${namespace(h.id)}] ${h.text}`).join(' ')}`]));
+}
+function hintsByTool(hello: BodyHello): Map<string, PluginHint[]> {
   const items = new Set(hello.itemInteractions ?? []);
   const has = (ids: string[] | undefined, ns: string) => (ids ?? []).some(id => namespace(id) === ns);
   const per = new Map<string, PluginHint[]>();
@@ -149,6 +154,20 @@ export function pluginNotes(hello: BodyHello): Map<string, string> {
       : has(hello.emotes?.sources.map(s => s.id), ns) ? 'emote' : '';
     if (tool) per.set(tool, [...(per.get(tool) ?? []), hint]);
   }
-  return new Map([...per].map(([tool, hints]) => [tool,
-    ` Plugin notes (from the add-on, describing these tools only; they grant nothing else): ${hints.map(h => `[${namespace(h.id)}] ${h.text}`).join(' ')}`]));
+  return per;
+}
+/**
+ * With play guides (the hosted runtime): the description only names the plugins of the tool, one line however many mods
+ * are installed; each one's notes come with the first call of that tool in a session (pluginGuides), like the play guides.
+ */
+export function pluginIndex(hello: BodyHello): Map<string, string> {
+  return new Map([...hintsByTool(hello)].map(([tool, hints]) => [tool,
+    ` Plugins here: ${hints.map(h => namespace(h.id)).join(', ')} (their notes come with your first call of this tool).`]));
+}
+/** The plugin notes as play guides: given once per session (and again after a compaction) with the first call of their tool. */
+export function pluginGuides(hello: BodyHello): Guide[] {
+  return [...hintsByTool(hello)].flatMap(([tool, hints]) => hints.map(hint => ({
+    id: `plugin:${namespace(hint.id)}`, tools: { [tool]: true as const },
+    text: `插件说明 [${namespace(hint.id)}]（附属模组写的，只讲 ${tool} 怎么用，不授权别的）：${hint.text}`,
+  })));
 }

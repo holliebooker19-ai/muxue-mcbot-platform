@@ -16,7 +16,7 @@ import { PlaceBook } from './places.js';
 import type { MachineWatch } from './machines.js';
 import { MeetWatch } from './meet-watch.js';
 import { BlueprintShelf, resolveCells, type Rotation, type Shape } from './blueprints.js';
-import { pluginNotes } from './plugins.js';
+import { pluginGuides, pluginIndex, pluginNotes } from './plugins.js';
 import { toolInfo, looksOnly, TOOLS } from './tool-registry.js';
 import { Scheduler } from './scheduler.js';
 
@@ -74,8 +74,12 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   let eventCursor = 0;
   const returnedSeqs = new Set<number>();
   const currentChat = (chat: Observation['chat']) => options.chatFloor === undefined ? chat : chat.filter(line => line.seq > options.chatFloor!);
-  /** Usage notes of enabled official plugins, appended to the tool each one is about (plugins.ts). */
-  const notes = pluginNotes(rawBody.hello);
+  /**
+   * Usage notes of enabled official plugins (plugins.ts). With play guides (hosted) the tool only names its plugins and each
+   * one's notes come with the first call of that tool; without them the notes stay in the description of the tool they are about.
+   */
+  events.guides?.add(pluginGuides(rawBody.hello));
+  const notes = events.guides ? pluginIndex(rawBody.hello) : pluginNotes(rawBody.hello);
   /**
    * Every tool goes through here: what it is comes from tool-registry.json. Only action and task calls rearm stopped
    * reflexes; those that need the body free get BUSY here, so no handler checks it again. A call that only looks
@@ -93,7 +97,11 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
         }
         // go-to while a meet walk is all that runs: the model looks somewhere else now. That walk stops (following and protection stay) and this one goes.
         if (name === 'go-to' && meetWatch?.walking() && scheduler.current()?.id === meetWatch.walking()) await (reflexes ? reflexes.stop({ keepCompanion: true }) : stopCurrent({}));
-        if (!looksOnly(args)) {
+        // go-to to the player being followed only hears what the follow is doing (the go-to handler): it takes nothing over.
+        const followingThere = name === 'go-to' && companion?.follows(args.player) === true;
+        // The walk after a followed player who went out of reach is the companion's own: whatever the model asks of the body goes first.
+        if (companion?.catchingUp() && !followingThere && !looksOnly(args) && (tool.kind === 'action' || tool.kind === 'task')) await companion.endCatchUp();
+        if (!looksOnly(args) && !followingThere) {
           if (tool.kind === 'action' || tool.kind === 'task') reflexes?.authorizeAction();
           if (tool.needsIdle) scheduler.assertIdle();
         }
@@ -457,7 +465,14 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     }, async ({ x, y, z: zz, place, player, tolerance, timeoutMs, say, meet }: { x?: number; y?: number; z?: number; place?: string; player?: string; tolerance?: number; timeoutMs?: number; say?: string; meet?: string }) => {
       if ([x !== undefined || zz !== undefined, place !== undefined, player !== undefined].filter(Boolean).length !== 1) throw new BodyError('INVALID_ARGUMENT', '坐标（x、z，y 可选）、place、player 三者给且只给一个');
       if (player !== undefined) {
-        if (meet) throw new BodyError('INVALID_ARGUMENT', 'meet 用在走去坐标或地点找人；走到身边的玩家用 player 就行');
+        if (meet && meet !== player) throw new BodyError('INVALID_ARGUMENT', 'meet 用在走去坐标或地点找人；走到身边的玩家用 player 就行');
+        if (companion?.follows(player)) {
+          // Following this player already: the follow walks to them by itself, and goes to find them when they are out of reach.
+          const now = companion.snapshot();
+          return { following: player, note: companion.catchingUp() ? `已经在跟随 ${player}：${player} 走远了，正在自己过去找，看见就接着跟，不用 go-to`
+            : now.suspendedFor ? `已经在跟随 ${player}：现在让开在做 ${now.suspendedFor}，做完自己接上；要马上过去就先 stop-action keepCompanion:true`
+            : now.away ? `已经在跟随 ${player}：${player} 不在附近，回到附近会自动接上` : `已经在跟随 ${player}，会自己走到 ${player} 身边，不用 go-to` };
+        }
         if (meetWatch) {
           // Out of sight (past the observed range or in another dimension): only the direction and the distance, the way to look is the model's.
           const state = await body.observe(), where = playerWhereabouts(state, player);

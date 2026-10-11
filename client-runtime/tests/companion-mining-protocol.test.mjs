@@ -71,7 +71,7 @@ for (const code of ['COMPANION_PROTECTED', 'COMPANION_MINING_CONFLICT']) test(`$
 async function mcpFixture(t, mining = true) {
   const f = await fixture(t, mining), requests = [];
   let rearms = 0;
-  const companion = { request: async args => { requests.push(args); return { state: 'following' }; }, read: () => ({ state: 'idle' }), snapshot: () => ({ state: 'idle' }), stop: () => f.body.stop() };
+  const companion = { request: async args => { requests.push(args); return { state: 'following' }; }, read: () => ({ state: 'idle' }), snapshot: () => ({ state: 'idle' }), stop: () => f.body.stop(), catchingUp: () => false, follows: () => false };
   const reflexes = { authorizeAction: () => { rearms++; }, read: () => ({ armed: false }), stop: () => f.body.stop() };
   const server = createMcpServer(f.body, new EventJournal(), { companion, reflexes });
   const [left, right] = InMemoryTransport.createLinkedPair(), client = new Client({ name: 'mining-interface-test', version: '1' });

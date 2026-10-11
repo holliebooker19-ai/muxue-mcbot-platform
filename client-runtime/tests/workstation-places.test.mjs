@@ -172,7 +172,7 @@ test('meet is offered with travel-meet only, reaches the server from go-to (poin
   await call(c, 'places', { action: 'remember', name: '家', x: 10, y: 64, z: -5 });
   await call(c, 'go-to', { place: '家', meet: 'muxue' });
   assert.deepEqual(acts().map(act => [act.name, act.args]), [['travel-to', { x: 100, z: -40, meet: 'muxue' }], ['travel-to', { x: 3, y: 64, z: 3, meet: 'muxue' }], ['travel-to', { x: 10, y: 64, z: -5, tolerance: 1.5, meet: 'muxue' }]]);
-  assert.equal((await call(c, 'go-to', { player: 'muxue', meet: 'muxue' })).code, 'INVALID_ARGUMENT', 'walking up to a player needs no meet');
+  assert.equal((await call(c, 'go-to', { player: 'muxue', meet: 'Steve' })).code, 'INVALID_ARGUMENT', 'walking up to a player meets no one else (meet naming that same player is let through)');
   await assert.rejects(body.act('travel-to', { x: 1, z: 2, meet: 'no one' }), { code: 'INVALID_ARGUMENT' });
   const { body: old } = await setup(t);
   const oldTools = (await (await client(t, old)).listTools()).tools;

@@ -1,10 +1,14 @@
 import { isDeepStrictEqual } from 'node:util';
-import { BodyError, type Body, type BodyHello, type Observation, type Operation, type GuardOptions, type GuardDutyState, type PostureState, type PostureRequest, type StopOptions } from './body.js';
+import { BodyError, TRAVEL_MAX_BLOCKS, type Body, type BodyHello, type Observation, type Operation, type Position, type GuardOptions, type GuardDutyState, type PostureState, type PostureRequest, type StopOptions } from './body.js';
 import type { EventJournal } from './events.js';
 import { GatherTasks } from './gather-tasks.js';
 import { CompanionErrands, type PickupOptions, type PickupState, type MiningOptions, type MiningState } from './companion-errands.js';
+import type { Lease } from './scheduler.js';
 import { NOTE_INTERVAL_MS } from './meet-watch.js';
-import { whereText } from './model-view.js';
+import { playerWhereabouts, whereText } from './model-view.js';
+
+/** How often the walk after the followed player looks at its travel-to: the death recovery's walk looks as often. */
+const CATCH_UP_LOOK_MS = 250;
 
 export type { PickupOptions, PickupState, MiningOptions, MiningState };
 
@@ -88,6 +92,9 @@ export class CompanionMode {
   /** The posture as the server last reported it, to tell what changed (a way back to the seat that failed, a posture the server ended). */
   private seen?: PostureState;
   private awayNoted = false;
+  /** The walk after the followed player who went out of reach (catchUp) now, and the last one: where it went and whether it failed. Forgotten once the player is back. */
+  private catching?: { player: string; target: Position };
+  private lastChase?: { player: string; target: Position; failed: boolean };
   /** Explicit ends so far (stop with clearPosture, companion-mode stop): a death recovery that sees one move on does not set anything again. */
   private explicitStops = 0;
   private recovering = false;
@@ -249,7 +256,8 @@ export class CompanionMode {
     const intent = this.intent!;
     const waiting = intent.action === 'wait' || posture.state === 'waiting' || (posture.state === 'following' && posture.arrived === true);
     const who = intent.player ?? '玩家';
-    const note: Partial<CompanionState> = posture.state === 'suspended' && posture.suspendedFor
+    const note: Partial<CompanionState> = this.catching ? { away: true, reason: `${who} 走远了，正在自己过去找，看见就接着跟；你发别的任务时这一趟会让开；想不跟了用 companion-mode stop` }
+      : posture.state === 'suspended' && posture.suspendedFor
       ? { suspendedFor: posture.suspendedFor, reason: `暂时让开去做 ${posture.suspendedFor}，做完自动接着${intent.action === 'wait' ? '等' : '跟'}；不用 pause／resume，想结束用 companion-mode stop` }
       : posture.state === 'away' ? { away: true, reason: `${who} 不在附近（太远、下线、死了或在别的维度），回到附近会自动接上；想不跟了用 companion-mode stop，或重新 follow` }
       : posture.state === 'blocked' ? { reason: `走不到 ${who} 身边（${posture.reason ?? 'NO_PATH'}），过几秒会自己再试` } : {};
@@ -266,6 +274,8 @@ export class CompanionMode {
   }
   /** Accepted: the posture is set (follow, wait) or the pickup/mining/guard/pause/resume/stop was applied. Giving way to operations afterwards is the server's. */
   async request(request: CompanionRequest): Promise<CompanionState> {
+    // A walk after the followed player gives way to any new order about the follow; turning protection on or off leaves it walking.
+    if (request.action !== 'guard') await this.endCatchUp();
     if (this.changing || this.stopping || this.stopUnconfirmed) throw new BodyError('BUSY', '陪伴模式正在切换或停止尚未确认，请等待或明确叫停');
     if (this.recovering && request.action !== 'stop') throw new BodyError('BUSY', '正在去捡回死亡时掉的东西；叫停（stop-action）可以取消');
     if (request.action === 'follow' && (!request.player || !/^[A-Za-z0-9_]{1,16}$/.test(request.player) || (request.distance !== undefined && (!Number.isFinite(request.distance) || request.distance < FOLLOW_DISTANCE.min || request.distance > FOLLOW_DISTANCE.max)))) throw new BodyError('INVALID_ARGUMENT', `跟随需要明确玩家；距离范围为${FOLLOW_DISTANCE.min}..${FOLLOW_DISTANCE.max}`);
@@ -462,9 +472,14 @@ export class CompanionMode {
     }
     if (manual) return;
     if (posture.state === 'away' && this.intent.action === 'follow') {
+      const chasing = this.catchUp(state);
       // Nothing to decide (the follow picks up by itself): a note that rides along with the next waking event, never a turn of its own.
-      if (!this.awayNoted) { this.awayNoted = true; this.events.add('companion_note', `${this.intent.player} 不在附近${this.whereNote(state)}，没法跟着；回到附近会自动接上。想不跟了用 companion-mode stop，或重新 follow。`); }
-    } else this.awayNoted = false;
+      if (!this.awayNoted) {
+        this.awayNoted = true;
+        this.events.add('companion_note', chasing ? `${this.intent.player} 走远了${this.whereNote(state)}，正在自己过去找，看见就接着跟；你发别的任务时这一趟会让开。想不跟了用 companion-mode stop。`
+          : `${this.intent.player} 不在附近${this.whereNote(state)}，没法跟着；回到附近会自动接上。想不跟了用 companion-mode stop，或重新 follow。`);
+      }
+    } else if (posture.state !== 'suspended') { this.awayNoted = false; this.lastChase = undefined; }
     const next = this.view(posture);
     // Same state, other words (a suspended posture's countdown is not carried): nothing to publish.
     if (!isDeepStrictEqual(next, this.value)) this.publish(next, false);
@@ -473,6 +488,54 @@ export class CompanionMode {
   private whereNote(state: Observation): string {
     const where = this.intent?.player && this.body.hello.capabilities.includes('far-players') ? whereText(state, this.intent.player) : undefined;
     return where ? `（${where}）` : '';
+  }
+  /** The followed player is this one and the follow is on (following, or waiting beside them). */
+  follows(player: unknown): boolean { return this.intent?.action === 'follow' && this.intent.player === player && ['following', 'waiting'].includes(this.value.state); }
+  /** A walk after the followed player is going on (catchUp). */
+  catchingUp(): boolean { return !!this.catching; }
+  /** Something else wants the body (an order of the model's, another companion request): the walk after the player stops; the follow stays. */
+  async endCatchUp(): Promise<void> { if (this.catching) { this.catching = undefined; await this.stop(); } }
+  /**
+   * The followed player went out of reach in this dimension (posture away): walk toward where they are now with meet, as one goes
+   * after a friend who ran ahead. Seeing them on the way ends the walk, and the follow takes over by itself (the server's posture).
+   * It runs on the companion's lock, so it is no task of the model's and wakes no one; an order of the model's stops it first.
+   * Not again toward the spot a walk already went to (the player has moved on by less than the farthest follow distance), nor after
+   * a walk that failed, until the player has been back. Returns whether a walk is going on.
+   */
+  private catchUp(state: Observation): boolean {
+    if (this.catching) return true;
+    const player = this.intent?.player;
+    if (!player || !['travel-to', 'travel-meet', 'far-players'].every(cap => this.body.hello.capabilities.includes(cap))) return false;
+    if (this.recovering || this.changing || this.stopping || this.errands.token || this.body.pendingOperations().length > 0 || this.body.isBusy?.() === true) return false;
+    const where = playerWhereabouts(state, player);
+    if (!where || !('position' in where) || Math.hypot(where.position.x - state.position.x, where.position.z - state.position.z) > TRAVEL_MAX_BLOCKS) return false;
+    const last = this.lastChase;
+    if (last?.player === player && (last.failed || Math.hypot(where.position.x - last.target.x, where.position.z - last.target.z) <= FOLLOW_DISTANCE.max)) return false;
+    let lease: Lease;
+    try { lease = this.errands.hold(); } catch { return false; }
+    const run = { player, target: where.position };
+    this.catching = run;
+    void this.walkAfter(run, lease, this.epoch);
+    return true;
+  }
+  private async walkAfter(run: { player: string; target: Position }, lease: Lease, epoch: number): Promise<void> {
+    let operation: Operation | undefined;
+    try {
+      operation = await this.body.act('travel-to', { x: run.target.x, z: run.target.z, meet: run.player }, lease.token);
+      while (operation.status === 'running') {
+        await new Promise(resolve => setTimeout(resolve, CATCH_UP_LOOK_MS));
+        this.check(epoch); this.errands.check(lease);
+        operation = await this.body.operation(operation.operationId);
+      }
+    } catch { operation = undefined; /* stopped (an order of the model's, a stop) or the body is gone: nothing to say */ }
+    finally { if (this.catching === run) this.catching = undefined; this.errands.release(); }
+    if (!operation || epoch !== this.epoch) return;
+    const failed = operation.status === 'failed';
+    this.lastChase = { ...run, failed };
+    if (!failed) return;
+    let where = '';
+    try { where = this.whereNote(await this.body.observe()); } catch { /* said without where they are */ }
+    this.events.add('companion', `去找 ${run.player} 没走到（${operation.summary}）${where}；先在这里等，${run.player} 回到附近会自动接着跟。`);
   }
   /** The server dropped the posture without being asked (the followed player is not the one it was set for): say so once, nothing carries on. */
   private endedByServer(before?: PostureState): void {

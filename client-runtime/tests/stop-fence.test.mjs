@@ -70,7 +70,7 @@ test('read-only queries never authorize action, while a real action or a non-sur
   const { body } = await setup(t, ['workstation-options', 'travel-to', 'tend-crops', 'breed-animals', 'server-posture']);
   let authorized = 0;
   const reflexes = { authorizeAction() { authorized++; }, async stop() { return { stopped: true }; }, read() { return { armed: false }; } };
-  const c = await client(t, body, new EventJournal(), { reflexes, companion: { snapshot: () => ({ state: 'idle' }), read: () => ({ state: 'idle' }), refresh: async () => {}, request: async () => ({}) } });
+  const c = await client(t, body, new EventJournal(), { reflexes, companion: { snapshot: () => ({ state: 'idle' }), read: () => ({ state: 'idle' }), refresh: async () => {}, request: async () => ({}), catchingUp: () => false, follows: () => false } });
   await raw(c, 'workstation-options', {}); await raw(c, 'places', { action: 'list' }); await raw(c, 'get-status', {});
   await raw(c, 'tend-crops', { survey: true }); await raw(c, 'breed-animals', { animal: 'minecraft:cow', survey: true });
   await raw(c, 'places', { action: 'remember', name: 'home' });

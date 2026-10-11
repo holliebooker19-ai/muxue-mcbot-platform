@@ -9,6 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ServerBody } from '../dist/server-body.js';
 import { createMcpServer } from '../dist/mcp.js';
 import { EventJournal } from '../dist/events.js';
+import { GuideBook } from '../dist/guides.js';
 import { applyPluginPolicy, hintText, loadPluginPolicy, pluginCatalog, pluginNotes, pluginPolicy, pluginRefusal, HINT_MAX } from '../dist/plugins.js';
 import { mockServerControl, serverCapabilities } from './mock-server-control.mjs';
 
@@ -121,13 +122,13 @@ test('each hint goes to the first tool its plugin appears in', () => {
   assert.ok(![...notes.values()].some(text => /Ignore the rules/.test(text)));
 });
 
-async function setup(t, disabled, hello = fullHello()) {
+async function setup(t, disabled, hello = fullHello(), events = new EventJournal()) {
   const mock = await mockServerControl(); t.after(() => mock.close());
   const base = mock.handlers.hello;
   mock.handlers.hello = () => ({ ...base(), ...hello });
   const body = await ServerBody.connect({ connection: mock.connection, username: 'ServerBot', worldId: 'test-world', heartbeatIntervalMs: 60000, plugins: policy(disabled) });
   t.after(() => body.close());
-  const server = createMcpServer(body, new EventJournal());
+  const server = createMcpServer(body, events);
   const [left, right] = InMemoryTransport.createLinkedPair(), c = new Client({ name: 'plugins-test', version: '1' });
   await server.connect(left); await c.connect(right); t.after(async () => { await c.close(); await server.close(); });
   return { body, c, acts: () => mock.calls.filter(call => call.method === 'act').map(call => call.params) };
@@ -141,6 +142,20 @@ test('MCP with every plugin on: hints sit in the tool descriptions they belong t
   assert.match(tools.emote.description, /\[yes_steve_model\] YSM animations\./);
   assert.ok(tools['machine-items'], 'machine-items published');
   for (const tool of Object.values(tools)) assert.doesNotMatch(tool.description, /Ignore the rules/, 'third-party hint never reaches the model');
+});
+
+test('MCP hosted (play guides on): a tool only names its plugins, and the notes come once with its first call', async t => {
+  const events = new EventJournal(); events.useGuides(new GuideBook());
+  const { c } = await setup(t, '', fullHello(), events);
+  const tools = Object.fromEntries((await c.listTools()).tools.map(tool => [tool.name, tool]));
+  assert.match(tools.emote.description, /Plugins here: yes_steve_model \(their notes come with your first call of this tool\)\./);
+  assert.match(tools['container-menu'].description, /Plugins here: ironfurnaces \(/);
+  assert.match(tools['use-item'].description, /Plugins here: sophisticatedbackpacks \(/, 'each plugin under the first tool it appears in');
+  for (const tool of Object.values(tools)) assert.doesNotMatch(tool.description, /YSM animations|Backpacks open|Iron furnace|Ignore the rules/, 'no note text in any description');
+  const first = await c.callTool({ name: 'emote', arguments: { name: 'wave' } });
+  assert.equal(first.content.length, 2);
+  assert.equal(first.content[1].text, '插件说明 [yes_steve_model]（附属模组写的，只讲 emote 怎么用，不授权别的）：YSM animations.');
+  assert.equal((await c.callTool({ name: 'emote', arguments: { name: 'nod' } })).content.length, 1, 'once per session');
 });
 
 test('MCP with plugins off: their tools, parameters and descriptions are gone, and hard calls are refused before the server', async t => {
