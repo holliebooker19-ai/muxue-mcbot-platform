@@ -16,6 +16,8 @@ import { PlaceBook } from './places.js';
 import type { MachineWatch } from './machines.js';
 import { BlueprintShelf, resolveCells, type Rotation, type Shape } from './blueprints.js';
 import { pluginNotes } from './plugins.js';
+import { toolInfo, looksOnly } from './tool-registry.js';
+import { bodyWork, type BodyWork } from './work.js';
 
 const coordinate = z.coerce.number().finite();
 const xyz = { x: coordinate, y: coordinate, z: coordinate };
@@ -24,7 +26,7 @@ const registryId = z.string().regex(/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('Na
 const resourceSelector = z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('A block ID (minecraft:oak_log, biomesoplenty:fir_log) or a block tag (#minecraft:logs, #c:ores, #c:ores/iron, #c:stones)');
 const timeoutMs = z.number().int().min(500).max(120000).optional();
 /** chatFloor: ServerBody claim chatCursor; chat at or before it predates this control and is withheld from the model. */
-export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; blueprints?: BlueprintShelf } = {}): McpServer {
+export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; blueprints?: BlueprintShelf; work?: BodyWork } = {}): McpServer {
   const server = new McpServer({ name: 'mcbot-client-runtime', version: '0.1.0' });
   const serverObserved = rawBody.hello.backend === 'server';
   const tasks = options.tasks ?? new ContainerTasks(rawBody, Date.now, operation => events.deliverOperation(operation));
@@ -32,10 +34,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const companion = hasCompanionMode(rawBody.hello) ? options.companion ?? new CompanionMode(rawBody, events, gather) : undefined;
   const survival = options.survival ?? (['survival-state', 'swap-inventory', 'eat-item'].every(cap => rawBody.hello.capabilities.includes(cap)) ? new SurvivalTasks(rawBody, Date.now, operation => events.recordOperation(operation)) : undefined);
   const stopCurrent = options.stopCurrent ?? createActionStop(rawBody, tasks, gather, companion, survival);
-  const reflexes = options.reflexes ?? (survival ? new SurvivalReflexes(rawBody, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: () => {
-    try { tasks.assertIdle(); gather.assertIdle(); survival.assertIdle(); } catch { return true; }
-    return rawBody.isBusy?.() === true || rawBody.pendingOperations().length > 0 || companion?.busy() === true;
-  } }) : undefined);
+  const work = options.work ?? bodyWork(rawBody, tasks, gather, survival, companion);
+  const reflexes = options.reflexes ?? (survival ? new SurvivalReflexes(rawBody, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: work.busy }) : undefined);
   if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
   /** A stop (explicit, reflex preemption or reconfiguration) ends every tool call admitted before it: their later body.act submissions are refused. */
   let localStops = 0;
@@ -50,9 +50,6 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     };
     return typeof value === 'function' ? value.bind(target) : value;
   } });
-  const readTools = new Set(['get-status', 'get-position', 'list-inventory', 'find-entity', 'read-chat', 'get-block', 'get-container', 'get-operation', 'get-companion-mode', 'wait-for-events', 'discover-resources', 'discover-containers', 'look-around', 'get-survival-state', 'assess-tool', 'send-chat', 'stop-action', 'set-reflexes', 'defend-self', 'workstation-options', 'list-places', 'remember-place', 'forget-place']);
-  /** Calls that only look (survey:true) never authorize action, so they cannot rearm disarmed reflexes. */
-  const readOnlyCall = (name: string, args: { survey?: boolean }) => readTools.has(name) || (['tend-crops', 'breed-animals'].includes(name) && args.survey === true);
   const publicOperation = (operation: import('./body.js').Operation) => {
     if (!operation.result || typeof operation.result !== 'object' || !('targetToken' in operation.result)) return operation;
     const { targetToken: _private, ...result } = operation.result as Record<string, unknown>;
@@ -75,14 +72,23 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const currentChat = (chat: Observation['chat']) => options.chatFloor === undefined ? chat : chat.filter(line => line.seq > options.chatFloor!);
   /** Usage notes of enabled official plugins, appended to the tool each one is about (plugins.ts). */
   const notes = pluginNotes(rawBody.hello);
+  /**
+   * Every tool goes through here: what it is comes from tool-registry.json. Only action and task calls rearm stopped
+   * reflexes; those that need the body free get BUSY here, so no handler checks it again. A call that only looks
+   * (survey, dryRun) does neither.
+   */
   const register = (name: string, description: string, shape: ZodRawShape, handler: (args: any) => Promise<unknown>) => {
+    const tool = toolInfo(name);
     server.registerTool(name, { description: description + (notes.get(name) ?? ''), inputSchema: shape }, async args => {
       try {
         if (name === 'companion-mode' && args.mining) {
           if (!body.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '身体未声明持续陪挖保护，未降级为普通跟随');
           if (args.action !== 'follow' || args.pickup || (args.distance ?? 2.5) > args.mining.radius || new Set(args.mining.blockIds).size !== args.mining.blockIds.length) throw new BodyError('INVALID_ARGUMENT', '陪挖仅用于跟随，不能同时开启独立拾取，跟随距离须在陪挖半径内，矿石列表不能重复');
         }
-        if (!readOnlyCall(name, args)) reflexes?.authorizeAction();
+        if (!looksOnly(args)) {
+          if (tool.kind === 'action' || tool.kind === 'task') reflexes?.authorizeAction();
+          if (tool.needsIdle) work.assertIdle();
+        }
         const result = await calls.run({ epoch: stopEpoch() }, () => handler(args));
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (error) {
@@ -142,7 +148,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       }).strict().optional(),
     }, async args => {
       if (args.mining && !body.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '身体未声明持续陪挖保护，未降级为普通跟随');
-      tasks.assertIdle(); return companion.request(args as CompanionRequest);
+      return companion.request(args as CompanionRequest);
     });
     register('get-companion-mode', 'Read the current persistent companion mode without starting, resuming or stopping any action.', {}, async () => {
       // The server's posture is the authority (sitting, standing up, a follow it ended): take its word now rather than at the next tick.
@@ -187,17 +193,17 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const quantity = { item: registryId, count: z.number().int().min(1).max(256).optional().describe('Exactly one of count/stacks is required (gather-resources with wholeTree takes neither). Agent selects an explicit finite goal when user omitted it.'), stacks: z.number().int().min(1).max(256).optional().describe('Resolve from an actual selected stack maxStackSize; unknown does not mean 64. Maximum resolved goal 256, never truncated.'),
     say: z.string().min(1).max(256).optional(), maxSteps: z.number().int().min(1).max(256).optional().describe('独立动作预算；不填按数量算（每个约 8 步，64～256）'), timeoutMs: z.number().int().min(1000).max(120000).optional().describe('不填默认 60 秒；wholeTree 默认 300 秒') };
   if (serverObserved && body.hello.capabilities.includes('pickup-item')) {
-    register('collect-items', 'Finite pickup of the named item from currently observed ground entities within the fixed radius; never digs or expands the frozen UUID set. Native pickup receipts determine newly picked count, including honest overage. Items a carried backpack takes (pickup upgrade) still count and are listed in storedIn, not in the inventory. Chat remains available. Fails on receipt gaps, component/max changes or insufficient candidates; no automatic retry.', { ...quantity, radius: z.number().int().min(1).max(6).default(4) }, async args => { tasks.assertIdle(); return operationResult(await gather.start('collect-items', args)); });
+    register('collect-items', 'Finite pickup of the named item from currently observed ground entities within the fixed radius; never digs or expands the frozen UUID set. Native pickup receipts determine newly picked count, including honest overage. Items a carried backpack takes (pickup upgrade) still count and are listed in storedIn, not in the inventory. Chat remains available. Fails on receipt gaps, component/max changes or insufficient candidates; no automatic retry.', { ...quantity, radius: z.number().int().min(1).max(6).default(4) }, async args => operationResult(await gather.start('collect-items', args)));
     if (['nearby-resources', 'approach-resource', 'dig-block', 'select-slot'].every(cap => body.hello.capabilities.includes(cap))) {
       register('discover-resources', 'Freeze a finite loaded visible set of natural resources: logs, ores and stones, recognised by block tags so modded trees, ores and stones count too (#minecraft:logs without stripped logs or bark-only wood, #c:ores, #c:stones). Ask by block ID or tag: ["#minecraft:logs"] for any tree, ["#c:ores"] for any ore, ["#c:ores/iron"] for one kind. Each candidate reports its kind and drops (the server loot table: item, silk touch preference, least count per block); pass one of those items to gather-resources. Does not distinguish buildings from natural terrain; Agent must choose the authorized area. One resourceRef represents this candidate set; no automatic rescan.', { blockIds: z.array(resourceSelector).min(1).max(8), radius: z.number().int().min(1).max(16).default(4).describe('Up to 16 blocks around, 2 below and 4 above; gather-resources then walks to the candidates.'), maxResults: z.number().int().min(1).max(64).default(32),
         center: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional().describe('Scan around this point instead of the body (within 8 blocks of the body, 16 with wholeTree), e.g. the tree or the player who pointed at it.'),
         wholeTree: z.boolean().optional().describe('The player wants one whole tree ("cut down this tree", 整棵树): find the single tree nearest center, every log of it including slanted trunks and branches, ignoring maxResults. Then gather-resources with wholeTree:true and no count.'),
         trees: z.number().int().min(1).max(8).optional().describe('With wholeTree: how many whole trees, nearest first (\u0022cut these three trees\u0022 is trees:3 in one scan and one gather-resources, not one call per tree). Default 1.') }, args => gather.discover(args));
-      register('gather-resources', 'Finite newly picked item goal on one discovered candidate set: collect matching ground items in the authorized area, guarded select/approach/dig, then collect native drops. The item must be one of the drops of the candidates (ores: their ordinary drop such as raw_iron or diamond, never the ore block); ore gathering requires a verified non-Silk-Touch tool of the right tier. Fortune may produce honest overage. Actual picked count is distinct from blocks mined. No rescan beyond initial candidates. Requires exactly count or stacks, or wholeTree for a tree found with wholeTree; stacks binds an actual variant/max, possibly from the first authorized native drop. Chat continues; stop cancels, unknown never retries.', { ...quantity, resourceRef: z.string().uuid(), wholeTree: z.boolean().optional().describe('Cut every log of the tree found by discover-resources wholeTree:true and pick up all its drops; no count or stacks. Default budget 300 s.') }, async args => { tasks.assertIdle(); return operationResult(await gather.start('gather-resources', args)); });
+      register('gather-resources', 'Finite newly picked item goal on one discovered candidate set: collect matching ground items in the authorized area, guarded select/approach/dig, then collect native drops. The item must be one of the drops of the candidates (ores: their ordinary drop such as raw_iron or diamond, never the ore block); ore gathering requires a verified non-Silk-Touch tool of the right tier. Fortune may produce honest overage. Actual picked count is distinct from blocks mined. No rescan beyond initial candidates. Requires exactly count or stacks, or wholeTree for a tree found with wholeTree; stacks binds an actual variant/max, possibly from the first authorized native drop. Chat continues; stop cancels, unknown never retries.', { ...quantity, resourceRef: z.string().uuid(), wholeTree: z.boolean().optional().describe('Cut every log of the tree found by discover-resources wholeTree:true and pick up all its drops; no count or stacks. Default budget 300 s.') }, async args => operationResult(await gather.start('gather-resources', args)));
     }
   }
   if (serverObserved && ['pillar-up', 'dig-block', 'swap-inventory'].every(cap => body.hello.capabilities.includes(cap))) {
-    const pillar = new PillarTasks(body, () => { tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle(); });
+    const pillar = new PillarTasks(body, work.assertIdle);
     register('pillar-up', 'Climb straight up 1-12 blocks to reach a block overhead: jump and place a block from the inventory under the feet each time (dirt, planks or logs first, stone last). Needs headroom; stops early when blocks or room run out. Remembers the pillar: after dig-block up there, call pillar-down. gather-resources climbs trees and high resources by itself.', { blocks: z.number().int().min(1).max(12) }, async ({ blocks }) => pillar.up(blocks));
     register('pillar-down', 'Come back down the pillar built with pillar-up, digging its blocks out one by one from the top (they drop and are picked up). Only digs blocks it placed itself.', {}, async () => pillar.down());
   }
@@ -205,7 +211,6 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     register('sleep-in-bed', 'Walk to the nearest free bed within 16 blocks (around the named player, or yourself) and lie down, like a player right-clicking it. Only at night or in a thunderstorm and in the Overworld; monsters nearby, an occupied or obstructed bed fail with a code. Lying down also sets your respawn point to that bed, as for any player. A follow/wait steps aside by itself and picks up again after you wake. While asleep every action except send-chat and wake-up is refused. You get up by yourself in the morning or when hurt (event woke); wake-up gets up earlier. running requires polling get-operation.', {
       player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional().describe('Look for a bed near this player, e.g. the one who just went to bed'), timeoutMs,
     }, async args => {
-      tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle();
       return operationResult(await body.act('sleep-in-bed', args));
     });
     register('wake-up', 'Get out of bed now. Succeeds when already awake.', {}, async () => operationResult(await body.act('wake-up', {})));
@@ -215,7 +220,6 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       x: z.number().int().optional(), y: z.number().int().optional(), z: z.number().int().optional(), timeoutMs,
     }, async args => {
       if ([args.x, args.y, args.z].some(value => value === undefined) && [args.x, args.y, args.z].some(value => value !== undefined)) throw new BodyError('INVALID_ARGUMENT', 'x、y、z 要么都给，要么都不给');
-      tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle();
       return operationResult(await body.act('sit', args));
     });
   }
@@ -233,14 +237,12 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       seconds: z.number().min(1).max(30).optional().describe('Add-on animation length'),
       say: z.string().min(1).max(256).optional(),
     }, async ({ say, ...args }) => {
-      tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle();
       if (say) await body.act('send-chat', { message: say });
       const operation = await body.act('emote', args as import('./body.js').ActionArguments['emote']);
       const done = await settle(operation, 3000);
       return operationResult(done);
     });
   }
-  const idleBody = () => { tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle(); };
   /** Wait a little for an action that usually ends quickly; a longer one stays running and its result arrives as a task event. */
   const settle = async (operation: import('./body.js').Operation, ms: number) => {
     const end = Date.now() + ms;
@@ -251,7 +253,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     register('craft-item', 'Craft an item from the inventory with any ordinary shaped or shapeless recipe, like a player: uses the own 2x2 grid when the recipe fits, otherwise walks to a crafting table within 16 blocks (or puts one down from the inventory). Ingredients come only from plain stacks (no names, enchantments or damage). count is the number of items wanted (rounded up to whole crafts). When materials are short it crafts what it can and lists missing: each ingredient\'s options, need and have; tell the player what is missing instead of guessing. Result shows inventoryChange (gained/used).', {
       item: registryId, count: z.number().int().min(1).max(256).default(1), say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(1000).max(120000).optional(),
     }, async ({ say, ...args }) => {
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await settle(await body.act('craft-item', args), 40000));
     });
   }
@@ -260,7 +262,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       input: registryId.optional(), count: z.number().int().min(1).max(64).optional(), fuel: registryId.optional(), wait: z.boolean().optional(),
       furnace: z.object(blockXyz).optional(), say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(1000).max(900000).optional(),
     }, async ({ say, ...args }) => {
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       const operation = await body.act('smelt-item', args);
       return operationResult(args.wait ? operation : await settle(operation, 40000));
     });
@@ -276,7 +278,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       item: registryId, count: z.number().int().min(1).max(64).optional(), potion: registryId.optional(), wait: z.boolean().optional(),
       station: z.object(blockXyz).optional(), say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(1000).max(600000).optional(),
     }, async ({ say, ...args }) => {
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await settle(await body.act('produce-item', args), 15000));
     });
   }
@@ -291,7 +293,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       preview: z.boolean().optional(), maxLevels: z.number().int().min(0).max(39).optional(), expect: z.string().min(1).max(512).optional(),
       station: z.object(blockXyz).optional(), say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(1000).max(120000).optional(),
     }, async ({ say, ...args }) => {
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await settle(await body.act('modify-item', args), 40000));
     });
   }
@@ -308,7 +310,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(5000).max(600000).optional(),
     }, async ({ say, ...args }) => {
       if (args.survey) return operationResult(await body.act('tend-crops', args));
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await settle(await body.act('tend-crops', args), 15000));
     });
   }
@@ -316,7 +318,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     register('use-bucket', 'Bucket in the inventory, like a player: pour puts the water of a water bucket into the block x/y/z (air, a plant, or a waterloggable block such as a slab; a hole dug for a field), scoop fills an empty bucket from the water or lava source block x/y/z. It turns to look at the spot; stand within reach (about 4 blocks) with a clear view, or it fails with NO_LINE_OF_SIGHT and nothing happens. Lava is never poured; water boils away in the Nether. To irrigate a field: dig the hole, pour, then tend-crops till.', {
       ...blockXyz, action: z.enum(['pour', 'scoop']), say: z.string().min(1).max(256).optional(),
     }, async ({ say, ...args }) => {
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await body.act('use-bucket', args));
     });
   }
@@ -327,7 +329,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       item: z.string().min(1).max(256).optional(), count: z.number().int().min(1).max(2304).optional(), slot: z.number().int().min(0).max(255).optional(),
       expectedBlock: z.string().min(1).max(256).optional().describe('Block id you saw there; refused with STALE_BLOCK if it changed'), say: z.string().min(1).max(256).optional(),
     }, async ({ say, ...args }) => {
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await body.act('machine-items', args));
     });
   }
@@ -337,7 +339,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       lowHealth: z.number().min(2).max(18).optional(), say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(5000).max(180000).optional(),
     }, async ({ say, ...args }) => {
       if (args.survey) return operationResult(await body.act('hunt', args));
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await settle(await body.act('hunt', args), 15000));
     });
   }
@@ -347,7 +349,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(5000).max(300000).optional(),
     }, async ({ say, ...args }) => {
       if (args.survey) return operationResult(await body.act('breed-animals', args));
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await settle(await body.act('breed-animals', args), 15000));
     });
   }
@@ -379,7 +381,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       const blocks = cellsOf(args);
       const request = { blocks, ...(replace ? { replace } : {}), ...(timeoutMs ? { timeoutMs } : {}) };
       if (dryRun) return operationResult(await body.act('build', { ...request, dryRun: true }));
-      idleBody(); if (say) await body.act('send-chat', { message: say });
+      if (say) await body.act('send-chat', { message: say });
       return operationResult(await settle(await body.act('build', request), 15000));
     });
     if (shelf) {
@@ -398,7 +400,6 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   }
   const canTravel = serverObserved && body.hello.capabilities.includes('travel-to');
   const travel = async (target: { x: number; y?: number; z: number }, extra: { tolerance?: number; timeoutMs?: number; say?: string }) => {
-    idleBody();
     if (extra.say) await body.act('send-chat', { message: extra.say });
     return operationResult(await body.act('travel-to', { ...target, ...(extra.tolerance !== undefined ? { tolerance: extra.tolerance } : {}), ...(extra.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}) }));
   };
@@ -450,17 +451,16 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const interactionIds = (body.hello.interactions ?? []).filter(id => !itemInteractionIds.includes(id));
   if (serverObserved && body.hello.capabilities.includes('use-item') && itemInteractionIds.length) register('use-item', `Use a held item in the air through a registered interaction: ${itemInteractionIds.join(', ')}. The item must be in the hotbar (use prepare-item first). An interaction that opens a menu (e.g. a backpack) leaves it open: read it with get-container, move items with click-slot, then close-container. unknown is never retried; observe again.`, {
     interaction: z.enum(itemInteractionIds as [string, ...string[]]), item: registryId, timeoutMs,
-  }, async args => { tasks.assertIdle(); return operationResult(await useItem(body, args)); });
+  }, async args => operationResult(await useItem(body, args)));
   if (serverObserved && body.hello.capabilities.includes('equip-item')) register('equip-item', 'Put on armour from the inventory: a helmet, chestplate, elytra, leggings, boots or mob head, or a backpack that is worn on the back; a shield goes into the off hand (item = its ID, from anywhere in the inventory). The piece worn there before comes off into the slot the new one came from; a backpack takes the chest slot, so it and a chestplate cannot both be worn. For anything else in the off hand (a torch, food, a map, ...) pass hand:"offhand": that item from the inventory goes into the off hand, and whatever was in the off hand goes back to the slot the new item came from. Armour and shields do not need hand. Worn armour is in the get-status inventory as slots 36 boots, 37 leggings, 38 chestplate, 39 helmet (40 is the offhand). unknown is never retried; observe again.', {
     item: registryId, hand: z.literal('offhand').optional(),
-  }, async args => { tasks.assertIdle(); return operationResult(await equipItem(body, args)); });
+  }, async args => operationResult(await equipItem(body, args)));
   if (serverObserved && body.hello.capabilities.includes('use-item-on-block') && interactionIds.length) register('interact-block', `Right-click one block in reach through a registered interaction: ${interactionIds.join(', ')}. Give exactly one of item (must be in hotbar; use prepare-item first) or emptyHand when the interaction requires it. Unregistered blocks or items are refused before any action. unknown is never retried; observe again. For timing-sensitive repeats (e.g. stirring a pot) give repeatUntil: the program repeats the same interaction until the receipt summary field equals the value, stopping at the first non-succeeded receipt.`, {
     ...blockXyz, interaction: z.enum(interactionIds as [string, ...string[]]), item: registryId.optional(), emptyHand: z.literal(true).optional(),
     face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional(), timeoutMs,
     repeatUntil: z.object({ field: z.string().regex(/^[A-Za-z0-9_]{1,64}$/), equals: z.union([z.string().max(64), z.number(), z.boolean()]),
       max: z.number().int().min(1).max(16).default(8), intervalMs: z.number().int().min(100).max(5000).default(300) }).optional(),
   }, async ({ repeatUntil, ...args }) => {
-    tasks.assertIdle();
     if (!repeatUntil) return operationResult(await interactBlock(body, args));
     const { operation, repeat } = await interactBlockRepeated(body, args, repeatUntil);
     return { ...(operationResult(operation) as object), repeat };
@@ -474,7 +474,6 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   };
   for (const action of actions) {
     if (body.hello.capabilities.includes(action.name)) register(action.name, action.description, action.schema, async args => {
-      if (action.name !== 'send-chat') tasks.assertIdle();
       if (action.name === 'move-to-position' && canTravel) {
         // Past the 32-block walk (or into chunks not loaded yet): the same leg-by-leg walk as travel-to.
         const { x, y, z: zz, tolerance } = args as { x: number; y: number; z: number; tolerance?: number };

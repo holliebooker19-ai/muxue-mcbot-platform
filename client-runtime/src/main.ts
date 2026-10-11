@@ -23,6 +23,7 @@ import { recoverAfterDeath } from './death-recovery.js';
 import { logClaimFailure } from './claim-failure.js';
 import { useGiftGear } from './gift-gear.js';
 import { loadPluginPolicy } from './plugins.js';
+import { bodyWork } from './work.js';
 import { fileURLToPath } from 'node:url';
 
 async function main(): Promise<void> {
@@ -132,18 +133,12 @@ async function main(): Promise<void> {
     const tasks = new ContainerTasks(body, Date.now, operation => events!.deliverOperation(operation));
     const survival = ['survival-state', 'swap-inventory', 'eat-item'].every(cap => body!.hello.capabilities.includes(cap)) ? new SurvivalTasks(body, Date.now, operation => events!.recordOperation(operation)) : undefined;
     const stopCurrent = createActionStop(body, tasks, gather, companion, survival);
+    const work = bodyWork(body, tasks, gather, survival, companion);
     // Better armour a player throws is put on by itself unless the body is working (gift-gear.ts); following or waiting is not working.
-    useGiftGear(events, body, () => {
-      try { tasks.assertIdle(); gather.assertIdle(); survival?.assertIdle(); } catch { return true; }
-      return body!.pendingOperations().length > 0 || companion?.busy() === true;
-    });
-    const reflexes = survival ? new SurvivalReflexes(body, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: () => {
-      try { tasks.assertIdle(); gather.assertIdle(); survival.assertIdle(); }
-      catch { return true; }
-      return body!.isBusy?.() === true || body!.pendingOperations().length > 0 || companion?.busy() === true;
-    } }) : undefined;
+    useGiftGear(events, body, work.busy);
+    const reflexes = survival ? new SurvivalReflexes(body, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: work.busy }) : undefined;
     if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
-    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
+    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, work, places, machines, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
     monitor = new RuntimeMonitor(body, events, {
       ...(values.hosted ? { heartbeatFile } : {}),
       companion,

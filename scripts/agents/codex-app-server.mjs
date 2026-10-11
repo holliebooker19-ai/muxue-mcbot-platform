@@ -1,6 +1,7 @@
 // Codex app-server 的有状态 JSON-RPC 适配；不依赖任何 Minecraft 身体实现。
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SERVER_GAME_INSTRUCTIONS, LEGACY_GAME_INSTRUCTIONS } from './game-instructions.mjs';
 
 export const CODEX_GAME_TOOLS = Object.freeze([
@@ -16,21 +17,10 @@ export const CODEX_CLIENT_TOOLS = Object.freeze([
   'get-container', 'click-slot', 'close-container',
 ]);
 
-export const CODEX_SERVER_TOOLS = Object.freeze([
-  'send-chat', 'read-chat', 'get-status', 'get-position', 'list-inventory', 'find-entity',
-  'follow-player', 'move-to-position', 'look-at', 'stop-action', 'wait-for-events',
-  'get-block', 'get-operation', 'dig-block', 'place-block', 'open-container',
-  'get-container', 'click-slot', 'close-container', 'select-slot', 'drop-item',
-  'discover-containers', 'container-list', 'container-withdraw', 'give-item', 'fetch-and-give',
-  'approach-container', 'approach-player',
-  'companion-mode', 'get-companion-mode',
-  'discover-resources', 'gather-resources', 'collect-items', 'look-around', 'pillar-up', 'pillar-down',
-  'get-survival-state', 'assess-tool', 'prepare-item', 'eat-food', 'set-reflexes', 'defend-self',
-  'interact-block', 'sleep-in-bed', 'wake-up', 'sit', 'stand-up',
-  'craft-item', 'smelt-item', 'travel-to', 'remember-place', 'list-places', 'forget-place', 'go-to-place',
-  'workstation-options', 'produce-item', 'modify-item', 'tend-crops', 'breed-animals', 'hunt', 'use-bucket', 'build', 'list-blueprints', 'save-blueprint', 'machine-items',
-  'emote', 'equip-item', 'use-item',
-]);
+// ServerBody 的游戏工具就是运行端工具表里的那些（client-runtime/tool-registry.json，设计第 8.2 节）；仓库和绿色版里位置相同。
+// 按文件读而不 import：打包要求 scripts 不引用目录以外的模块。
+const TOOL_REGISTRY = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'client-runtime', 'tool-registry.json');
+export const CODEX_SERVER_TOOLS = Object.freeze(Object.keys(JSON.parse(fs.readFileSync(TOOL_REGISTRY, 'utf8')).tools));
 
 // Windows 的 npm .ps1/.cmd shim 不能直接交给 spawn；用 Node 启动官方 npm 入口。
 export function codexCommand(env = process.env, platform = process.platform) {

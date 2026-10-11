@@ -418,7 +418,7 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 - 打断：自动自卫（只在保护关着时）和紧急进食都先 `stopCurrent()` 取消原任务，事件里说“不会重放”（`survival-reflexes.ts` 第 176～181、215～220 行）。`defend-self` 走同一条路。
 - `CompanionMode`（822 行）里的陪挖、陪捡占了约 200 行（`mineBlock`、`returnFromMining`、`pickupItem`、`block`、`childActive`）。
 
-### 8.2 4b：忙判断一处，加工具属性表（约 1 天）
+### 8.2 4b：忙判断一处，加工具属性表（约 1 天；10-11 完成，见本节末尾）
 
 新增 `client-runtime/src/tool-registry.ts`，每个 MCP 工具一条记录。
 
@@ -441,6 +441,15 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 - `companion-mode` 不再查容器任务忙不忙。姿态和任务已经分开（第 2 步），“搬箱子时说一声跟着我”应当能设上，姿态会自己先让开。
 
 测试：`tool-registry` 表和 `mcp.ts` 注册的工具一致，`needsIdle` 的工具在忙时报 BUSY，白名单的条数和内容不变（68 个）。
+
+**2026-10-11 完成（离线）**。离线检查：运行端 480 项（新增 `tool-registry.test.mjs` 3 项）、`mcp-server` 726 项（另有 1 项跳过）全部通过。和上面设计的出入：
+- 表是 `client-runtime/tool-registry.json`，不是 `.ts`。运行端由 `src/tool-registry.ts` 按自己的位置读它并校验；Codex 用固定路径按文件读（`codex-app-server.mjs`），不 import，所以不违反打包脚本“scripts 不引用目录以外的模块”的检查；打包时多复制这一个文件。白名单因此不依赖运行端是否已经构建。
+- `kind` 多了一种 `control`（`stop-action`、`set-reflexes`、`defend-self`）：不重新启用本能，也从不因为忙被拒。“重新启用被停用的本能”只有 `action`／`task` 会触发，取代原来的 `readTools`。
+- `companion-mode` 记为 `action`，`needsIdle` 为假：照旧会重新启用本能，但不再查容器任务（8.7 已同意）。
+- 只看不做的调用（带 `survey:true` 或 `dryRun:true`）一律不重新启用本能，也不查忙。原来只有 `tend-crops`、`breed-animals` 的 survey 是这样，现在 `hunt` 的 survey 和 `build` 的 `dryRun` 也一样。
+- `list-blueprints`、`save-blueprint` 只读写蓝图文件，记为 `read`。原来它们会重新启用本能，而且本能正在吃东西或打架时会被拒。
+- `assertIdle` 除了三个任务主人，还查 `body.isBusy()`（有动作在跑、有人持有任务锁、正在停止）。原来这种情况也是 BUSY，只是由 `ServerBody.act` 报出来。
+- 实现过程中发现：10-11 清理 worker worktree 时，`client-runtime` 和 `mcp-server` 的 `node_modules` 被一起清空了。已按 lock 文件重新 `npm ci`；其他目录和绿色版没有受影响。
 
 ### 8.3 4d 服务端：一个任务槽（约 1.5～2 天，行为不变）
 
