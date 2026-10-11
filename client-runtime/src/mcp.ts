@@ -11,9 +11,10 @@ import { SurvivalReflexes, MAX_RESUMES } from './survival-reflexes.js';
 import { createActionStop, companionReflexHooks, type StopCurrent } from './action-stop.js';
 import { PillarTasks } from './pillar.js';
 import { equipItem, interactBlock, interactBlockRepeated, useItem } from './interactions.js';
-import { summarizeOperation, summarizeObservation, summarizeContainer } from './model-view.js';
+import { summarizeOperation, summarizeObservation, summarizeContainer, farPlayerView, playerWhereabouts, whereText } from './model-view.js';
 import { PlaceBook } from './places.js';
 import type { MachineWatch } from './machines.js';
+import { MeetWatch } from './meet-watch.js';
 import { BlueprintShelf, resolveCells, type Rotation, type Shape } from './blueprints.js';
 import { pluginNotes } from './plugins.js';
 import { toolInfo, looksOnly, TOOLS } from './tool-registry.js';
@@ -26,7 +27,7 @@ const registryId = z.string().regex(/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('ID
 const resourceSelector = z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('Block ID or tag: minecraft:oak_log, #minecraft:logs, #c:ores, #c:ores/iron, #c:stones');
 const timeoutMs = z.number().int().min(500).max(120000).optional();
 /** chatFloor: ServerBody claim chatCursor; chat at or before it predates this control and is withheld from the model. */
-export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; blueprints?: BlueprintShelf } = {}): McpServer {
+export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; meetWatch?: MeetWatch; blueprints?: BlueprintShelf } = {}): McpServer {
   const server = new McpServer({ name: 'mcbot-client-runtime', version: '0.1.0' });
   const serverObserved = rawBody.hello.backend === 'server';
   const tasks = options.tasks ?? new ContainerTasks(rawBody, Date.now, operation => events.deliverOperation(operation));
@@ -39,6 +40,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   if (companion) scheduler.useCompanion(companion);
   const reflexes = options.reflexes ?? (survival ? new SurvivalReflexes(rawBody, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: () => scheduler.busy(), running: () => scheduler.current() }) : undefined);
   if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
+  const meetWatch = options.meetWatch ?? (rawBody.hello.capabilities.includes('far-players') ? new MeetWatch(events) : undefined);
   /** A stop (explicit, reflex preemption or reconfiguration) ends every tool call admitted before it: their later body.act submissions are refused. */
   let localStops = 0;
   const stopEpoch = () => localStops + (stopCurrent.generation?.() ?? 0);
@@ -89,6 +91,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
           if (!body.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '身体未声明持续陪挖保护，未降级为普通跟随');
           if (args.action !== 'follow' || args.pickup || (args.distance ?? 2.5) > args.mining.radius || new Set(args.mining.blockIds).size !== args.mining.blockIds.length) throw new BodyError('INVALID_ARGUMENT', '陪挖仅用于跟随，不能同时开启独立拾取，跟随距离须在陪挖半径内，矿石列表不能重复');
         }
+        // go-to while a meet walk is all that runs: the model looks somewhere else now. That walk stops (following and protection stay) and this one goes.
+        if (name === 'go-to' && meetWatch?.walking() && scheduler.current()?.id === meetWatch.walking()) await (reflexes ? reflexes.stop({ keepCompanion: true }) : stopCurrent({}));
         if (!looksOnly(args)) {
           if (tool.kind === 'action' || tool.kind === 'task') reflexes?.authorizeAction();
           if (tool.needsIdle) scheduler.assertIdle();
@@ -104,13 +108,14 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const survivalRead = !!body.survivalState && body.hello.capabilities.includes('survival-state');
   const includes = (survivalRead ? ['inventory', 'survival'] : ['inventory']) as [string, ...string[]];
   const statusText = serverObserved
-    ? `Read yourself now (server-observed): position, health, food, hand, companion mode (following/waiting, suspendedFor, away, guard), machines still working.${entityGear} include inventory: every slot (slot, id, count, components)${survivalRead ? `; include survival: dangers, nearby threats${equipment ? ' with their equipment' : ''}, active defense and the eating/defense policy (its revision is for set-reflexes); missing threat facts do not mean safe` : ''}. details:true: raw snapshot.`
+    ? `Read yourself now (server-observed): position, health, food, hand, companion mode (following/waiting, suspendedFor, away, guard), machines still working${body.hello.capabilities.includes('far-players') ? ', farPlayers (out of sight: direction and distance, or their dimension)' : ''}.${entityGear} include inventory: every slot (slot, id, count, components)${survivalRead ? `; include survival: dangers, nearby threats${equipment ? ' with their equipment' : ''}, active defense and the eating/defense policy (its revision is for set-reflexes); missing threat facts do not mean safe` : ''}. details:true: raw snapshot.`
     : `Read the current ${observed} snapshot.${prediction} Inspect operation status to confirm action completion. When present, operationBudget reports the current lease's remaining distinct operation IDs; stop does not replenish it. Exhaustion needs explicit release/re-claim, never automatic task replay.${entityGear}`;
   register('get-status', statusText, serverObserved ? { details: z.boolean().default(false), include: z.array(z.enum(includes)).max(2).optional() } : {}, async ({ details, include }: { details?: boolean; include?: string[] }) => {
     // The server's posture is the authority (sitting, standing up, a follow it ended): take its word now rather than at the next tick.
     await companion?.refresh();
     const state = await body.observe(); events.ingest(state); const projected = { ...state, chat: currentChat(state.chat) };
-    return { ...(serverObserved && !details ? summarizeObservation(projected) as object : projected), platform: body.hello.platform, capabilities: body.hello.capabilities, ...(companion ? { companionMode: companion.read() } : {}), ...(reflexes ? { survivalPolicy: reflexes.read() } : {}), ...(options.machines?.waiting().length ? { machines: options.machines.waiting() } : {}),
+    // Other players' coordinates past the observed range never reach the model, not even in the raw snapshot.
+    return { ...(serverObserved && !details ? summarizeObservation(projected) as object : { ...projected, ...(state.farPlayers ? { farPlayers: farPlayerView(state) } : {}) }), platform: body.hello.platform, capabilities: body.hello.capabilities, ...(companion ? { companionMode: companion.read() } : {}), ...(reflexes ? { survivalPolicy: reflexes.read() } : {}), ...(options.machines?.waiting().length ? { machines: options.machines.waiting() } : {}),
       ...(include?.includes('inventory') ? { inventory: state.inventory } : {}),
       ...(include?.includes('survival') && survivalRead ? { survival: { ...await body.survivalState!({ details: details === true }), ...(reflexes ? { policy: reflexes.read() } : {}) } } : {}) };
   });
@@ -430,13 +435,16 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   const places = options.places ?? new PlaceBook();
   const travel = async (target: { x: number; y?: number; z: number }, extra: { tolerance?: number; timeoutMs?: number; say?: string; meet?: string }) => {
     if (extra.say) await body.act('send-chat', { message: extra.say });
-    return operationResult(await body.act('travel-to', { ...target, ...(extra.tolerance !== undefined ? { tolerance: Math.max(1, extra.tolerance) } : {}), ...(extra.timeoutMs !== undefined ? { timeoutMs: Math.max(TRAVEL_TIMEOUT_MS.min, extra.timeoutMs) } : {}), ...(extra.meet ? { meet: extra.meet } : {}) }));
+    const operation = await body.act('travel-to', { ...target, ...(extra.tolerance !== undefined ? { tolerance: Math.max(1, extra.tolerance) } : {}), ...(extra.timeoutMs !== undefined ? { timeoutMs: Math.max(TRAVEL_TIMEOUT_MS.min, extra.timeoutMs) } : {}), ...(extra.meet ? { meet: extra.meet } : {}) });
+    if (extra.meet) meetWatch?.start(operation, extra.meet, target);
+    return operationResult(operation);
   };
   if (canTravel || canMove || canApproach) {
     // meet: going to find a player who may be walking this way too (docs/server_body_protocol.md, travel-to).
     const canMeet = canTravel && body.hello.capabilities.includes('travel-meet');
     const far = canTravel ? ` Far points (up to ${TRAVEL_MAX_BLOCKS} blocks) are walked leg by leg over the surface, swimming and through doors.` : '';
-    register('go-to', `Walk to x/z (y optional)${canTravel ? ', a remembered place (places)' : ''}${canApproach ? ', or up to a nearby player (come here, before handing something over)' : ''}.${far} Never digs, builds or teleports. NO_PATH says how far it got: tell the player.`, {
+    const seek = canMeet && meetWatch ? ' A player out of sight gives PLAYER_FAR with their direction and distance: pick a spot that way and go-to it with meet. On the way a meet event says if they are no longer that way; a new go-to replaces the walk.' : '';
+    register('go-to', `Walk to x/z (y optional)${canTravel ? ', a remembered place (places)' : ''}${canApproach ? ', or up to a nearby player (come here, before handing something over)' : ''}.${far} Never digs, builds or teleports. NO_PATH says how far it got: tell the player.${seek}`, {
       x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(),
       ...(canTravel ? { place: z.string().min(1).max(32).optional() } : {}),
       ...(canApproach ? { player: playerName.optional() } : {}),
@@ -448,6 +456,12 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       if ([x !== undefined || zz !== undefined, place !== undefined, player !== undefined].filter(Boolean).length !== 1) throw new BodyError('INVALID_ARGUMENT', '坐标（x、z，y 可选）、place、player 三者给且只给一个');
       if (player !== undefined) {
         if (meet) throw new BodyError('INVALID_ARGUMENT', 'meet 用在走去坐标或地点找人；走到身边的玩家用 player 就行');
+        if (meetWatch) {
+          // Out of sight (past the observed range or in another dimension): only the direction and the distance, the way to look is the model's.
+          const state = await body.observe(), where = playerWhereabouts(state, player);
+          if (where && 'dimension' in where) throw new BodyError('OTHER_DIMENSION', `${player} ${whereText(state, player)}，走不过去`);
+          if (where && !where.seen) throw new BodyError('PLAYER_FAR', `${player} ${whereText(state, player)}，看不到。去找就朝那边自己选个点，go-to x/z${canMeet ? ` 带 meet:"${player}"，路上看见就跟上` : ''}`);
+        }
         if (say) await body.act('send-chat', { message: say });
         return operationResult(await body.act('approach-player', { player, ...(timeoutMs !== undefined ? { timeoutMs: Math.min(120000, timeoutMs) } : {}) }));
       }

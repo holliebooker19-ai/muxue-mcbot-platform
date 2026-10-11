@@ -17,6 +17,7 @@ import { createActionStop, companionReflexHooks } from './action-stop.js';
 import { BodyError, type Body, type GuardOptions } from './body.js';
 import { PlaceBook } from './places.js';
 import { MachineBook, MachineWatch } from './machines.js';
+import { MeetWatch } from './meet-watch.js';
 import { BlueprintShelf } from './blueprints.js';
 import { writePosture, takeHeldPosture, type HeldPosture } from './posture.js';
 import { recoverAfterDeath } from './death-recovery.js';
@@ -139,12 +140,15 @@ async function main(): Promise<void> {
     useGiftGear(events, body, () => scheduler.busy());
     const reflexes = survival ? new SurvivalReflexes(body, survival, events, { stopCurrent, ...companionReflexHooks(companion), ordinaryBusy: () => scheduler.busy(), running: () => scheduler.current() }) : undefined;
     if (survival && reflexes) gather.useSurvival(survival, () => reflexes.read());
-    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
+    // Going to find a player out of sight: where they are now, as a direction and a distance, when it no longer agrees with the walk.
+    const meetWatch = body.hello.capabilities.includes('far-players') ? new MeetWatch(events) : undefined;
+    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, meetWatch, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
     monitor = new RuntimeMonitor(body, events, {
       ...(values.hosted ? { heartbeatFile } : {}),
       companion,
       reflexes,
       machines,
+      meetWatch,
       onFatal: error => { if (error instanceof BodyError && error.code === 'HOST_LOST') void shutdown(error); else loseControl(error); },
     });
     const transport = new StdioServerTransport();

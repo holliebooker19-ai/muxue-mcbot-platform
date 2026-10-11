@@ -1,4 +1,39 @@
-import type { Container, Equipment, EquippedItem, ItemStack, Observation, Operation } from './body.js';
+import type { Container, Equipment, EquippedItem, ItemStack, Observation, Operation, Position } from './body.js';
+
+/** The eight ways a person points, clockwise from north, with the axes they run along (north is z−, east is x+). */
+const COMPASS = [['北', 'z−'], ['东北', 'x+ z−'], ['东', 'x+'], ['东南', 'x+ z+'], ['南', 'z+'], ['西南', 'x− z+'], ['西', 'x−'], ['西北', 'x− z−']] as const;
+const DIMENSIONS: Record<string, string> = { 'minecraft:overworld': '主世界', 'minecraft:the_nether': '下界', 'minecraft:the_end': '末地' };
+/** Which of the eight ways `to` lies from `from` (0 north, 2 east ...). */
+export function compassSector(from: Pick<Position, 'x' | 'z'>, to: Pick<Position, 'x' | 'z'>): number {
+  return ((Math.round(Math.atan2(to.x - from.x, from.z - to.z) / (Math.PI / 4)) % 8) + 8) % 8;
+}
+/** Where a player is for the runtime: exact when seen or past the observed range in this dimension, else only the dimension; undefined when not online. */
+export function playerWhereabouts(state: Observation, name: string): { position: Position; seen: boolean } | { dimension: string } | undefined {
+  const seen = state.entities.find(entity => entity.type === 'minecraft:player' && entity.name === name && entity.name !== state.username);
+  if (seen) return { position: seen.position, seen: true };
+  const far = state.farPlayers?.find(player => player.name === name);
+  if (!far) return undefined;
+  return far.position && far.dimension === state.dimension ? { position: far.position, seen: false } : { dimension: far.dimension };
+}
+/** A rough place for the model: one of eight ways and a distance, as a person would say it; never the coordinates. */
+export function roughPlace(from: Position, to: Position): { direction: string; toward: string; distance: number } {
+  const [direction, toward] = COMPASS[compassSector(from, to)];
+  return { direction, toward, distance: Math.round(Math.hypot(to.x - from.x, to.z - from.z)) };
+}
+/** The same in words: "在你东北边约 123 格（x+ z−）", "在下界"; undefined when not online. */
+export function whereText(state: Observation, name: string): string | undefined {
+  const where = playerWhereabouts(state, name);
+  if (!where) return undefined;
+  if ('dimension' in where) return `在${DIMENSIONS[where.dimension] ?? where.dimension}`;
+  const rough = roughPlace(state.position, where.position);
+  return `在你${rough.direction}边约 ${rough.distance} 格（${rough.toward}）`;
+}
+/** farPlayers as the model sees them: a direction and a distance, or the other dimension. */
+export function farPlayerView(state: Observation) {
+  return (state.farPlayers ?? []).map(player => player.position && player.dimension === state.dimension
+    ? { name: player.name, ...roughPlace(state.position, player.position) }
+    : { name: player.name, dimension: DIMENSIONS[player.dimension] ?? player.dimension });
+}
 
 /** Model projections never replace the authoritative snapshots used by action guards. */
 function stackSummary(stack: ItemStack | Container['carried']) {
@@ -37,6 +72,7 @@ export function summarizeObservation(state: Observation) {
     chat: state.chat.slice(-10), chatCursor: state.chatCursor,
     container: summarizeContainer(state.container), ...(state.block ? { block: state.block } : {}),
     ...(state.sleeping !== undefined ? { sleeping: state.sleeping } : {}), ...(state.sitting !== undefined ? { sitting: state.sitting } : {}), ...(state.time ? { time: state.time } : {}),
+    ...(state.farPlayers?.length ? { farPlayers: farPlayerView(state) } : {}),
     details: 'Compact view. Exact guarded snapshots: get-status include inventory (or details:true), container-menu read details:true.',
   };
 }

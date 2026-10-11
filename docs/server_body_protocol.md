@@ -140,6 +140,13 @@ drop-item携expectedMaxStackSize时，每次原生DROP_ITEM前均再核验；数
 
 Observation 另带 `sitting`（Bot 是否骑着已安装座位适配认定的座位实体，hello 的 `seatAdapters` 列出已安装的适配）、`sleeping`（Bot 是否躺在床上）和 `time:{dayTime,canSleep}`（一天里的时刻 0–23999；canSleep 是当前维度能用床且不是白天），附近玩家的 entities 条目带 `sleeping`。客户端运行端据此发两种唤醒事件：附近玩家上床 `player_sleep`（接管时已经在睡的不算），Bot 自己起床 `woke`。
 
+**`far-players`：看不到的玩家在哪（2026-10-12）。** Observation 带 `farPlayers:[{name, dimension, position?}]`：`entities` 范围（`OBSERVE_RANGE`，32 格）以外的其他在线玩家，同一维度的带精确 `position`，别的维度的只有 `dimension`；旁观和死了的不列，最多 64 个。精确位置只给运行端，**模型只看到方向和距离**（10-12 用户定：像真人一样指个方向，模型自己决定往哪走）：
+- 8 个方位（北是 z−、东是 x+）加坐标轴提示和整数格数，如“东北约 141 格（x+ z−）”；别的维度写“在下界／末地”。`get-status` 的 `farPlayers`（`details:true` 也一样换算）、跟丢时不叫醒的提示都用这个。
+- `go-to player` 碰上看不到的玩家回 `PLAYER_FAR`（附方向和距离，提示自己选个点 `go-to x/z` 带 `meet`），别的维度回 `OTHER_DIMENSION`，都不走；看得到的照旧走到身边。
+- 带 `meet` 走的路上（运行端 `MeetWatch`，每次巡检看一次）：玩家所在的方位和正在走去的方位不一样了，而且和上次说的不同，才发一条叫醒的 `meet` 事件，最快每 `NOTE_INTERVAL_MS`（20 秒，和保护通知同一个间隔）一次；玩家站着不动不发。去了别的维度、下线也各说一次。走到了或走不通还没遇到，再发一条说玩家现在在哪；遇到了（转跟随）、被叫停或被替换的不说。
+- 正在跑的只有这一趟找人时，新的 `go-to` 先停掉它（跟随和保护照旧，同 `stop-action keepCompanion:true`）再走，不回 `BUSY`；别的走路照旧 `BUSY`。
+- 跟丢（`away`）后不自动去找。
+
 表情和外观（2026-10-08，第 8j 步）：
 - `emote` `{name,source?,player?,seconds?}`。不带 source 是内置手势 wave（挥三下手）、nod（点头）、shake（摇头）、crouch（蹲起两次）、jump（跳一下）、spin（转一圈），约 1 秒，逐 tick 做，做完把朝向和姿势复原；player 先转向那位玩家（32 格内，否则 PLAYER_NOT_VISIBLE）。带 source 是附属模组登记的动画（`EmoteSource`），立即成功，result `{source,name,seconds}`；到 seconds（默认 6，1–30）、开始别的动作（send-chat、look-at、emote、set-appearance 除外）或身体被移除时，核心调来源的 `stop`。名字只能是 `[A-Za-z0-9_.:-]{1,64}`；没装的来源 UNSUPPORTED，来源不认的名字 INVALID_ARGUMENT。
 - `set-appearance` `{source,choice}`：套用附属模组登记的外观（`AppearanceSource`），choice 必须在来源当前的 `choices` 里。只给托管宿主用：运行端带 `--appearance <source>=<choice>`（WebUI 配置页选）时，每次接管后调一次，失败只在 stderr 提示；MCP 不发布这个动作。

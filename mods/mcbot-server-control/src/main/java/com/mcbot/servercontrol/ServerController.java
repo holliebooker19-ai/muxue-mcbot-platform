@@ -30,7 +30,7 @@ import java.util.function.Consumer;
 import static com.mcbot.servercontrol.Protocol.*;
 
 final class ServerController implements ControlSession.Game {
-    static final List<String> CAPABILITIES=List.of("send-chat","look-at","move-to-position","follow-player","dig-block","place-block","open-container","click-slot","close-container","select-slot","drop-item","nearby-blocks","nearby-resources","approach-container","approach-player","approach-resource","pickup-item","companion-pickup","companion-mining","swap-inventory","eat-item","equip-item","survival-state","assess-tool","defend-entity","retreat-from-entity","navigation-3d","look-around","pillar-up","sleep-in-bed","wake-up","craft-item","smelt-item","travel-to","workstation-options","produce-item","modify-item","tend-crops","breed-animals","hunt","use-bucket","emote","set-appearance","build","machine-items","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","sit","stand-up","server-posture","task-interrupts","travel-meet");
+    static final List<String> CAPABILITIES=List.of("send-chat","look-at","move-to-position","follow-player","dig-block","place-block","open-container","click-slot","close-container","select-slot","drop-item","nearby-blocks","nearby-resources","approach-container","approach-player","approach-resource","pickup-item","companion-pickup","companion-mining","swap-inventory","eat-item","equip-item","survival-state","assess-tool","defend-entity","retreat-from-entity","navigation-3d","look-around","pillar-up","sleep-in-bed","wake-up","craft-item","smelt-item","travel-to","workstation-options","produce-item","modify-item","tend-crops","breed-animals","hunt","use-bucket","emote","set-appearance","build","machine-items","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","sit","stand-up","server-posture","task-interrupts","travel-meet","far-players");
     private final MinecraftServer server;
     private final ServerConfig config;
     final ControlSession session;
@@ -86,6 +86,8 @@ final class ServerController implements ControlSession.Game {
     static final int DROP_LIFETIME_TICKS=6000;
     /** At most this many kinds of item listed in lastDeath.drops: an inventory holds 41 stacks, and hello stays short. */
     static final int DEATH_DROP_KINDS=16;
+    /** How far observe lists entities around the body (and findPlayer reaches); players past it are farPlayers. */
+    static final int OBSERVE_RANGE=32;
     /** The item entities of the last death's drops; how many are still there is read when hello is asked. */
     private final List<UUID> deathDrops=new ArrayList<>();
     private final Consumer<net.neoforged.neoforge.event.entity.living.LivingDropsEvent> dropsListener=this::recordDrops;
@@ -235,8 +237,8 @@ final class ServerController implements ControlSession.Game {
         JsonArray inventory=new JsonArray(),entities=new JsonArray();
         for(int i=0;i<player.getInventory().getContainerSize();i++) inventory.add(survival.observedStack(i,player.getInventory().getItem(i)));
         List<EquipmentView.Entry> equipped=new ArrayList<>();
-        for(Entity entity:player.serverLevel().getEntities(player,player.getBoundingBox().inflate(32))) {
-            if(entity.distanceToSqr(player)>32*32) continue;
+        for(Entity entity:player.serverLevel().getEntities(player,player.getBoundingBox().inflate(OBSERVE_RANGE))) {
+            if(entity.distanceToSqr(player)>OBSERVE_RANGE*OBSERVE_RANGE) continue;
             JsonObject seen=obj("id",entity.getUUID().toString(),"type",BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString(),"name",entity instanceof Player p?p.getGameProfile().getName():entity.getName().getString(),"position",position(entity.position()));
             if(entity instanceof Player p)seen.addProperty("sleeping",p.isSleeping());
             if(entity instanceof net.minecraft.world.entity.LivingEntity living)ItemDescriptions.collectEquipment(living,seen,entity.distanceToSqr(player),equipped);
@@ -245,7 +247,17 @@ final class ServerController implements ControlSession.Game {
         }
         // What nearby players and creatures hold and wear (entity-equipment), nearest first and bounded.
         EquipmentView.attach(equipped);
+        // far-players: the other players past OBSERVE_RANGE, for the runtime only (it tells the model a direction and a distance, never
+        // this position); in another dimension only which one. Spectators and the dead are not there to find.
+        JsonArray far=new JsonArray();
+        for(ServerPlayer other:server.getPlayerList().getPlayers()) {
+            if(other==player||other.isSpectator()||!other.isAlive()||far.size()>=64) continue;
+            String name=other.getGameProfile().getName(),dimension=other.serverLevel().dimension().location().toString();
+            if(other.serverLevel()!=player.serverLevel())far.add(obj("name",name,"dimension",dimension));
+            else if(other.distanceToSqr(player)>OBSERVE_RANGE*OBSERVE_RANGE)far.add(obj("name",name,"dimension",dimension,"position",position(other.position())));
+        }
         JsonObject result=obj("connected",true,"username",config.username(),"dimension",player.serverLevel().dimension().location().toString(),"health",player.getHealth(),"food",player.getFoodData().getFoodLevel(),"position",position(player.position()),"yaw",player.getYRot(),"pitch",player.getXRot(),"inventory",inventory,"selectedSlot",player.getInventory().selected,"entities",entities,"chat",chat,"chatCursor",chatSequence,"container",survival.container(),"source","server-observed");
+        result.add("farPlayers",far);
         result.addProperty("sleeping",player.isSleeping());
         result.addProperty("sitting",NativeSeat.seated(player));
         result.add("time",obj("dayTime",player.serverLevel().getDayTime()%24000,"canSleep",player.level().dimensionType().natural()&&!player.level().isDay()));
@@ -649,7 +661,7 @@ final class ServerController implements ControlSession.Game {
         WalkTask walk=new WalkTask(operation,timeout,true);walk.followed=followed;
         task=walk;active=operation;
     }
-    static boolean atomicAction(String name){return (CAPABILITIES.contains(name)||ItemInteractions.capabilities().contains(name))&&!Set.of("nearby-blocks","nearby-resources","companion-pickup","companion-mining","survival-state","assess-tool","navigation-3d","look-around","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","server-posture","task-interrupts","travel-meet").contains(name);}
+    static boolean atomicAction(String name){return (CAPABILITIES.contains(name)||ItemInteractions.capabilities().contains(name))&&!Set.of("nearby-blocks","nearby-resources","companion-pickup","companion-mining","survival-state","assess-tool","navigation-3d","look-around","machine-status","guard-duty-fenced","guard-duty-tasks","gift-receipts","entity-equipment","host-notice","last-death","assess-armour","server-posture","task-interrupts","travel-meet","far-players").contains(name);}
     @Override public boolean nativeWriteInProgress(){return SurvivalActions.nativeWriteInProgress(player);}
     void beforePhysics(BodyPlayer body) {
         if(body!=player) { body.stopInput(); return; }
@@ -882,7 +894,7 @@ final class ServerController implements ControlSession.Game {
     }
     private ServerPlayer findPlayer(String name) {
         ServerPlayer target=server.getPlayerList().getPlayerByName(name);
-        return target!=null&&target!=player&&target.isAlive()&&target.serverLevel()==player.serverLevel()&&target.distanceToSqr(player)<=32*32?target:null;
+        return target!=null&&target!=player&&target.isAlive()&&target.serverLevel()==player.serverLevel()&&target.distanceToSqr(player)<=OBSERVE_RANGE*OBSERVE_RANGE?target:null;
     }
     private void finish(String status,String summary) {
         finish(status,summary,obj("position",position(player.position())));

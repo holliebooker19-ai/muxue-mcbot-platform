@@ -54,7 +54,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // 需要叫醒 agent 的事件；reflex（自动进食/反击）、presence（上下线说明）等只在下次一起带上
 export const WAKE_TYPES = new Set(['chat', 'whisper', 'hurt', 'low_health', 'death', 'player_joined', 'player_left',
-  'time', 'bedtime', 'spawn', 'danger', 'follow', 'player_death', 'advancement', 'player_sleep', 'woke', 'teleport', 'task', 'companion', 'survival', 'guard', 'scene', 'machine', 'gift']);
+  'time', 'bedtime', 'spawn', 'danger', 'follow', 'player_death', 'advancement', 'player_sleep', 'woke', 'teleport', 'task', 'companion', 'survival', 'guard', 'scene', 'machine', 'gift', 'meet']);
 const BATCH_DELAY_MS = 1500;
 const SERVER_CHAT_QUIET_MS = 120;
 const SERVER_CHAT_MAX_MS = 350;

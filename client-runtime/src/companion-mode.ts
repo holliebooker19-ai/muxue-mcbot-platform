@@ -3,6 +3,8 @@ import { BodyError, type Body, type BodyHello, type Observation, type Operation,
 import type { EventJournal } from './events.js';
 import { GatherTasks } from './gather-tasks.js';
 import { CompanionErrands, type PickupOptions, type PickupState, type MiningOptions, type MiningState } from './companion-errands.js';
+import { NOTE_INTERVAL_MS } from './meet-watch.js';
+import { whereText } from './model-view.js';
 
 export type { PickupOptions, PickupState, MiningOptions, MiningState };
 
@@ -390,7 +392,7 @@ export class CompanionMode {
     else if (guard.state === 'evading' && before?.state !== 'evading') this.events.add('guard', '苦力怕要炸了，先躲开。');
     if (busy(guard.state) && !this.fight) {
       this.fight = { kills: before?.kills ?? guard.kills, targets: new Set() };
-      if (guard.state !== 'retreating' && guard.state !== 'evading' && this.now() - this.fightNotedAt >= 20000) {
+      if (guard.state !== 'retreating' && guard.state !== 'evading' && this.now() - this.fightNotedAt >= NOTE_INTERVAL_MS) {
         this.fightNotedAt = this.now();
         this.events.add('guard', `有 ${guard.target ?? '敌对生物'} 靠近 ${player}，${guard.state === 'shooting' || guard.state === 'aiming' ? '正在用弓射' : '正在过去打'}；程序自己打，不用发工具。`);
       }
@@ -461,11 +463,16 @@ export class CompanionMode {
     if (manual) return;
     if (posture.state === 'away' && this.intent.action === 'follow') {
       // Nothing to decide (the follow picks up by itself): a note that rides along with the next waking event, never a turn of its own.
-      if (!this.awayNoted) { this.awayNoted = true; this.events.add('companion_note', `${this.intent.player} 不在附近，没法跟着；回到附近会自动接上。想不跟了用 companion-mode stop，或重新 follow。`); }
+      if (!this.awayNoted) { this.awayNoted = true; this.events.add('companion_note', `${this.intent.player} 不在附近${this.whereNote(state)}，没法跟着；回到附近会自动接上。想不跟了用 companion-mode stop，或重新 follow。`); }
     } else this.awayNoted = false;
     const next = this.view(posture);
     // Same state, other words (a suspended posture's countdown is not carried): nothing to publish.
     if (!isDeepStrictEqual(next, this.value)) this.publish(next, false);
+  }
+  /** Where the followed player is, for the away note (far-players): a direction and a distance, or the dimension. */
+  private whereNote(state: Observation): string {
+    const where = this.intent?.player && this.body.hello.capabilities.includes('far-players') ? whereText(state, this.intent.player) : undefined;
+    return where ? `（${where}）` : '';
   }
   /** The server dropped the posture without being asked (the followed player is not the one it was set for): say so once, nothing carries on. */
   private endedByServer(before?: PostureState): void {

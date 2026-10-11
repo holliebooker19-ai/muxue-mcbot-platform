@@ -81,6 +81,8 @@ const observationSchema = z.object({
   pickupCursor: generation.optional(), pickupOldestCursor: generation.optional(), pickupReceipts: z.array(z.object({ seq: generation, entityId: z.string().uuid(), position, stack: itemValue, pickedUpCount: z.number().int().positive(), sessionId: identifier, controlGeneration: generation, dimension: identifier, storedIn: identifier.optional(), thrownBy: tolerant(z.string().min(1).max(32)) })).max(256).optional(),
   guard: z.lazy(() => guardDutySchema).optional(),
   posture: tolerant(postureSchema),
+  // far-players: exact positions for the runtime only; the model is told a direction and a distance.
+  farPlayers: tolerant(z.array(z.object({ name: z.string(), dimension: z.string(), position: position.optional() })).max(64)),
 });
 const guardDutySchema = z.object({
   enabled: z.literal(true), player: z.string(), entityId: z.string().uuid(), options: z.record(z.unknown()).optional(),
@@ -181,7 +183,7 @@ export class ServerBody implements Body {
   private async connect(): Promise<void> {
     // The single plugin filter: everything below (and every tool registered from this.hello) sees the filtered hello.
     const hello = applyPluginPolicy(await this.readHello(), this.options.plugins);
-    const capabilities = hello.capabilities.filter(name => implementedActions.includes(name as ActionName) || ['nearby-blocks', 'nearby-resources', 'look-around', 'companion-pickup', 'companion-mining', 'survival-state', 'assess-tool', 'navigation-3d', 'machine-status', 'guard-duty-fenced', 'guard-duty-tasks', 'server-posture', 'gift-receipts', 'entity-equipment', 'assess-armour', 'task-interrupts', 'travel-meet'].includes(name));
+    const capabilities = hello.capabilities.filter(name => implementedActions.includes(name as ActionName) || ['nearby-blocks', 'nearby-resources', 'look-around', 'companion-pickup', 'companion-mining', 'survival-state', 'assess-tool', 'navigation-3d', 'machine-status', 'guard-duty-fenced', 'guard-duty-tasks', 'server-posture', 'gift-receipts', 'entity-equipment', 'assess-armour', 'task-interrupts', 'travel-meet', 'far-players'].includes(name));
     // Interaction actions are only usable together with the IDs the server actually registered.
     const interactions = [...new Set(hello.interactions ?? [])];
     this.hello = { ...hello, interactions, capabilities: interactions.length ? capabilities : capabilities.filter(name => name !== 'use-item-on-block' && name !== 'use-item') };

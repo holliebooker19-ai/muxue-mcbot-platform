@@ -81,6 +81,8 @@ export interface Observation {
   guard?: GuardDutyState;
   /** ServerBody (server-posture): the standing companion posture, present while there is one; see PostureState. */
   posture?: PostureState;
+  /** ServerBody (far-players): other players past the observed range (position only in the same dimension). Never shown to the model as coordinates. */
+  farPlayers?: Array<{ name: string; dimension: string; position?: Position }>;
 }
 /** The server's own state words for the companion posture (docs/server_body_protocol.md, "陪伴姿态"). */
 export type PostureStateName = 'following' | 'waiting' | 'seated' | 'guarding' | 'suspended' | 'away' | 'blocked';

@@ -6,6 +6,7 @@ import { EventJournal } from './events.js';
 import type { CompanionMode } from './companion-mode.js';
 import type { SurvivalReflexes } from './survival-reflexes.js';
 import type { MachineWatch } from './machines.js';
+import type { MeetWatch } from './meet-watch.js';
 
 export function pidAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -50,7 +51,7 @@ export class RuntimeMonitor {
   private senseTimer?: ReturnType<typeof setTimeout>;
   private closed = false;
   constructor(private readonly body: Body, private readonly events: EventJournal, private readonly options: {
-    intervalMs?: number; heartbeatFile?: string; heartbeatFresh?: () => boolean; companion?: CompanionMode; reflexes?: SurvivalReflexes; machines?: MachineWatch; onFatal: (error: Error) => void;
+    intervalMs?: number; heartbeatFile?: string; heartbeatFresh?: () => boolean; companion?: CompanionMode; reflexes?: SurvivalReflexes; machines?: MachineWatch; meetWatch?: MeetWatch; onFatal: (error: Error) => void;
   }) {}
   start(): void { this.schedule(); this.scheduleSense(); }
   private scheduleSense(): void {
@@ -98,6 +99,8 @@ export class RuntimeMonitor {
         const operation = await this.body.operation(pending.operationId);
         if (operation.status !== 'running') this.events.notifyOperation(operation, this.body.hello.backend === 'server');
       }
+      // A meet walk hears where the player is after the finished operations are reported (its own end among them).
+      this.options.meetWatch?.update(observation, this.body.pendingOperations());
     } catch (error) {
       await this.fail(error as Error);
     } finally { this.schedule(); }
