@@ -113,6 +113,21 @@ test('stop-action ends the follow for good (posture and protection): nothing pic
   assert.equal(f.mode.snapshot().state, 'stopped'); assert.equal(f.postures().length, 1);
 });
 
+test('stop-action keepCompanion:true drops only the running task: the follow and protection stay', async t => {
+  const f = await fixture(t); await f.follow();
+  await f.call('move-to-position', moveTo);
+  assert.deepEqual(await f.call('stop-action', { keepCompanion: true }), { isError: undefined, stopped: true });
+  assert.equal(f.stops().at(-1).clearPosture, undefined); assert.equal(f.stops().at(-1).clearGuard, undefined);
+  assert.equal(f.server.current.action, 'follow', 'the server keeps the posture');
+  const snapshot = f.mode.snapshot();
+  assert.deepEqual([snapshot.intent, snapshot.guardEnabled], ['follow', true]);
+  // The same through the reflexes (a body with survival): a plain stop, and they stay armed.
+  const stops = [];
+  const reflexes = new SurvivalReflexes(f.body, new SurvivalTasks(f.body), f.events, { stopCurrent: async options => { stops.push(options); return { stopped: true }; }, ordinaryBusy: () => false });
+  await reflexes.stop({ keepCompanion: true }); await reflexes.stop();
+  assert.deepEqual(stops, [{}, { clearGuard: true, clearPosture: true }]); assert.equal(reflexes.read().armed, true);
+});
+
 test('a manual pause is the posture off until resume, also across other tools and when made while it gives way', async t => {
   const f = await fixture(t); await f.follow();
   await f.mode.request({ action: 'pause' });
@@ -187,7 +202,7 @@ test('after the task the posture waits for a player who is out of sight (away), 
   f.finishMove(); f.server.set({ state: 'away', reason: 'PLAYER_AWAY' }); await f.ticks(4);
   const snapshot = f.mode.snapshot();
   assert.equal(snapshot.away, true); assert.match(snapshot.reason, /不在附近/);
-  assert.equal(f.events.since(0, ['companion']).length, 1, 'said once, not every tick');
+  assert.equal(f.events.since(0, ['companion_note']).length, 1, 'noted once, not every tick'); assert.equal(f.events.since(0, ['companion']).length, 0);
   assert.equal(f.postures().length, 1);
   f.server.resume(); await f.ticks();
   assert.equal(f.mode.snapshot().state, 'following'); assert.equal(f.mode.snapshot().away, undefined); assert.equal(f.postures().length, 1);

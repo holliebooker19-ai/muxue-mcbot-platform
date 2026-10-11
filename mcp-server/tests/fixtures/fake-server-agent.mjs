@@ -6,7 +6,7 @@ const kind = process.env.FAKE_SERVER_AGENT;
 const record = (value) => fs.appendFileSync(process.env.FAKE_AGENT_LOG, JSON.stringify({ pid: process.pid, ...value })+'\n');
 const emit = (value) => process.stdout.write(JSON.stringify(value)+'\n');
 const arg = (args, key) => args[args.indexOf(key)+1];
-let owner, connection, controlFile, lockFile, lockContent, heartbeat, threadId, turnId, turn = 0, promptId, sessionId;
+let owner, connection, controlFile, lockFile, lockContent, heartbeat, threadId, turnId, turn = 0, promptId, sessionId, compacted = false;
 const rpc = async (method, params) => {
   const response = await fetch(connection.endpoint, {method:'POST',headers:{authorization:`Bearer ${connection.token}`,'content-type':'application/json'},body:JSON.stringify({method,params})});
   const value = await response.json();
@@ -48,7 +48,15 @@ function finish(text) {
     return;
   }
   if(kind==='claude') {
-    emit({type:'assistant',message:{usage:{input_tokens:10},content:[{type:'text',text:'收到'}]}});
+    // FAKE_AGENT_TOKENS: context size of every reply until a /compact goes through (FAKE_AGENT_COMPACT=fail: not available).
+    if(text.startsWith('/compact ')) {
+      if(process.env.FAKE_AGENT_COMPACT==='fail') {emit({type:'assistant',message:{content:[{type:'text',text:"/compact isn't available in this environment."}]}});emit({type:'result',is_error:false});return;}
+      compacted=true;
+      emit({type:'system',subtype:'compact_boundary',compact_metadata:{trigger:'manual',pre_tokens:Number(process.env.FAKE_AGENT_TOKENS)||10,post_tokens:900}});
+      emit({type:'result',is_error:false,result:''});
+      return;
+    }
+    emit({type:'assistant',message:{usage:{input_tokens:compacted?10:Number(process.env.FAKE_AGENT_TOKENS)||10},content:[{type:'text',text:'收到'}]}});
     emit({type:'result',is_error:false});
   } else if(kind==='dsh') {
     emit({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'收到'}}}});

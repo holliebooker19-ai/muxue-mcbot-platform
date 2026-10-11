@@ -391,6 +391,50 @@ test('真实分类器接入watch：旧watch的叫停不能撤销新租约', asyn
   } finally { control.close(); await f.close(); }
 });
 
+for (const compact of ['ok', 'fail']) test(`宿主压缩/${compact}：上下文超过上限，${compact === 'ok' ? '同一个进程里压缩，身体控制不撤，之后照常回应' : '压缩不可用就换新会话'}`, async () => {
+  const f = await fixture();
+  const runtime = path.join(f.dir, 'runtime'); fs.mkdirSync(runtime);
+  const config = path.join(f.dir, 'mcp.json');
+  fs.writeFileSync(config, JSON.stringify({ mcpServers: { minecraft: { command: process.execPath,
+    args: ['not-executed.mjs', '--body', 'server', '--connection-file', f.scope.connectionFile, '--world-id', f.scope.worldId] } } }));
+  const F = runtimeFiles(runtime, f.scope.username), agentLog = path.join(f.dir, 'agent.jsonl');
+  const records = () => { try { return fs.readFileSync(agentLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse); } catch { return []; } };
+  const turns = () => records().filter(r => r.kind === 'turn'), compactions = () => turns().filter(r => r.text.startsWith('/compact '));
+  let output = '';
+  const driver = spawn(process.execPath, [path.join(ROOT, 'scripts/companion.mjs'), '--agent', 'claude',
+    '--body', 'server', '--name', f.scope.username, '--nickname', '小克', '--mcp-config', config, '--headless', '--rotate-tokens', '1000'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env,
+      COMPANION_RUNTIME_DIR: runtime, COMPANION_MEMORY_DIR: path.join(f.dir, 'memory'),
+      COMPANION_AGENT_CMD: JSON.stringify([process.execPath, path.join(ROOT, 'mcp-server/tests/fixtures/fake-server-agent.mjs')]),
+      FAKE_SERVER_AGENT: 'claude', FAKE_AGENT_LOG: agentLog, FAKE_AGENT_TOKENS: '5000', ...(compact === 'fail' ? { FAKE_AGENT_COMPACT: 'fail' } : {}),
+    },
+  });
+  driver.stdout.on('data', data => { output += data; }); driver.stderr.on('data', data => { output += data; });
+  const exited = new Promise((resolve, reject) => { driver.once('exit', resolve); driver.once('error', reject); });
+  try {
+    await waitFor(() => compactions().length === 1, '启动轮超过上限后的压缩轮');
+    const [compaction] = compactions();
+    assert.match(compaction.text, /没做完的任务/, '告诉 Agent 摘要里留什么');
+    if (compact === 'ok') {
+      await waitFor(() => output.includes('压缩完成'), '压缩完成');
+      assert.equal(f.state.revokes, 0, output); assert.equal(f.state.claims, 1);
+      fs.appendFileSync(F.events, JSON.stringify({ session: 'regression-journal', seq: 1, timestamp: Date.now(), type: 'chat', text: 'tester: 小克，还记得吗' }) + '\n');
+      await waitFor(() => turns().some(r => r.text.includes('还记得吗')), '压缩后的聊天轮');
+      assert.equal(turns().find(r => r.text.includes('还记得吗')).pid, compaction.pid, '同一个 Agent 进程');
+      assert.equal(records().filter(r => r.kind === 'start').length, 1);
+      assert.equal(compactions().length, 1, '压缩后上下文降下来了，不再压缩');
+    } else {
+      await waitFor(() => records().filter(r => r.kind === 'start').length === 2, '换新会话');
+      assert.match(output, /压缩没成功/);
+    }
+  } finally {
+    fs.writeFileSync(F.stop, '');
+    try { await waitFor(() => driver.exitCode !== null || driver.signalCode !== null, '宿主退出', 10000); }
+    catch { driver.kill('SIGKILL'); }
+    await exited; await f.close();
+  }
+});
+
 test('宿主 --reconnect：身体断开（游戏关了或角色死了）就以 75 退出，撤销时不让角色下线，交给外层重连', async () => {
   const f = await fixture();
   const runtime = path.join(f.dir, 'runtime'); fs.mkdirSync(runtime);

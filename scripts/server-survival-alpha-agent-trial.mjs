@@ -162,7 +162,7 @@ try {
   writeHeartbeat(path.join(runtime, 'companion-Claude.json'), 'claude'); heartbeat = setInterval(() => writeHeartbeat(path.join(runtime, 'companion-Claude.json'), 'claude'), 10000);
   const instructions = serverClaudeInstructions(root, path.join(root, 'memory/xiaoke'));
   const commandLine = protocol.command({ body: 'server', hostedConfigFile: mcpConfig, model, effort: 'low', gameInstructions: instructions });
-  assert.equal(commandLine.a[commandLine.a.indexOf('--tools') + 1], ''); assert(commandLine.a.includes('--restricted') && commandLine.a.includes('--strict-mcp-config') && commandLine.a.includes('--disable-slash-commands'));
+  assert.equal(commandLine.a[commandLine.a.indexOf('--tools') + 1], ''); assert(commandLine.a.includes('--restricted') && commandLine.a.includes('--strict-mcp-config'));
   report.commandPolicy = { productionBuilder: true, restricted: true, builtInToolsRemoved: true, strictMcp: true, fixedPersonaHostRead: true, personaAvailable: !!instructions };
   const inherited = { ...process.env }; for (const key of Object.keys(inherited)) if (/^ANTHROPIC_|^CLAUDE_CONFIG_DIR$|^CLAUDE_CODE_(?:OAUTH|USE_)|^COMPANION_AGENT_CMD$|^ENABLE_TOOL_SEARCH$/i.test(key)) delete inherited[key];
   agent = launch('actual-claude', commandLine.cmd, commandLine.a, { env: claudeGameEnvironment({ ...inherited, CLAUDE_CONFIG_DIR: configDir }) });

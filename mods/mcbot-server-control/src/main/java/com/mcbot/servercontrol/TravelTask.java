@@ -3,6 +3,7 @@ package com.mcbot.servercontrol;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -24,6 +25,8 @@ import static com.mcbot.servercontrol.Protocol.*;
  * A leg that fails is avoided by the next plan; when the plan has nothing (the body in a cave, under an overhang)
  * a leg is tried straight toward the destination, turned left and right, then shorter. MAX_FAILURES legs in a row
  * without getting closer than ever before fail the walk. Damage stops it, as any walk.
+ * With meet (going to find a player) the walk ends as soon as that player is in sight within GuardDuty.ENGAGE_RANGE,
+ * the range at which the guard covers them: they were met on the way, there is no need to reach the spot first.
  */
 final class TravelTask implements BodyTask {
     /** A refusal or fault in tick ends the operation like this (BodyTask, docs/companion_state_design.md 8.3). */
@@ -36,6 +39,8 @@ final class TravelTask implements BodyTask {
     private final ControlSession session;
     private final double x,z,tolerance;
     private final Double y;
+    /** The player this walk goes to find, or null. */
+    private final String meet;
     private long deadline;
     private final GuardDuty.Grace grace;
     private final Vec3 start;
@@ -66,11 +71,19 @@ final class TravelTask implements BodyTask {
         x=bounded(args,"x",0,-29_999_000,29_999_000);z=bounded(args,"z",0,-29_999_000,29_999_000);
         y=args.has("y")?bounded(args,"y",0,-2048,2048):null;
         tolerance=bounded(args,"tolerance",2,1,8);
+        meet=args.has("meet")?string(args,"meet"):null;
+        if(meet!=null&&(!meet.matches("[A-Za-z0-9_]{1,16}")||meet.equals(player.getGameProfile().getName())))throw error("INVALID_ARGUMENT","meet must name another player");
         if(horizontal(player.position())>2000)throw error("OUT_OF_REACH","travel-to is limited to 2000 blocks");
         long timeout=(long)bounded(args,"timeoutMs",300_000,5_000,900_000);
         deadline=now()+timeout;grace=new GuardDuty.Grace(timeout);start=player.position();closest=horizontal(start);
     }
     private static long now(){return System.nanoTime()/1_000_000;}
+    /** The player to meet, when in this level, alive, within GuardDuty.ENGAGE_RANGE and in sight (eye to eye, as a mob sees); else null. */
+    private ServerPlayer met() {
+        ServerPlayer target=player.getServer().getPlayerList().getPlayerByName(meet);
+        if(target==null||target==player||!target.isAlive()||target.isSpectator()||target.serverLevel()!=player.serverLevel())return null;
+        return target.distanceTo(player)<=GuardDuty.ENGAGE_RANGE&&player.hasLineOfSight(target)?target:null;
+    }
     private double horizontal(Vec3 feet){return Math.hypot(x-feet.x,z-feet.z);}
     /** Close enough, and nothing solid between the body and the spot (a wall would mean the wrong side of it). */
     private boolean arrived(Vec3 feet) {
@@ -175,6 +188,14 @@ final class TravelTask implements BodyTask {
         if(now()>=deadline)throw error("TIMEOUT","Travel time limit reached before the destination");
         Vec3 feet=player.position();
         if(player.onGround()&&arrived(feet)){player.stopInput();if(navigation!=null)navigation.closeDoorsBehind();operation.finish("succeeded","Arrived",progress());return;}
+        // Not mid-swim: a swim leg is short (MAX_SWIM_LEG) and ends on a bank or further along, where the check comes next.
+        ServerPlayer met=meet!=null&&swim==null?met():null;
+        if(met!=null) {
+            player.stopInput();if(navigation!=null)navigation.closeDoorsBehind();
+            JsonObject result=progress();
+            result.add("met",obj("player",meet,"entityId",met.getUUID().toString(),"distance",met.distanceTo(player)));
+            operation.finish("succeeded","Met "+meet+" on the way",result);return;
+        }
         if(swim!=null){swimTick(feet);return;}
         if(navigation==null) {
             if(!player.onGround()&&!player.isInWater())return;

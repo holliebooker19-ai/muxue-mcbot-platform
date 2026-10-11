@@ -59,7 +59,7 @@ export function summarizeOperation(operation: Operation) {
     if (result.summary && typeof result.summary === 'object' && !Array.isArray(result.summary) && JSON.stringify(result.summary).length <= 2000) compact.summary = result.summary;
     if (Array.isArray(result.gained)) compact.gained = result.gained.slice(0, 16);
     // Workstation, travel and build receipts: what is missing, what changed, where the table/furnace is, where the body got to.
-    for (const key of ['missing', 'materials', 'wrongState', 'scaffoldLeft', 'inventoryChange', 'table', 'placedTable', 'furnace', 'skipped', 'position', 'station', 'subject', 'result', 'options', 'stages', 'levels', 'harvested', 'notPlanted', 'skippedWhy', 'crops', 'center', 'foodHeld', 'buckets'])
+    for (const key of ['missing', 'materials', 'wrongState', 'scaffoldLeft', 'inventoryChange', 'table', 'placedTable', 'furnace', 'skipped', 'position', 'station', 'subject', 'result', 'options', 'stages', 'levels', 'harvested', 'notPlanted', 'skippedWhy', 'crops', 'center', 'foodHeld', 'buckets', 'met'])
       if (result[key] && typeof result[key] === 'object' && JSON.stringify(result[key]).length <= 2000) compact[key] = result[key];
     // workstation-options answers: stations nearby, ways to make an item, item refs for modify-item;
     // machine-items: the handler's slots and sides, and the slots after a move.

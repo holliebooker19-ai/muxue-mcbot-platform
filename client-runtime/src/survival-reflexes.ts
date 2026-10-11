@@ -94,11 +94,12 @@ export class SurvivalReflexes {
   }
   authorizeAction(): void { this.assertWritable(); this.handledResult = this.tasks.read().lastResult?.operationId; if (!this.armed) { this.armed = true; this.revision++; } }
   disarm(reason: string): void { ++this.epoch; this.armed = false; this.defenseTarget = undefined; this.revision++; this.lastReason = reason; }
-  async stop(): Promise<{ stopped: true }> {
+  /** keepCompanion: only the running task stops (the model changed its mind); following or waiting and protection stay. */
+  async stop({ keepCompanion = false } = {}): Promise<{ stopped: true }> {
     const fighting = this.defenseTarget;
     this.disarm('explicit-stop'); const epoch = this.epoch; this.phase = 'stopping';
     try {
-      const result = await this.options.stopCurrent({ clearGuard: true, clearPosture: true });
+      const result = await this.options.stopCurrent(keepCompanion ? {} : { clearGuard: true, clearPosture: true });
       // Stop ends what is running, not the reflexes: a body that was told to stop walking still hits back when attacked.
       // Only the fight it was stopped in pauses for a moment; if that mob keeps at it, defense picks it up again.
       if (epoch === this.epoch) {

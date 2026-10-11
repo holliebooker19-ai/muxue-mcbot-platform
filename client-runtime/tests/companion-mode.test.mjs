@@ -125,12 +125,13 @@ test('the player walking away or the path failing are the server\'s states: one 
   assert.equal(f.events.since(0, ['companion']).length, 0);
   f.server.set({ state: 'away', reason: 'PLAYER_AWAY' }); await f.monitor.tick(); await f.monitor.tick(); await f.monitor.tick();
   assert.equal(f.mode.snapshot().away, true);
-  const away = f.events.since(0, ['companion']);
+  assert.equal(f.events.since(0, ['companion']).length, 0, 'nothing to decide: no waking event');
+  const away = f.events.since(0, ['companion_note']);
   assert.equal(away.length, 1); assert.match(away[0].text, /不在附近.*自动接上/);
   f.server.resume(); await f.monitor.tick();
   assert.equal(f.mode.snapshot().away, undefined);
   f.server.set({ state: 'away', reason: 'PLAYER_AWAY' }); await f.monitor.tick();
-  assert.equal(f.events.since(0, ['companion']).length, 2, 'a second absence is told again once');
+  assert.equal(f.events.since(0, ['companion_note']).length, 2, 'a second absence is noted again once');
   assert.equal(f.calls('stop').length, 0);
 });
 test('a posture the server ended (the followed name is someone else now) is told once and nothing is set again', async t => {
@@ -390,4 +391,24 @@ test('MCP: the two companion tools, read-only queries, tools running beside the 
   await legacy.connect(legacyLeft); await legacyClient.connect(legacyRight);
   t.after(async () => { await legacyClient.close(); await legacy.close(); });
   assert.ok(!(await legacyClient.listTools()).tools.some(tool => ['companion-mode', 'get-companion-mode'].includes(tool.name)));
+});
+test('travel-to with meet that met the player on the way turns into a follow of them; a follow of them already held is left to take over by itself', async t => {
+  const f = await fixture(t);
+  const travelled = (result, status = 'succeeded') => f.events.recordOperation({ operationId: randomUUID(), sessionId: 's', name: 'travel-to', status, summary: 'x', result });
+  const settle = async () => { for (let i = 0; i < 50 && f.mode.observationEpoch() === null; i++) await delay(5); await delay(20); };
+  travelled({ position: { x: 0, y: 64, z: 0 } }); await settle();
+  assert.equal(f.postures().length, 0, 'arrived without meeting: nothing');
+  travelled({ met: { player: 'Alex', distance: 9 } }, 'failed'); await settle();
+  assert.equal(f.postures().length, 0, 'only a walk that ended by meeting');
+  travelled({ met: { player: 'Alex', distance: 9 } }); await settle();
+  assert.deepEqual(f.postures().map(request => [request.action, request.player]), [['follow', 'Alex']], 'no posture before: follow the player met');
+  assert.equal(f.mode.snapshot().state, 'following');
+  travelled({ met: { player: 'Alex', distance: 12 } }); await settle();
+  assert.equal(f.postures().length, 1, 'already following them: the server takes over after the walk, no second request');
+  await f.mode.request({ action: 'wait' });
+  travelled({ met: { player: 'Alex', distance: 5 } }); await settle();
+  assert.deepEqual(f.postures().map(request => request.action), ['follow', 'wait', 'follow'], 'a wait becomes a follow of the player met');
+  travelled({ met: { player: 'Steve', distance: 5 } }); await settle();
+  assert.match(f.events.since(0, ['companion_note']).at(-1).text, /路上遇到了 Steve，但没能转成跟随（PLAYER_NOT_VISIBLE/);
+  assert.equal(f.mode.snapshot().player, 'Alex', 'a failed switch leaves the follow as it was');
 });

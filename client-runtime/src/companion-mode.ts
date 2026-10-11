@@ -101,6 +101,26 @@ export class CompanionMode {
       show: (state, activity) => this.publish({ ...this.base(state, 'active'), activity }, false),
       describe: () => this.base(this.value.state), block: (error, epoch, operation) => this.block(error, epoch, operation),
     }, now);
+    events.onOperation(operation => this.metOnTheWay(operation));
+  }
+  /**
+   * A travel-to with meet ended because that player came into sight (result.met): be with them now instead of walking on.
+   * A follow of that player still held takes over by itself after the walk; anything else (no posture, a wait, a pause,
+   * someone else) becomes a follow of them. A failure is only noted: the model can still ask for the follow itself.
+   */
+  private metOnTheWay(operation: Operation): void {
+    const met = operation.name === 'travel-to' && operation.status === 'succeeded' ? (operation.result as { met?: { player?: unknown } } | undefined)?.met?.player : undefined;
+    if (typeof met !== 'string' || !this.postureMode()) return;
+    if (this.intent?.action === 'follow' && this.intent.player === met && ['following', 'waiting'].includes(this.value.state)) return;
+    void (async () => {
+      try {
+        // A follow refused after it started replaces nothing but drops what was held (request): ask only with the player in sight here too.
+        this.identity(await this.body.observe(), met);
+        await this.request({ action: 'follow', player: met });
+      } catch (error) {
+        this.events.add('companion_note', `路上遇到了 ${met}，但没能转成跟随（${error instanceof BodyError ? `${error.code}：` : ''}${(error as Error).message}）；要跟着就用 companion-mode follow`);
+      }
+    })();
   }
   snapshot(): CompanionState { return structuredClone({ ...this.value, ...(this.dutyMode() ? this.dutyView() : {}), ...this.errands.view() }); }
   /** The body keeps protection as its own standing duty (guard-duty-fenced). */
@@ -440,7 +460,8 @@ export class CompanionMode {
     }
     if (manual) return;
     if (posture.state === 'away' && this.intent.action === 'follow') {
-      if (!this.awayNoted) { this.awayNoted = true; this.events.add('companion', `${this.intent.player} 不在附近，没法跟着；他回到附近我会自动接上。想不跟了用 companion-mode stop，或重新 follow。`); }
+      // Nothing to decide (the follow picks up by itself): a note that rides along with the next waking event, never a turn of its own.
+      if (!this.awayNoted) { this.awayNoted = true; this.events.add('companion_note', `${this.intent.player} 不在附近，没法跟着；回到附近会自动接上。想不跟了用 companion-mode stop，或重新 follow。`); }
     } else this.awayNoted = false;
     const next = this.view(posture);
     // Same state, other words (a suspended posture's countdown is not carried): nothing to publish.

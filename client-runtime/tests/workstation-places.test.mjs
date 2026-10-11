@@ -150,3 +150,17 @@ test('bedtime wakes the model once a night when the body is near home', () => {
   assert.equal(events.since(0).filter(e => e.type === 'bedtime').length, 2, 'the next night near home again');
   home = undefined;
 });
+test('meet is offered with travel-meet only, reaches the server from travel-to and go-to-place, and must name a player', async t => {
+  const { body, acts } = await setup(t, [...extra, 'travel-meet']);
+  const c = await client(t, body, { places: new PlaceBook() });
+  const tools = (await c.listTools()).tools;
+  for (const name of ['travel-to', 'go-to-place']) assert.ok(tools.find(tool => tool.name === name).inputSchema.properties.meet, name);
+  await call(c, 'travel-to', { x: 100, z: -40, meet: 'muxue' });
+  await call(c, 'remember-place', { name: '家', x: 10, y: 64, z: -5 });
+  await call(c, 'go-to-place', { name: '家', meet: 'muxue' });
+  assert.deepEqual(acts().map(act => [act.name, act.args]), [['travel-to', { x: 100, z: -40, meet: 'muxue' }], ['travel-to', { x: 10, y: 64, z: -5, tolerance: 1.5, meet: 'muxue' }]]);
+  await assert.rejects(body.act('travel-to', { x: 1, z: 2, meet: 'no one' }), { code: 'INVALID_ARGUMENT' });
+  const { body: old } = await setup(t);
+  const oldTools = (await (await client(t, old)).listTools()).tools;
+  for (const name of ['travel-to', 'go-to-place']) assert.equal(oldTools.find(tool => tool.name === name).inputSchema.properties.meet, undefined, `${name} on an older core`);
+});

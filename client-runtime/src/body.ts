@@ -172,7 +172,7 @@ export interface ActionArguments {
   'stand-up': Record<string, never>;
   'craft-item': { item: string; count?: number; timeoutMs?: number };
   'smelt-item': { input?: string; count?: number; fuel?: string; wait?: boolean; furnace?: Position; timeoutMs?: number };
-  'travel-to': { x: number; y?: number; z: number; tolerance?: number; timeoutMs?: number };
+  'travel-to': { x: number; y?: number; z: number; tolerance?: number; timeoutMs?: number; meet?: string };
   'workstation-options': { item?: string; potion?: string; count?: number; subjects?: string };
   'produce-item': { item: string; count?: number; potion?: string; wait?: boolean; station?: Position; timeoutMs?: number };
   'modify-item': { subject: string; action: ModifyAction; preview?: boolean; maxLevels?: number; expect?: string; station?: Position; timeoutMs?: number };

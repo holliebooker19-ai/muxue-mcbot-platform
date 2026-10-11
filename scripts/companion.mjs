@@ -23,7 +23,8 @@
 //       --memory-dir <目录> / --memory-agent <子目录>（优先级：这里（或环境变量 COMPANION_MEMORY_DIR）> MCP 配置里的同名参数
 //         > 默认 memory/ 和 xiaoke；最后写进托管 MCP 配置，驱动器和 MCP 服务端用同一个位置）
 //       --resume-window-min <N>（离上次请求不到 N 分钟就接着旧会话，默认 50，对应 1 小时的提示缓存；0 表示总是接着）
-//       --rotate-tokens <N>（会话上下文超过 N tokens 就整理记忆后换新会话，默认 200000；0 表示不换）
+//       --rotate-tokens <N>（会话上下文超过 N tokens 就整理记忆后换新会话，默认 200000；0 表示不换。
+//         服务端身体的 Claude 改成原地压缩（/compact，进程、工具服务和身体控制都不断），压缩失败才换会话）
 //       --consolidate-floor-min <N>（躺床触发的整理两次至少隔 N 分钟，默认 30）
 //
 // 运行时文件（runtime/，可用环境变量 COMPANION_RUNTIME_DIR 改）：
@@ -68,8 +69,10 @@ const BOT_LOCK_WAIT_MS = 20000;
 // --reconnect 时身体断开的退出码：外层 start-server-play.mjs --wait 看到它就回去等世界、复活后重新接管
 export const RECONNECT_EXIT = 75;
 const MAX_CONSOLIDATE_ATTEMPTS = 2;
-// 整理排队时，普通事件最多让它等这么久，之后先整理
+// 整理排队时，普通事件最多让它等这么久，之后先整理（压缩排队也一样）
 const CONSOLIDATE_MAX_DEFER_MS = 5 * 60 * 1000;
+// 压缩对话时告诉 Agent 摘要里留什么（2026-10-11 试玩：换会话后不知道“砍到 64 段”、家在哪、刚聊过什么）
+export const COMPACT_KEEP = '摘要里保留：玩家的要求和你答应的事（数量、地点、时间）、没做完的任务和进度、记住的地点、跟随和保护的状态、玩家的称呼和偏好、最近聊到的事；工具返回的原始数据和已经做完的步骤细节不用留。';
 
 // ---------------- 可单独测试的小函数 ----------------
 
@@ -785,6 +788,10 @@ function main() {
   let pendingConsolidation = null;
   let runningConsolidation = null;
   let rotateDue = false;
+  // 上下文超了，服务端身体又支持压缩：排队压缩（{ since }），压缩轮里收到的边界（{ preTokens, postTokens }），这个会话压缩失败过就改回换会话
+  let pendingCompact = null;
+  let compactSeen = null;
+  let compactFailed = false;
   let newSessionNote = '';
   // 接着旧会话重启了 agent：下一轮开头附一句说明（本身不触发一轮）
   let resumeNote = '';
@@ -958,8 +965,9 @@ function main() {
     lastInputAt = turnStartedAt;
     lastActivity = Date.now();
     idleNudged = false;
+    if (kind === 'compact') { currentTool = '整理对话'; compactSeen = null; }
     if (child.connection) child.connection.sendTurn(text);
-    else child.stdin.write(JSON.stringify(agentProtocol.encodeTurn(text)) + '\n');
+    else child.stdin.write(JSON.stringify(kind === 'compact' ? agentProtocol.compactTurn(text) : agentProtocol.encodeTurn(text)) + '\n');
   }
 
   function turnFinished(summary, error) {
@@ -1005,10 +1013,30 @@ function main() {
         if (rotateDue) consolidated = true;
       }
     }
+    if (kind === 'compact') {
+      const seen = compactSeen;
+      compactSeen = null;
+      if (seen && !error) {
+        contextTokens = Number(seen.postTokens) || 0;
+        info(`压缩完成：上下文 ${Math.round((Number(seen.preTokens) || 0) / 1000)}k → ${Math.round(contextTokens / 1000)}k，进程和身体控制都没断`);
+        saveSession();
+      } else if (errorKind === 'quota' || errorKind === 'auth') {
+        // 额度、登录问题：暂停结束后再压缩
+        pendingCompact = { since: Date.now() };
+      } else {
+        compactFailed = true;
+        info(`压缩没成功（${error || '没有收到压缩完成'}），这个会话改为换新会话`);
+      }
+    }
     // 每一轮成功结束后都看上下文有没有超过上限（整理轮自己跨过上限也算）
-    if (!error && agentProtocol.tracksContextTokens && args.rotateTokens > 0 && contextTokens > args.rotateTokens && !rotateDue) {
-      info(`会话上下文 ${contextTokens} tokens，超过 ${args.rotateTokens}：整理记忆后换新会话`);
-      rotateDue = true;
+    if (!error && agentProtocol.tracksContextTokens && args.rotateTokens > 0 && contextTokens > args.rotateTokens && !rotateDue && !pendingCompact) {
+      if (canCompact()) {
+        info(`会话上下文 ${contextTokens} tokens，超过 ${args.rotateTokens}：压缩对话（进程和身体控制不断，正在做的事接着做）`);
+        pendingCompact = { since: Date.now() };
+      } else {
+        info(`会话上下文 ${contextTokens} tokens，超过 ${args.rotateTokens}：整理记忆后换新会话`);
+        rotateDue = true;
+      }
     }
     if (rotateDue && !pendingConsolidation && !runningConsolidation) {
       if (kind === 'consolidate' && consolidated) {
@@ -1019,6 +1047,11 @@ function main() {
       if (!error) requestConsolidation('rotate');
     }
     flush();
+  }
+
+  // 压缩只用在服务端身体（还没接长期记忆，换会话会丢掉一切、还要撤控制）；旧身体照旧整理记忆后换会话
+  function canCompact() {
+    return args.body === 'server' && typeof agentProtocol.compactTurn === 'function' && !agentProtocol.createConnection && !compactFailed;
   }
 
   function saveSession() {
@@ -1117,6 +1150,8 @@ function main() {
     conversationId = '';
     contextTokens = 0;
     lastRequestAt = 0;
+    pendingCompact = null;
+    compactFailed = false;
     saveSession();
     newSessionNote = reason;
     restarting = true;
@@ -1243,6 +1278,7 @@ function main() {
         case 'request_started': lastInputAt = Date.now(); break;
         case 'request_completed': lastRequestAt = lastInputAt || Date.now(); break;
         case 'usage': contextTokens = event.contextTokens; break;
+        case 'compacted': compactSeen = event; break;
         case 'text': printText(event.text, event.done); break;
         case 'tool': currentTool = event.name || ''; info(`· ${event.name} ${JSON.stringify(event.input).slice(0, 120)}`, 'tool', { name: event.name, input: JSON.stringify(event.input ?? null).slice(0, 400) }); break;
         case 'completed': {
@@ -1440,13 +1476,19 @@ function main() {
     pendingEvents = pendingEvents.filter((e) => (e.session !== session || e.seq > consumed) && !taskAlreadyDelivered(e, taskReceipt));
     const hasWake = pendingEvents.some(wakesAgent);
     const hasWork = hasWake || pendingUserLines.length > 0 || pendingNotes.length > 0;
-    if (!hasWork && !pendingConsolidation) return;
+    if (!hasWork && !pendingConsolidation && !pendingCompact) return;
     // 缓存已经过期：接着旧会话要把整段历史重写一遍，不如换新会话
     if (child && coldNow()) {
       renewSession(`离上次请求超过 ${args.resumeWindowMinutes} 分钟，提示缓存已经过期`);
       return;
     }
     if (!child) return;
+    // 压缩一般等没有要回应的事再做；一直有人说话就最多等 CONSOLIDATE_MAX_DEFER_MS，事件留到下一轮
+    if (pendingCompact && (!hasWork || Date.now() - pendingCompact.since > CONSOLIDATE_MAX_DEFER_MS)) {
+      pendingCompact = null;
+      sendTurn(COMPACT_KEEP, 'compact');
+      return;
+    }
     const header = agentProtocol.identity === 'independent' || args.body === 'server'
       ? (newSessionNote ? `【新会话】${newSessionNote}。重新查询当前游戏状态；不要重放之前的动作。` : resumeNote ? '【驱动器提示】进程已重启，先确认当前状态和任务；不要重放之前的动作。' : '')
       : newSessionNote ? newSessionHeader(newSessionNote) : resumeNote ? resumeHeader(resumeNote) : '';

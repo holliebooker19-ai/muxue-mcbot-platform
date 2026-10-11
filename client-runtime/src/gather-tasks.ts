@@ -18,8 +18,8 @@ type Borrowed = BorrowedPickup | BorrowedMining;
 const miningOwner = (owner?: Borrowed): owner is BorrowedMining => !!owner && 'kind' in owner && owner.kind === 'mining';
 const MINING_DROP_MARGIN = 1.5;
 type Reference = { context: Context; expires: number; scan: NearbyResources; radius: number; wholeTree: boolean };
-type Progress = { stage: string; item: string; requestedCount?: number; requestedStacks?: number; targetCount?: number; maxStackSize?: number; pickedUpCount?: number; lastConfirmedPickedUpCount?: number; overage: number; minedBlocks: number; steps: number; maxSteps: number; pickup: 'native-confirmed' | 'partial-or-unknown'; quantity: 'newly-picked'; totalNativePickedUpCount: number; unexpectedPickedUpCount: number; items: Array<{ item: string; count: number; maxStackSize?: number }>; code?: string; variantComponents?: ItemValue['components']; limitation?: string; pickupMovementRaces?: number; lastPickupMovementCode?: string; lastPickupMovementSummary?: string; storedIn?: Record<string, number>; pillarPlaced?: number; pillarRecovered?: number; unreachable?: number; leavesShaken?: number; leavesDecayed?: number; stuckHigh?: number; stuckInLeaves?: number; trees?: number; wholeTree?: boolean; leavesCleared?: number; climb?: 'step' | 'corner' | 'spiral'; spiralSteps?: number; spiralStop?: string };
-type Active = { grace?: FightGrace; least?: number; id: string; taskToken: string; lease: Lease; borrowed?: Borrowed; oldGround?: Set<string>; name: Name; context: Context; center: Position; radius: number; deadline: number; cursor: number; allowed: Set<string>; collectedEntities: Map<string, number>; variant?: ItemValue; request: Request; progress: Progress; halting?: boolean; top?: number; trees?: Map<string, number>; focusTree?: number; pillarDebt?: number; footing?: Set<string>; pickedMark?: number };
+type Progress = { stage: string; item: string; requestedCount?: number; requestedStacks?: number; targetCount?: number; maxStackSize?: number; pickedUpCount?: number; lastConfirmedPickedUpCount?: number; overage: number; minedBlocks: number; steps: number; maxSteps: number; pickup: 'native-confirmed' | 'partial-or-unknown'; quantity: 'newly-picked'; totalNativePickedUpCount: number; unexpectedPickedUpCount: number; items: Array<{ item: string; count: number; maxStackSize?: number }>; code?: string; variantComponents?: ItemValue['components']; limitation?: string; pickupMovementRaces?: number; lastPickupMovementCode?: string; lastPickupMovementSummary?: string; storedIn?: Record<string, number>; pillarPlaced?: number; pillarRecovered?: number; unreachable?: number; unreachableDrops?: number; leavesShaken?: number; leavesDecayed?: number; stuckHigh?: number; stuckInLeaves?: number; trees?: number; wholeTree?: boolean; leavesCleared?: number; climb?: 'step' | 'corner' | 'spiral'; spiralSteps?: number; spiralStop?: string };
+type Active = { grace?: FightGrace; least?: number; id: string; taskToken: string; lease: Lease; borrowed?: Borrowed; oldGround?: Set<string>; name: Name; context: Context; center: Position; radius: number; deadline: number; cursor: number; allowed: Set<string>; collectedEntities: Map<string, number>; variant?: ItemValue; request: Request; progress: Progress; halting?: boolean; top?: number; trees?: Map<string, number>; focusTree?: number; pillarDebt?: number; footing?: Set<string>; pickedMark?: number; unreachableDrops?: Set<string> };
 const contextOf = (state: Context): Context => ({ instanceId: state.instanceId, sessionId: state.sessionId, worldId: state.worldId, dimension: state.dimension, controlGeneration: state.controlGeneration });
 const unknownCodes = new Set(['UNKNOWN', 'PICKUP_GAP', 'PICKUP_UNKNOWN', 'WORLD_CHANGED', 'LEASE_LOST', 'STALE_CONTROL', 'TRANSPORT_LOST', 'INVALID_RESPONSE', 'LEASE_EXPIRED', 'TASK_TIMEOUT', 'STOP_UNCONFIRMED']);
 type Candidate = NearbyResources['candidates'][number];
@@ -45,6 +45,20 @@ const isLeaves = (id: string | undefined) => !!id && /^[a-z0-9_.-]+:[a-z0-9_/]*l
 const feetLevel = (feet: Position) => Math.floor(feet.y + 0.01);
 /** Each block takes several native steps (tool, dig, leaves, stepping, pillar up and back down, pickup): about eight per item asked for, 64 to 256 (a whole tree up to 1024). */
 const stepBudget = (request: { count?: number; stacks?: number; wholeTree?: boolean }) => request.stacks !== undefined ? 256 : Math.min(request.wholeTree ? 1024 : 256, Math.max(64, (request.count ?? 0) * 8));
+/** The largest finite goal one task takes (count, or stacks resolved on the actual stack size). */
+const MAX_GOAL = 256;
+/**
+ * Time for a task the model gave none: gathering takes about four seconds per item asked for (walking, cutting,
+ * climbing, picking up), two to ten minutes, whole tree or not (stacks count as the largest goal); collect-items
+ * only picks up what lies around, a minute.
+ */
+const taskTime = (name: Name, request: Request) => name === 'collect-items' ? 60000 : Math.min(600000, Math.max(120000, (request.count ?? MAX_GOAL) * 4000));
+/** A walk the server found no way for: that one target is left, the task goes on with the others. */
+const noWay = new Set(['NO_PATH', 'PATH_BUDGET']);
+/** ServerController.requireWalkable: a walk asked while the body is still in the air (just arrived, stepping down). */
+const AIRBORNE = /Start navigation from supported ground/;
+/** What felled trees leave besides logs, picked up once the logs are in (modded saplings are named the same way). */
+const treeByproduct = (id: string) => id === 'minecraft:apple' || /^[a-z0-9_.-]+:[a-z0-9_/]*sapling$/.test(id);
 const samePosition = (a: Position, b: Position) => a.x === b.x && a.y === b.y && a.z === b.z;
 const nearest = (list: Candidate[], feet: Position) => [...list].sort((a, b) => eyeDistance(feet, a.position) - eyeDistance(feet, b.position))[0];
 /** Log candidates touching one another (also diagonally: branches, 2x2 trunks) are one tree. */
@@ -112,7 +126,7 @@ export class GatherTasks {
     if (this.now() >= task.deadline) throw new BodyError('TASK_TIMEOUT', '任务执行预算已到；未追加数量或候选');
   }
   private validate(request: Request, fractionalRadius = false): void {
-    if ((request.count === undefined) === (request.stacks === undefined) || !Number.isInteger(request.count ?? request.stacks) || (request.count ?? request.stacks)! < 1 || (request.count ?? request.stacks)! > 256) throw new BodyError('INVALID_ARGUMENT', '必须明确count或stacks二选一，1..256整数；省略数量由Agent先选定');
+    if ((request.count === undefined) === (request.stacks === undefined) || !Number.isInteger(request.count ?? request.stacks) || (request.count ?? request.stacks)! < 1 || (request.count ?? request.stacks)! > MAX_GOAL) throw new BodyError('INVALID_ARGUMENT', '必须明确count或stacks二选一，1..256整数；省略数量由Agent先选定');
     if (!/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/.test(request.item) || (request.maxSteps !== undefined && (!Number.isInteger(request.maxSteps) || request.maxSteps < 1 || request.maxSteps > 256)) || (request.timeoutMs !== undefined && (!Number.isInteger(request.timeoutMs) || request.timeoutMs < 1000 || request.timeoutMs > 120000)) || (request.radius !== undefined && ((!fractionalRadius && !Number.isInteger(request.radius)) || !Number.isFinite(request.radius) || request.radius < (fractionalRadius ? 1.5 : 1) || request.radius > (fractionalRadius ? 4 : 6)))) throw new BodyError('INVALID_ARGUMENT', '物品ID、范围或独立执行预算无效');
   }
   private bind(task: Active, stack: ItemValue): void {
@@ -125,7 +139,7 @@ export class GatherTasks {
     task.variant = structuredClone(stack); task.progress.variantComponents = structuredClone(stack.components); task.progress.maxStackSize = stack.maxStackSize;
     if (miningOwner(task.borrowed)) return;
     const goal = task.request.count ?? task.request.stacks! * stack.maxStackSize;
-    if (!Number.isSafeInteger(goal) || goal > 256) throw new BodyError('UNSUPPORTED', '实际组数解析超过当前有限目标256个，未截断数量');
+    if (!Number.isSafeInteger(goal) || goal > MAX_GOAL) throw new BodyError('UNSUPPORTED', '实际组数解析超过当前有限目标256个，未截断数量');
     task.progress.targetCount = goal;
   }
   private inside(task: Active, position: Position): boolean {
@@ -229,7 +243,7 @@ export class GatherTasks {
     let task: Active | undefined;
     try {
       // Reserve synchronously even while the initial read or chat acknowledgement is in flight.
-      task = { id, taskToken: lease.token, lease, borrowed, name, context: {}, center: { x: 0, y: 0, z: 0 }, radius: request.radius ?? 4, deadline: this.now() + (request.timeoutMs ?? (request.wholeTree ? Math.min(600000, Math.max(120000, (request.count ?? 0) * 4000)) : 60000)), cursor: 0, allowed: new Set(), collectedEntities: new Map(), request, progress } as Active;
+      task = { id, taskToken: lease.token, lease, borrowed, name, context: {}, center: { x: 0, y: 0, z: 0 }, radius: request.radius ?? 4, deadline: this.now() + (request.timeoutMs ?? taskTime(name, request)), cursor: 0, allowed: new Set(), collectedEntities: new Map(), request, progress } as Active;
       // Fights of the guard duty push the limit back (not for companion mining, which keeps the follow's own deadline).
       if (!miningOwner(borrowed)) task.grace = fightGrace(this.body, task.deadline - this.now());
       if (miningOwner(borrowed)) { task.deadline = Math.min(task.deadline, borrowed.deadline); delete progress.requestedCount; delete progress.targetCount; progress.limitation = '单块原生破坏与本子任务新拾取分开确认；物品掉落归属未确认，不预测产量。'; }
@@ -277,7 +291,7 @@ export class GatherTasks {
         }
         // The private activity has no user count promise: freeze the current remainder plus its proven prior portion.
         const goal = current!.stack.count + prior;
-        if (!Number.isSafeInteger(goal) || goal > 256) throw new BodyError('UNSUPPORTED', '内部单UUID当前栈超过256，未截断数量');
+        if (!Number.isSafeInteger(goal) || goal > MAX_GOAL) throw new BodyError('UNSUPPORTED', '内部单UUID当前栈超过256，未截断数量');
         task.request = { ...request, count: goal }; task.progress.requestedCount = goal; task.progress.targetCount = goal;
         task.progress.pickedUpCount = prior; task.progress.totalNativePickedUpCount = prior;
         if (prior > 0) this.bind(task, borrowed.source.stack);
@@ -301,7 +315,7 @@ export class GatherTasks {
     }
   }
   /** One guarded native action; force (coming down a pillar) still runs once the goal is reached or the step budget is spent. */
-  private async step<N extends ActionName>(task: Active, name: N, args: ActionArguments[N], force = false): Promise<Operation> {
+  private async step<N extends ActionName>(task: Active, name: N, args: ActionArguments[N], force = false, landed = false): Promise<Operation> {
     const state = await this.observe(task); if (!force && this.done(task)) throw new BodyError('TARGET_REACHED', '实际拾取数量已经达到目标');
     if (name === 'pickup-item' && 'entityId' in args && !state.groundItems?.some(item => item.entityId === args.entityId)) {
       if (task.collectedEntities.has(args.entityId)) return { operationId: '', sessionId: task.context.sessionId ?? '', name, status: 'succeeded', summary: '目标已由原生拾取收取' };
@@ -330,6 +344,8 @@ export class GatherTasks {
         this.remember(task, 'running', '同一目标原生拾取已确认；移动竞争诊断已保留'); return op;
       }
     }
+    // Asked to walk while still in the air (just arrived, stepping down): nothing moved; once it stands, ask once more.
+    if (op.status === 'failed' && code === 'BLOCKED' && !landed && AIRBORNE.test(op.summary ?? '')) { await this.landed(task); return this.step(task, name, args, force, true); }
     if (op.status !== 'succeeded') throw new BodyError(op.status === 'unknown' ? 'UNKNOWN' : op.status === 'cancelled' ? 'CANCELLED' : (op.result as { code?: string } | undefined)?.code ?? 'STEP_FAILED', op.summary);
     return op;
   }
@@ -341,11 +357,15 @@ export class GatherTasks {
       const items = state.groundItems ?? [];
       if (miningOwner(task.borrowed) && state.groundItemsTruncated) throw new BodyError('PICKUP_UNKNOWN', '采矿后的地面观察已截断，未声称掉落已完整收取');
       // A gathered drop caught high in leaves cannot be walked to: leave it rather than fail the whole goal.
-      let item = items.find(item => item.stack.id === task.request.item && !task.oldGround?.has(item.entityId) && this.inside(task, item.position) && (task.name === 'gather-resources' || task.allowed.has(item.entityId)) && item.visibility === 'visible'
-        && (task.name !== 'gather-resources' || miningOwner(task.borrowed) || item.position.y <= state.position.y + 2));
+      const ours = (next: GroundItem) => next.stack.id === task.request.item && !task.oldGround?.has(next.entityId) && !task.unreachableDrops?.has(next.entityId) && this.inside(task, next.position) && (task.name === 'gather-resources' || task.allowed.has(next.entityId))
+        && (task.name !== 'gather-resources' || miningOwner(task.borrowed) || next.position.y <= state.position.y + 2);
+      const away = (next: GroundItem) => Math.hypot(next.position.x - state.position.x, next.position.y - state.position.y, next.position.z - state.position.z);
+      let item = items.filter(next => ours(next) && next.visibility === 'visible').sort((a, b) => away(a) - away(b))[0];
       if (!item) {
         if (await this.shake(task, state, items, shaken)) continue;
-        return;
+        // Hidden by something that is not leaves (tall grass, the rim of a hole): the body walks there all the same.
+        item = items.filter(next => ours(next) && next.visibility === 'occluded' && !task.borrowed).sort((a, b) => away(a) - away(b))[0];
+        if (!item) return;
       }
       this.capacity(task, state);
       // Newly mined drops may still be falling. Wait within a fixed budget before binding a movement guard.
@@ -381,7 +401,14 @@ export class GatherTasks {
       // happens before any pickup, so look again rather than fail the whole goal.
       try {
       await this.step(task, 'pickup-item', { entityId: item.entityId, expectedItem: item.stack.id, expectedCount: item.stack.count, expectedComponents: item.stack.components!, expectedMaxStackSize: item.stack.maxStackSize, ...(task.borrowed ? { companionGuard: task.borrowed.companionGuard } : {}), ...(miningOwner(task.borrowed) ? { resourceTargetToken: task.borrowed.candidate.targetToken } : {}), timeoutMs: Math.min(PICKUP_TIMEOUT_MS.max, Math.max(PICKUP_TIMEOUT_MS.min, task.deadline - this.now())) });
-      } catch (error) { if (error instanceof BodyError && ['STALE_ITEM', 'PICKUP_MERGED'].includes(error.code) && task.progress.pickedUpCount === before && ++merged <= 3) continue; throw error; }
+      } catch (error) {
+        if (error instanceof BodyError && ['STALE_ITEM', 'PICKUP_MERGED'].includes(error.code) && task.progress.pickedUpCount === before && ++merged <= 3) continue;
+        // No way to this drop (fallen into a pit, walled in by blocks): leave it and pick up the others.
+        if (error instanceof BodyError && noWay.has(error.code) && !task.borrowed && task.progress.pickedUpCount === before) {
+          (task.unreachableDrops ??= new Set()).add(item.entityId); task.progress.unreachableDrops = task.unreachableDrops.size; continue;
+        }
+        throw error;
+      }
       if (task.progress.pickedUpCount === before) throw new BodyError('PICKUP_UNKNOWN', '动作没有对应新增原生拾取收据，未依据实体消失或背包净变化猜测成功');
       if (!this.done(task) && (await this.observe(task)).groundItems?.some(next => next.entityId === item.entityId)) throw new BodyError('INVENTORY_FULL', '目标实体仍有余量；未自动重复拾取，请检查背包空间');
     }
@@ -430,9 +457,37 @@ export class GatherTasks {
   }
   /** A drop of this task that cannot simply be walked to: high on leaves, or hidden behind them. */
   private caught(task: Active, state: Observation, item: GroundItem): boolean {
-    if (item.stack.id !== task.request.item || task.oldGround?.has(item.entityId) || !this.inside(task, item.position)) return false;
+    // One the body found no way to is told apart: leaves are not what keeps it.
+    if (item.stack.id !== task.request.item || task.oldGround?.has(item.entityId) || task.unreachableDrops?.has(item.entityId) || !this.inside(task, item.position)) return false;
     if (task.name === 'collect-items' && !task.allowed.has(item.entityId)) return false;
     return item.position.y > state.position.y + 2 || item.visibility === 'occluded';
+  }
+  /**
+   * What the felled trees left besides logs (apples, saplings) lying in the task area, each tried once after the
+   * logs are in: reported with the other things picked up, never counted toward the goal. Nothing waits for the
+   * leaves to decay; a drop with no way to it, or no room for it, is left.
+   */
+  private async byproducts(task: Active): Promise<void> {
+    if (task.borrowed || !task.trees?.size) return;
+    const tried = new Set<string>();
+    for (;;) {
+      const state = await this.observe(task);
+      const away = (next: GroundItem) => Math.hypot(next.position.x - state.position.x, next.position.y - state.position.y, next.position.z - state.position.z);
+      const item = (state.groundItems ?? []).filter(next => treeByproduct(next.stack.id) && next.stack.components !== undefined && !tried.has(next.entityId) && next.visibility !== 'unknown'
+        && this.inside(task, next.position) && next.position.y <= state.position.y + 2).sort((a, b) => away(a) - away(b))[0];
+      if (!item || task.deadline - this.now() < PICKUP_TIMEOUT_MS.min) return;
+      tried.add(item.entityId);
+      const room = state.inventory.some(slot => slot.slot >= 0 && slot.slot < 36 && (slot.id === 'minecraft:air' && slot.count === 0
+        || slot.id === item.stack.id && isDeepStrictEqual(slot.components, item.stack.components) && slot.count < (slot.maxStackSize ?? 0)));
+      if (!room) continue;
+      task.progress.stage = 'picking-up-byproducts';
+      try { await this.step(task, 'pickup-item', { entityId: item.entityId, expectedItem: item.stack.id, expectedCount: item.stack.count, expectedComponents: item.stack.components!, expectedMaxStackSize: item.stack.maxStackSize, timeoutMs: Math.min(PICKUP_TIMEOUT_MS.max, Math.max(PICKUP_TIMEOUT_MS.min, task.deadline - this.now())) }, true); }
+      catch (error) {
+        if (!(error instanceof BodyError) || haltCodes.has(error.code) || unknownCodes.has(error.code)) throw error;
+        // Gone or no way there: try the next one. Anything else (hurt on the way, a full inventory) ends the sweep.
+        if (!noWay.has(error.code) && !['STALE_TARGET', 'STALE_ITEM', 'PICKUP_MERGED'].includes(error.code)) return;
+      }
+    }
   }
   /** Eat between blocks if needed, then assess, prepare and select the tool for one candidate; returns the fresh state. */
   private async prepareFor(task: Active, candidate: Candidate, state: Observation): Promise<Observation> {
@@ -656,7 +711,13 @@ export class GatherTasks {
       spot = await this.pillarSpot(task, target);
       if (!spot) { remaining.splice(remaining.indexOf(target), 1); task.progress.unreachable = (task.progress.unreachable ?? 0) + 1; return 0; }
       task.progress.stage = 'walking-to-pillar-spot';
-      await this.step(task, 'move-to-position', { x: spot.x + 0.5, y: spot.y, z: spot.z + 0.5, tolerance: 0.3, timeoutMs: Math.min(20000, Math.max(500, task.deadline - this.now())) });
+      try { await this.step(task, 'move-to-position', { x: spot.x + 0.5, y: spot.y, z: spot.z + 0.5, tolerance: 0.3, timeoutMs: Math.min(20000, Math.max(500, task.deadline - this.now())) }); }
+      catch (error) {
+        if (!(error instanceof BodyError && noWay.has(error.code))) throw error;
+        // No way to the spot (a cliff, a fence): leave this one and go on with the others, as for an approach.
+        if (remaining.includes(target)) { remaining.splice(remaining.indexOf(target), 1); task.progress.unreachable = (task.progress.unreachable ?? 0) + 1; }
+        return 0;
+      }
     }
     const column = spot;
     const purpose: PillarPurpose = target.kind === 'log' ? 'log' : 'other';
@@ -952,7 +1013,7 @@ export class GatherTasks {
         } catch (error) {
           if (high && error instanceof BodyError && !haltCodes.has(error.code) && !unknownCodes.has(error.code)) { pending += await this.climb(task, remaining, candidate); continue; }
           // No walkable way to this one block (leaves, a cliff): leave it and go on with the others.
-          if (error instanceof BodyError && error.code === 'NO_PATH') { remaining.splice(remaining.indexOf(candidate), 1); task.progress.unreachable = (task.progress.unreachable ?? 0) + 1; continue; }
+          if (error instanceof BodyError && noWay.has(error.code)) { remaining.splice(remaining.indexOf(candidate), 1); task.progress.unreachable = (task.progress.unreachable ?? 0) + 1; continue; }
           throw error;
         }
         skipped.clear();
@@ -965,6 +1026,7 @@ export class GatherTasks {
         else { remaining.splice(remaining.indexOf(candidate), 1); task.progress.unreachable = (task.progress.unreachable ?? 0) + 1; }
       }
       if (pending > 0) await this.pickups(task);
+      await this.byproducts(task);
       await this.observe(task);
       if (miningOwner(task.borrowed)) {
         if (task.progress.minedBlocks !== 1) throw new BodyError('UNKNOWN', '单块原生破坏未完整确认，未自动重试');
@@ -977,8 +1039,9 @@ export class GatherTasks {
         const hidden = caught.reduce((sum, item) => sum + item.stack.count, 0) - stuck;
         if (stuck > 0) task.progress.stuckHigh = stuck;
         if (hidden > 0) task.progress.stuckInLeaves = hidden;
-        if (stuck + hidden > 0) throw new BodyError('INSUFFICIENT_RESOURCES', `候选都挖完了，但有 ${stuck + hidden} 个掉落卡在高处的树叶上或被树叶挡住，敲过附近的树叶、也走近试过，还是没捡到；天然树叶过一会儿会腐烂，掉下来后可以再捡`);
-        throw new BodyError('INSUFFICIENT_RESOURCES', '冻结候选已用完，实际拾取数量不足；未重新向外搜索');
+        const lost = task.unreachableDrops?.size ?? 0, walledIn = lost ? `有 ${lost} 个掉落走不过去（多半掉进了坑里或被方块围住），没捡到` : '';
+        if (stuck + hidden > 0) throw new BodyError('INSUFFICIENT_RESOURCES', `候选都挖完了，但有 ${stuck + hidden} 个掉落卡在高处的树叶上或被树叶挡住，敲过附近的树叶、也走近试过，还是没捡到；天然树叶过一会儿会腐烂，掉下来后可以再捡${walledIn ? `；另外${walledIn}` : ''}`);
+        throw new BodyError('INSUFFICIENT_RESOURCES', walledIn ? `${walledIn}；未重新向外搜索` : '冻结候选已用完，实际拾取数量不足；未重新向外搜索');
       }
       this.finish(task, 'succeeded', task.progress.overage ? '目标已达到；原生一次拾取产生额外数量，已如实记录' : '实际原生拾取数量已达到明确目标');
     } catch (error) {

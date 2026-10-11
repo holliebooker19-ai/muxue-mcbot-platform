@@ -185,11 +185,61 @@ test('a drop hidden behind leaves: the leaves in the line of sight are broken, t
   assert.equal(result.status, 'succeeded', result.summary); assert.equal(result.result.leavesShaken, 1);
   assert.deepEqual(f.calls.filter(call => call.name === 'dig-leaf').map(call => [call.args.x, call.args.y, call.args.z]), [[2, 64, 1]]);
 });
-test('collect-items never breaks leaves for a hidden drop and reports it as caught', async () => {
+const noPath = (f, name, args) => {
+  f.calls.push({ name, args: clone(args), refused: true });
+  return { operationId: randomUUID(), sessionId: 'session', controlGeneration: f.state.controlGeneration, name, status: 'failed', summary: 'NO_PATH: No loaded walkable route makes progress toward the destination', result: { code: 'NO_PATH' } };
+};
+test('collect-items never breaks leaves for a hidden drop: it walks there, and one with no way to it is reported', async () => {
   const f = fixture({ drops: [{ ...stack(), id: 'minecraft:spruce_log' }] });
   f.state.groundItems[0].visibility = 'occluded';
+  f.body.act = (act => async (name, args, token) => name === 'pickup-item' ? noPath(f, name, args) : act(name, args, token))(f.body.act);
   const result = await f.done(await f.tasks.start('collect-items', { item: 'minecraft:spruce_log', count: 1, radius: 4 }));
   assert.equal(result.status, 'failed'); assert.equal(f.calls.some(call => call.name === 'dig-block'), false);
+  assert.equal(f.calls.filter(call => call.name === 'pickup-item').length, 1, 'tried once'); assert.match(result.summary, /1 个掉落走不过去/);
+});
+test('a drop with no way to it (fallen into a pit) is left: the others are picked up nearest first and another block is dug in its place', async () => {
+  const f = fixture({ blocks: 4 });
+  f.candidates[3].position = { x: 4, y: 64, z: 0 }; f.candidates[3].distance = 4;
+  let refused;
+  f.body.act = (act => async (name, args, token) => {
+    if (name === 'pickup-item' && !refused) { refused = args.entityId; return noPath(f, name, args); }
+    return act(name, args, token);
+  })(f.body.act);
+  const result = await f.done(await f.tasks.start('gather-resources', { resourceRef: await f.ref(), item: 'minecraft:cobblestone', count: 3 }));
+  assert.equal(result.status, 'succeeded', result.summary); assert.equal(result.result.pickedUpCount, 3); assert.equal(result.result.minedBlocks, 4); assert.equal(result.result.unreachableDrops, 1);
+  const left = f.state.groundItems.find(item => item.entityId === refused);
+  assert.deepEqual(left.position, { x: 1.5, y: 64, z: 1.5 }, 'the nearest drop was tried first, and stays where it lies');
+});
+test('a drop hidden by something that is not leaves (tall grass) is still walked to and picked up', async () => {
+  const f = fixture({ blocks: 1 });
+  f.body.act = (act => async (name, args, token) => { const op = await act(name, args, token); if (name === 'dig-block' && args.targetToken) f.state.groundItems.at(-1).visibility = 'occluded'; return op; })(f.body.act);
+  const result = await f.done(await f.tasks.start('gather-resources', { resourceRef: await f.ref(), item: 'minecraft:cobblestone', count: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary); assert.equal(result.result.pickedUpCount, 1);
+});
+test('a walk asked while the body was still in the air is asked once more once it stands', async () => {
+  const f = fixture({ blocks: 1 });
+  f.candidates[0].position = { x: 4, y: 64, z: 0 }; f.candidates[0].distance = 4;
+  let airborne = true;
+  f.body.act = (act => async (name, args, token) => {
+    if (name === 'approach-resource' && airborne) {
+      airborne = false; f.calls.push({ name, args: clone(args), refused: true });
+      return { operationId: randomUUID(), sessionId: 'session', controlGeneration: f.state.controlGeneration, name, status: 'failed', summary: 'BLOCKED: Start navigation from supported ground or water', result: { code: 'BLOCKED' } };
+    }
+    return act(name, args, token);
+  })(f.body.act);
+  const result = await f.done(await f.tasks.start('gather-resources', { resourceRef: await f.ref(), item: 'minecraft:cobblestone', count: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary); assert.equal(f.calls.filter(call => call.name === 'approach-resource').length, 2);
+});
+test('after the logs, apples and saplings lying in the area are picked up too (not counted); stone gathering leaves them', async () => {
+  const extras = [{ id: 'minecraft:apple', count: 1, maxStackSize: 64, components: {} }, { id: 'minecraft:oak_sapling', count: 2, maxStackSize: 64, components: {} }];
+  const logs = fixture({ blocks: 1, blockId: 'minecraft:oak_log', dropItem: 'minecraft:oak_log', drops: extras });
+  const chopped = await logs.done(await logs.tasks.start('gather-resources', { resourceRef: await logs.ref(), item: 'minecraft:oak_log', count: 1 }));
+  assert.equal(chopped.status, 'succeeded', chopped.summary); assert.equal(chopped.result.pickedUpCount, 1);
+  assert.equal(chopped.result.unexpectedPickedUpCount, 3); assert.deepEqual(chopped.result.items.map(item => item.item).sort(), ['minecraft:apple', 'minecraft:oak_sapling']);
+  assert.equal(logs.state.groundItems.length, 0);
+  const stone = fixture({ blocks: 1, drops: extras });
+  const dug = await stone.done(await stone.tasks.start('gather-resources', { resourceRef: await stone.ref(), item: 'minecraft:cobblestone', count: 1 }));
+  assert.equal(dug.status, 'succeeded', dug.summary); assert.equal(stone.state.groundItems.length, 2, 'no trees, no sweep');
 });
 test('a reachable-looking block refused for line of sight is left for an approach, not retried in place', async () => {
   const f = fixture({ blocks: 2 });

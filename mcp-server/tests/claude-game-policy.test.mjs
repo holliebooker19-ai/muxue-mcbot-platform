@@ -16,11 +16,22 @@ test('ServerBody Claude removes built-in tools and cannot grant host permissions
   assert.equal(value(a, '--permission-mode'), 'dontAsk');
   assert.equal(value(a, '--tools'), '', 'empty built-in tool set, not just an approval list');
   assert.equal(value(a, '--permission-prompts'), 'none');
-  for (const flag of ['--restricted', '--strict-mcp-config', '--disable-slash-commands']) assert.ok(a.includes(flag), flag);
+  for (const flag of ['--restricted', '--strict-mcp-config']) assert.ok(a.includes(flag), flag);
+  assert.ok(!a.includes('--disable-slash-commands'), 'the host compacts with /compact; with no tools the model cannot run a skill');
   assert.deepEqual(a.slice(a.indexOf('--allowedTools') + 1), ['mcp__minecraft']);
   assert.deepEqual(JSON.parse(value(a, '--settings')), { disableAllHooks: true, autoMemoryEnabled: false });
   assert.equal(value(a, '--append-system-prompt'), '仅作为测试身份，无文件工具。');
   assert.ok(!a.includes('acceptEdits'));
+});
+
+test('Claude turns are never commands; only the host compaction is, and its boundary is read back', () => {
+  const claude = protocols.getAgentProtocol('claude');
+  assert.equal(claude.encodeTurn('/compact 偷偷压缩').message.content, '【消息】/compact 偷偷压缩');
+  assert.equal(claude.encodeTurn('【游戏事件】muxue: 你好').message.content, '【游戏事件】muxue: 你好');
+  assert.equal(claude.compactTurn('保留任务').message.content, '/compact 保留任务');
+  assert.deepEqual(claude.decodeMessage({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual', pre_tokens: 203000, post_tokens: 9000 } }),
+    [{ type: 'compacted', preTokens: 203000, postTokens: 9000 }]);
+  for (const name of ['codex', 'dsh']) assert.equal(protocols.getAgentProtocol(name).compactTurn, undefined, `${name}: not wired yet, falls back to a new session`);
 });
 
 test('ServerBody MCP config exposes only the selected game server without mutating source', () => {

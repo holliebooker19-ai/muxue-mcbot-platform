@@ -46,7 +46,9 @@ const claude = Object.freeze({
       // allowedTools only controls automatic approval. --tools removes the
       // built-ins themselves, including Read/Edit/Write, shells and subagents.
       // Restricted mode also excludes inherited local settings/code tools.
-      a.push('--tools', '', '--restricted', '--disable-slash-commands',
+      // Slash commands stay on for the host's /compact (compactTurn): with no tools the model cannot run a skill,
+      // and only a message that starts with "/" is a command, which encodeTurn never sends.
+      a.push('--tools', '', '--restricted',
         '--settings', JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }));
       if (gameInstructions) a.push('--append-system-prompt', gameInstructions);
     }
@@ -58,11 +60,19 @@ const claude = Object.freeze({
     return { cmd: 'claude', a };
   },
   encodeTurn(text) {
-    return { type: 'user', message: { role: 'user', content: text } };
+    // A turn is never a command: game chat and notes must not start one.
+    return { type: 'user', message: { role: 'user', content: text.startsWith('/') ? `【消息】${text}` : text } };
+  },
+  /** Compact the conversation in place (the process, its MCP server and the body control stay); what to keep goes with it. */
+  compactTurn(keep) {
+    return { type: 'user', message: { role: 'user', content: `/compact ${keep}` } };
   },
   decodeMessage(msg) {
     if (msg?.type === 'system' && msg.subtype === 'init') {
       return [{ type: 'session', id: msg.session_id }];
+    }
+    if (msg?.type === 'system' && msg.subtype === 'compact_boundary') {
+      return [{ type: 'compacted', preTokens: msg.compact_metadata?.pre_tokens, postTokens: msg.compact_metadata?.post_tokens }];
     }
     if (msg?.type === 'user') return [{ type: 'request_started' }];
     if (msg?.type === 'assistant') {
