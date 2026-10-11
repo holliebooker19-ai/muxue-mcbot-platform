@@ -159,7 +159,7 @@ try {
   const next = (await tool(restarted, 'get-status')).value;
   check('explicit new task preserves role session and connected authority', next.connected && next.sessionId === initial.sessionId && next.source === 'server-observed');
   check('host watcher rebinds to new lease rather than old stop history', host.capture()?.leaseId === restarted.control.leaseId && !host.stopped);
-  const looked = (await tool(restarted, 'look-at', { x: next.position.x + 1, y: next.position.y + 1, z: next.position.z })).value;
+  const looked = (await tool(restarted, 'emote', { x: next.position.x + 1, y: next.position.y + 1, z: next.position.z })).value;
   check('first explicit action on new actual MCP succeeds', looked.status === 'succeeded', { status: looked.status, controlGeneration: looked.controlGeneration });
   // No new stop message is sent: historical stop rows must remain history after new claim.
   await pollQuiet(2100);

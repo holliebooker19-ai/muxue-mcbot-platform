@@ -129,11 +129,11 @@ async function prepare(item, count) {
 }
 async function nativeSource() {
   const block = await tool('get-block', chestPosition);
-  const opening = await terminal('open-container', { ...chestPosition, expectedBlock: block.id, expectedProperties: block.properties });
-  assert.equal(opening.status, 'succeeded'); const menu = await tool('get-container', { details: true });
+  const opening = await terminal('container-menu', { action: 'open', ...chestPosition, expectedBlock: block.id, expectedProperties: block.properties });
+  assert.equal(opening.status, 'succeeded'); const menu = await tool('container-menu', { action: 'read', details: true });
   const origin = menu.slots.find(stack => stack.source === 'container' && stack.slot === 0);
   assert(origin && origin.components !== undefined && menu.carried.count === 0);
-  const closing = await terminal('close-container', { containerId: menu.id, expectedRevision: menu.revision }); assert.equal(closing.status, 'succeeded');
+  const closing = await terminal('container-menu', { action: 'close', containerId: menu.id, expectedRevision: menu.revision }); assert.equal(closing.status, 'succeeded');
   return origin;
 }
 try {
@@ -195,7 +195,7 @@ try {
   client = new Client({ name: 'r8-alpha-fixture', version: '1' }); await client.connect(transport);
   const tools = (await client.listTools()).tools.map(value => value.name);
   check('实际MCP包含本批容器与状态工具', ['container-withdraw', 'container-list', 'discover-containers', 'get-status', 'stop-action'].every(name => tools.includes(name)));
-  const survival = await tool('get-survival-state', { details: true });
+  const survival = (await tool('get-status', { include: ['survival'], details: true })).survival;
   await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false }); await tool('stop-action');
   const tickets = await command('forceload query');
   for (const [x, z] of [[387, 387], [387, 388], [388, 387], [388, 388]]) assert(!new RegExp(`\\[${x},\\s*${z}\\]`).test(tickets), '独立区域已有forceload票；拒绝覆盖其他运行者票');
@@ -228,7 +228,7 @@ try {
   });
   await step('operation-budget', async () => {
     const before = (await tool('get-status', { details: true })).operationBudget; assert(before, '运行中服务端没有本批额度诊断；可能未安装新产物');
-    const op = await terminal('look-at', { x: 6202.5, y: 201.5, z: 6200.5 }); assert.equal(op.status, 'succeeded');
+    const op = await terminal('emote', { x: 6202.5, y: 201.5, z: 6200.5 }); assert.equal(op.status, 'succeeded');
     const after = (await tool('get-status', { details: true })).operationBudget;
     await tool('stop-action'); const stopped = (await tool('get-status')).operationBudget;
     assert.deepEqual(after, stopped);

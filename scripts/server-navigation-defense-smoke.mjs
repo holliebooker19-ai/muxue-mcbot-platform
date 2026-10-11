@@ -105,8 +105,8 @@ async function terminal(name, args, supplied) {
   if (op.operationId && op.status === 'running') op = await until(() => tool('get-operation', { operationId: op.operationId, details: true }), value => value.status !== 'running', name + '没有终态', 125000);
   report.calls.push(safe({ ...stamp(), taskTerminal: name, operation: op })); return op;
 }
-const state = () => tool('get-survival-state', { details: true });
-const inventory = () => tool('list-inventory');
+const state = async () => (await tool('get-status', { include: ['survival'], details: true })).survival;
+const inventory = async () => (await tool('get-status', { include: ['inventory'] })).inventory;
 const total = (values, id) => values.filter(value => value.id === id).reduce((count, value) => count + value.count, 0);
 async function policy(change) { const current = await state(); return tool('set-reflexes', { expectedRevision: current.policy.revision, ...change }); }
 async function relay() {
@@ -127,7 +127,7 @@ async function relay() {
   });
   await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
 }
-const position = async () => (await tool('get-position')).position;
+const position = async () => (await tool('get-status')).position;
 const near = (a, b, radius = 0.8) => Math.hypot(a.x-b.x, a.y-b.y, a.z-b.z) <= radius;
 const mob = '@e[tag=mcbot_navdef_fixture]';
 const ownedMobIds=new Set();
@@ -174,7 +174,7 @@ async function arena() {
 }
 async function navigation(args, expected = true) {
   const health = (await state()).health, trace = [], began = performance.now();
-  let op = await tool('move-to-position', { timeoutMs: 20000, tolerance: 0.35, ...args }, true);
+  let op = await tool('go-to', { timeoutMs: 20000, tolerance: 0.35, ...args }, true);
   while(op.operationId && op.status === 'running' && performance.now()-began < 22000) {
     trace.push({ ms: Math.round(performance.now()-began), ...await position() });
     await wait(100); op = await tool('get-operation', { operationId: op.operationId, details: true });
@@ -255,7 +255,7 @@ try {
       const actual=await until(position,p=>p.y>201.9&&Math.abs(p.x-2613.5)<2.8,'跟随未上台',20000,120);
       check('持续跟随共享高差导航',actual.y>201.9,actual);
       await tool('stop-action');const immediately=await position();const resting=await settled();const stopped=resting.actual;await wait(700);
-      check('停止后不恢复跟随',near(await position(),stopped,0.05)&&(await tool('get-companion-mode')).state==='stopped',{immediately,stopped,nativeRestingMotion:resting.motion});
+      check('停止后不恢复跟随',near(await position(),stopped,0.05)&&(await tool('get-status')).companionMode.state==='stopped',{immediately,stopped,nativeRestingMotion:resting.motion});
     });
     await step('raised-container-and-pickup',async()=>{
       await arena();await fixture('fill 2607 201 2611 2616 201 2617 stone');await fixture('setblock 2611 202 2614 chest');
@@ -270,7 +270,7 @@ try {
     });
     await step('airborne-stop-and-first-new-task',async()=>{
       await arena();await fixture('fill 2607 201 2611 2614 201 2617 stone');
-      const old=await tool('move-to-position',{x:2612.5,y:202,z:2614.5,tolerance:0.3,timeoutMs:20000});
+      const old=await tool('go-to',{x:2612.5,y:202,z:2614.5,tolerance:0.3,timeoutMs:20000});
       await until(()=>command('data get entity Claude OnGround'),v=>/0b\s*$/.test(v),'没有观察到真正起跳，测试不成立',15000,25);
       await tool('stop-action');await until(()=>command('data get entity Claude OnGround'),v=>/1b\s*$/.test(v),'停止后自然落地',4000,50);
       const landed=(await settled()).actual;await wait(900);
@@ -311,7 +311,7 @@ try {
       await until(()=>report.rpc.slice(floor),rows=>rows.some(r=>r.action==='defend-entity'&&r.ok),'自动防卫未实际受理',10000);
       // 8m 第二步（10-11）起：等待是服务端姿态，自卫时自动挂起，打完 3 秒后自己回到等待，运行端不再发暂停／恢复。
       await until(()=>report.rpc.slice(floor),rows=>rows.filter(r=>r.action==='defend-entity').length>=1,'自动防卫未完成',10000);
-      await until(()=>tool('get-companion-mode'),m=>m.intent==='wait'&&m.state==='waiting','防卫后没恢复原来的等待');
+      await until(async()=>(await tool('get-status')).companionMode,m=>m.intent==='wait'&&m.state==='waiting','防卫后没恢复原来的等待');
       check('自动防卫暂停普通等待、打完恢复原来的等待',true,{rpc:report.rpc.slice(floor),policy:(await state()).policy});
       await tool('stop-action');const stopFloor=report.rpc.length;
       // 10-08 起：叫停只停正在做的事，不关自卫（试玩里叫停后被僵尸打也不还手）。还在身边的怪会接着被打。
@@ -319,7 +319,7 @@ try {
       if(/Test passed/.test(await command(`execute if entity ${mob}`)))
         await until(()=>report.rpc.slice(stopFloor),rows=>rows.some(r=>r.action==='defend-entity'),'叫停后身边的怪没再被打',8000);
       check('叫停后还在身边的怪照样还手',true,{rpc:report.rpc.slice(stopFloor).filter(r=>r.action==='defend-entity')});
-      await fixture(`kill ${mob}`);await until(()=>state(),s=>s.policy.phase==='idle','怪没了自卫还没停下',8000);const axe=(await inventory()).find(item=>item.id==='minecraft:diamond_axe');assert(axe);const fresh=await terminal('prepare-item',{slot:axe.slot,targetSlot:0});
+      await fixture(`kill ${mob}`);await until(()=>state(),s=>s.policy.phase==='idle','怪没了自卫还没停下',8000);const axe=(await inventory()).find(item=>item.id==='minecraft:diamond_axe');assert(axe);const fresh=await terminal('equip-item', { hand: 'main', slot:axe.slot,targetSlot:0});
       check('防卫硬停止后首个新任务正常',fresh.status==='succeeded',fresh);
     });
     await step('defense-policy-off',async()=>{

@@ -100,13 +100,14 @@ async function terminal(name, args, supplied) {
   if (op.operationId && op.status === 'running') op = await until(() => tool('get-operation', { operationId: op.operationId, details: true }), value => value.status !== 'running', name + '没有终态', 125000);
   report.calls.push(safe({ ...stamp(), taskTerminal: name, operation: op })); return op;
 }
-const state = () => tool('get-survival-state', { details: true });
-const inventory = () => tool('list-inventory');
+const state = async () => (await tool('get-status', { include: ['survival'], details: true })).survival;
+const inventory = async () => (await tool('get-status', { include: ['inventory'] })).inventory;
 const total = (values, id) => values.filter(value => value.id === id).reduce((count, value) => count + value.count, 0);
 async function policy(change) { const current = await state(); return tool('set-reflexes', { expectedRevision: current.policy.revision, ...change }); }
 async function readOnlyAssessment(block, args = {}) {
   await fixture(`setblock 2414 201 2422 ${block}`);
   const before = await state(), authorityBefore = await command('data get entity Claude Inventory');
+  // TODO(ServerBody 合并)：assess-tool 已删、没有直接替代，这里仍是旧名，待决定删除或改写（不改会 unknown tool）。
   const value = await tool('assess-tool', { x: 2414, y: 201, z: 2422, expectedBlock: `minecraft:${block}`, ...args });
   const after = await state(), authorityAfter = await command('data get entity Claude Inventory');
   check(`只读评估 ${block} 未换手／改变库存`, before.selectedSlot === after.selectedSlot && authorityBefore === authorityAfter && JSON.stringify(before.inventory) === JSON.stringify(after.inventory));
@@ -144,7 +145,7 @@ try {
     '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID(), '--hosted'], cwd: root, stderr: 'pipe' });
   client = new Client({ name: 'survival-alpha-real-smoke', version: '1' }); await client.connect(transport);
   const tools = (await client.listTools()).tools.map(value => value.name);
-  check('新五项语义工具已在真实MCP注册', ['get-survival-state', 'assess-tool', 'prepare-item', 'eat-food', 'set-reflexes'].every(name => tools.includes(name)), { toolCount: tools.length });
+  check('新五项语义工具已在真实MCP注册', ['get-status', 'equip-item', 'eat-food', 'set-reflexes'].every(name => tools.includes(name)), { toolCount: tools.length });
   const original = await state(); check('当前主线默认进食／有限防卫及支持事实已交付', original.policy.autoEat === true && original.policy.autoDefend === true && original.policy.defenseSupported === true);
   await policy({ autoEat: false, autoDefend: false, armed: false }); await tool('stop-action');
   peer = track('peer', spawn(process.execPath, [path.join(root, 'scripts/server-play-test-peer.mjs'), '--commands', input, '--events', peerFile], { cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
@@ -177,13 +178,13 @@ try {
   });
   await step('prepare-occupied-native-swap', async () => {
     await replace(0, 'minecraft:dirt', 17); await replace(10, 'minecraft:diamond_pickaxe');
-    const before = await inventory(), operation = await terminal('prepare-item', { slot: 10, targetSlot: 0 }), after = await inventory();
+    const before = await inventory(), operation = await terminal('equip-item', { hand: 'main', slot: 10, targetSlot: 0 }), after = await inventory();
     check('热栏外工具准备通过真实原生交换及选择', operation.status === 'succeeded' && (await state()).selectedSlot === 0, operation);
     const expected = before.map(value => ({ ...value, slot: value.slot === 0 ? 10 : value.slot === 10 ? 0 : value.slot })).sort((a, b) => a.slot - b.slot);
     check('占用热栏10→0原生交换全背包实际字段守恒', JSON.stringify(expected) === JSON.stringify(after.sort((a, b) => a.slot - b.slot)), { sourceAfter: after.find(value => value.slot === 10), targetAfter: after.find(value => value.slot === 0) });
     for (let slot = 0; slot < 9; slot++) await replace(slot, 'minecraft:stone', 1);
     await replace(10, 'minecraft:diamond_pickaxe'); const fullBefore = await inventory();
-    const refused = await terminal('prepare-item', { slot: 10 });
+    const refused = await terminal('equip-item', { hand: 'main', slot: 10 });
     check('热栏全满且未指定目标拒绝静默丢物／交换', refused.status === 'failed' && refused.result?.code === 'HOTBAR_FULL' && JSON.stringify(fullBefore) === JSON.stringify(await inventory()), refused);
   });
   await step('inventory-tool-native-gather', async () => {
@@ -220,7 +221,7 @@ try {
       check('原生进食途中stop不延迟消费或续吃', old.status === 'cancelled' && total(before, 'minecraft:bread') === total(after.inventory, 'minecraft:bread') && after.policy.armed === false, { stoppedAt, old, policy: after.policy });
       const late = report.rpc.slice(floor).filter(value => value.action === 'eat-item' && value.elapsedMs > stoppedAt.elapsedMs);
       check('硬停止后没有新的eat-item受理请求', late.length === 0, late);
-      const fresh = await terminal('prepare-item', { slot: 0 }); check('停止后首个新准备任务成功', fresh.status === 'succeeded', fresh);
+      const fresh = await terminal('equip-item', { hand: 'main', slot: 0 }); check('停止后首个新准备任务成功', fresh.status === 'succeeded', fresh);
     });
     await step('auto-eat-on-off', async () => {
       await policy({ autoEat: false, armed: false }); await makeHungry(); const before = await inventory();
@@ -241,7 +242,7 @@ try {
       check('紧急食物出现前wait已持有陪伴任务锁', waiting.state === 'waiting' && waiting.intent === 'wait', waiting);
       const eventFile = path.join(runtime, 'events-Claude.jsonl'), eventFloor = (await lines(eventFile)).at(-1)?.seq ?? 0;
       const floor = report.rpc.length; await replace(11, 'minecraft:bread', 1);
-      const stopped = await until(() => tool('get-companion-mode'), value => value.state === 'stopped' && !value.intent, '紧急进食没有抢占旧wait', 10000);
+      const stopped = await until(async () => (await tool('get-status')).companionMode, value => value.state === 'stopped' && !value.intent, '紧急进食没有抢占旧wait', 10000);
       const meals = await until(() => lines(eventFile), rows => rows.some(row => {
         if (row.seq <= eventFloor || row.type !== 'task') return false;
         const operation = JSON.parse(row.text);
@@ -250,9 +251,9 @@ try {
       const after = await until(state, value => value.policy.phase === 'idle' && total(value.inventory, 'minecraft:bread') === 0, '紧急进食未释放写权', 6000);
       check('紧急wait抢占确认原生消费及实际饥饿恢复', stopped.state === 'stopped' && after.food > hungry.food && report.rpc.slice(floor).some(value => value.action === 'eat-item' && value.ok),
         { foodBefore: hungry.food, foodAfter: after.food, nativeMeal: meals.filter(row => row.seq > eventFloor && row.type === 'task') });
-      await wait(1100); const idle = await tool('get-companion-mode');
+      await wait(1100); const idle = (await tool('get-status')).companionMode;
       check('紧急进食完成不隐式复活旧wait或跟随', idle.state === 'stopped' && !idle.intent && !idle.pickup, idle);
-      const fresh = await terminal('prepare-item', { slot: 10, targetSlot: 0 });
+      const fresh = await terminal('equip-item', { hand: 'main', slot: 10, targetSlot: 0 });
       check('紧急抢占后首个新prepare任务成功', fresh.status === 'succeeded', fresh);
     });
   }

@@ -89,7 +89,7 @@ try {
       '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()] });
   transport.stderr?.on('data', data => { fs.appendFile(path.join(dir, 'runtime-stderr.log'), redact(data.toString())).catch(() => {}); });
   await client.connect(transport);
-  await tool('get-position');
+  await tool('get-status');
   await goTo(4194.5, 4196.5);
   await command('clear Claude');
   const names = (await client.listTools()).tools.map(t => t.name);

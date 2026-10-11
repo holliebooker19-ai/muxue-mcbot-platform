@@ -95,7 +95,7 @@ try {
   client = new Client({ name: 'machine-items-fixture', version: '1' }); await client.connect(transport);
   const tools = (await client.listTools()).tools;
   check('machine-items 工具发布了，说明里点名 kaleidoscope_cookery', tools.find(t => t.name === 'machine-items')?.description.includes('kaleidoscope_cookery'));
-  const survival = (await tool('get-survival-state', { details: false })).value;
+  const survival = (await tool('get-status', { include: ['survival'], details: false })).value.survival;
   await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false }); await tool('stop-action');
 
   await fixture('forceload add 6390 6390 6415 6415'); forced.push('6390 6390 6415 6415');
@@ -167,7 +167,7 @@ try {
   const board = await machine(BOARD, 'list');
   check('砧板（没有物品槽）：UNSUPPORTED，说明哪些面有', code(board) === 'UNSUPPORTED', board.value);
   const chest = await machine(CHEST, 'list');
-  check('原版箱子：UNSUPPORTED，让用 open-container', code(chest) === 'UNSUPPORTED', chest.value);
+  check('原版箱子：UNSUPPORTED，让用 container-menu open', code(chest) === 'UNSUPPORTED', chest.value);
   const none = await machine(OIL, 'insert', { item: 'minecraft:diamond', count: 1 });
   check('背包里没有的东西：MISSING_ITEM', code(none) === 'MISSING_ITEM', none.value);
   const walled = await machine(WALLED, 'list');

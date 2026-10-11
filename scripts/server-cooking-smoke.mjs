@@ -72,7 +72,7 @@ try {
   const transport = new StdioClientTransport({ command: process.execPath, args: [path.join(root, 'client-runtime/dist/main.js'), '--body', 'server', '--connection-file', path.join(serverDir, 'config/mcbot-server-control/connection.json'),
     '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()], cwd: root, stderr: 'pipe' });
   client = new Client({ name: 'cooking-fixture', version: '1' }); await client.connect(transport);
-  const survival = (await tool('get-survival-state', { details: false })).value;
+  const survival = (await tool('get-status', { include: ['survival'], details: false })).value.survival;
   await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false }); await tool('stop-action');
 
   await fixture('forceload add 6392 6392 6415 6415'); forced.push('6392 6392 6415 6415');

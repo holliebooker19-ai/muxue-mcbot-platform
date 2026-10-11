@@ -4,8 +4,8 @@
 //   2. 缺材料：铁镐没有铁锭，失败并列出缺铁锭 3 个；
 //   3. 3x3 配方（熔炉）：走到 6 格外的工作台合成；没有工作台时从背包里放一个下来再合成；
 //   4. 烧炼：wait 等烧完自动取出 3 个铁锭（自动选煤）；不等的话放进去、20 秒后不带 input 再来取；
-//   5. 长途走：travel-to 走到 90 格外；从封闭小屋里出去：开木门、走出去、把门关上；
-//   6. remember-place 记“家”，走开后 go-to-place 回来。
+//   5. 长途走：go-to 走到 90 格外；从封闭小屋里出去：开木门、走出去、把门关上；
+//   6. places remember 记“家”，走开后 go-to place 回来。
 // 不启停服务器、不调用模型、不计算哈希。需要：隔离服开着、平坦世界（地面 y=-61）、没装要求客户端的 Mod。
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -59,7 +59,7 @@ async function settle(op, ms = 90000) {
   return op;
 }
 const codeOf = op => op.error ? op.value.code : op.value.result?.code ?? op.value.summary;
-const inventory = async () => { const items = (await tool('list-inventory')).value; const n = {}; for (const s of items) if (s.id !== 'minecraft:air') n[s.id] = (n[s.id] ?? 0) + s.count; return n; };
+const inventory = async () => { const items = (await tool('get-status', { include: ['inventory'] })).value.inventory; const n = {}; for (const s of items) if (s.id !== 'minecraft:air') n[s.id] = (n[s.id] ?? 0) + s.count; return n; };
 const give = async (item, count) => fixture(`give Claude ${item} ${count}`);
 
 // 高台 y=200（人站 201），场地 X/Z 3800 附近；长途走在地面 y=-60
@@ -82,7 +82,7 @@ try {
     args: [path.join(root, 'client-runtime/dist/main.js'), '--body', 'server', '--connection-file', path.join(serverDir, 'config/mcbot-server-control/connection.json'),
       '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()] }));
   const names = (await client.listTools()).tools.map(t => t.name);
-  check('合成、烧炼、地点、长途走的工具都已发布', ['craft-item', 'smelt-item', 'travel-to', 'remember-place', 'list-places', 'forget-place', 'go-to-place'].every(n => names.includes(n)), names);
+  check('合成、烧炼、地点、长途走的工具都已发布', ['craft-item', 'smelt-item', 'go-to', 'places'].every(n => names.includes(n)), names);
 
   // 1. 2x2
   await ground(); await at(); await command('clear Claude');
@@ -137,10 +137,10 @@ try {
 
   // 5. 长途走（地面 y=-60）
   await command('clear Claude'); await command('tp Claude 3790.5 -60 3800.5'); await wait(1500);
-  const far = await settle(await tool('travel-to', { x: 3880.5, z: 3800.5 }), 120000);
+  const far = await settle(await tool('go-to', { x: 3880.5, z: 3800.5 }), 120000);
   report.runs.far = far.value;
   const farAt = await pos('Claude');
-  check('travel-to 走到 90 格外，到达 2 格内', far.value.status === 'succeeded' && Math.hypot(farAt[0] - 3880.5, farAt[2] - 3800.5) <= 2.5, { op: far.value, farAt });
+  check('go-to 走到 90 格外，到达 2 格内', far.value.status === 'succeeded' && Math.hypot(farAt[0] - 3880.5, farAt[2] - 3800.5) <= 2.5, { op: far.value, farAt });
 
   // 小屋：x 3840..3846, z 3820..3826，墙高 3 加顶，东墙中间一扇橡木门
   await command('fill 3838 -60 3818 3848 -56 3828 air');
@@ -149,28 +149,28 @@ try {
   await fixture('setblock 3846 -60 3823 oak_door[half=lower,facing=east,open=false]');
   await fixture('setblock 3846 -59 3823 oak_door[half=upper,facing=east,open=false]');
   await command('tp Claude 3842.5 -60 3823.5'); await wait(1500);
-  const out = await settle(await tool('travel-to', { x: 3852.5, z: 3823.5 }), 60000);
+  const out = await settle(await tool('go-to', { x: 3852.5, z: 3823.5 }), 60000);
   report.runs.door = out.value;
   const outAt = await pos('Claude');
   const doorClosed = (await command('execute if block 3846 -60 3823 oak_door[open=false]')).includes('passed');
   const wall = (await command('execute if blocks 3840 -60 3820 3846 -57 3826 3840 -60 3820 all')).length > 0;
   check('从封闭小屋出去：开门走出去，到了门外', out.value.status === 'succeeded' && outAt[0] > 3847, { op: out.value, outAt });
   check('出门后把自己开的门关上了，墙没拆', doorClosed && await isBlock(3846, -59, 3822, 'minecraft:stone_bricks') && await isBlock(3846, -59, 3824, 'minecraft:stone_bricks'), { doorClosed, wall });
-  const back = await settle(await tool('travel-to', { x: 3843.5, y: -60, z: 3823.5 }), 60000);
+  const back = await settle(await tool('go-to', { x: 3843.5, y: -60, z: 3823.5 }), 60000);
   const backAt = await pos('Claude');
   const closedAgain = (await command('execute if block 3846 -60 3823 oak_door[open=false]')).includes('passed');
   check('再走回屋里：开门进去、关门', back.value.status === 'succeeded' && backAt[0] < 3846 && closedAgain, { op: back.value, backAt, closedAgain });
 
   // 6. 记地点、回去
-  const home = await tool('remember-place', { name: '家' });
-  check('remember-place 记下“家”', !home.error && home.value.saved?.name === '家', home.value);
+  const home = await tool('places', { action: 'remember', name: '家' });
+  check('places remember 记下“家”', !home.error && home.value.saved?.name === '家', home.value);
   await command('tp Claude 3870.5 -60 3800.5'); await wait(1500);
-  const list = await tool('list-places');
-  check('list-places 列出家和距离', list.value.length === 1 && list.value[0].distance > 20, list.value);
-  const go = await settle(await tool('go-to-place', { name: '家' }), 90000);
+  const list = await tool('places', { action: 'list' });
+  check('places list 列出家和距离', list.value.length === 1 && list.value[0].distance > 20, list.value);
+  const go = await settle(await tool('go-to', { place: '家' }), 90000);
   const goAt = await pos('Claude');
   const spot = home.value.saved.position, shut = (await command('execute if block 3846 -60 3823 oak_door[open=false]')).includes('passed');
-  check('go-to-place 回到家：屋里记下的那个位置 1.5 格内，不站在门口，进门后关门', go.value.status === 'succeeded' && Math.hypot(goAt[0] - spot.x, goAt[2] - spot.z) <= 1.6 && goAt[0] < 3846 && shut, { op: go.value, goAt, spot, shut });
+  check('go-to place 回到家：屋里记下的那个位置 1.5 格内，不站在门口，进门后关门', go.value.status === 'succeeded' && Math.hypot(goAt[0] - spot.x, goAt[2] - spot.z) <= 1.6 && goAt[0] < 3846 && shut, { op: go.value, goAt, spot, shut });
   report.result = 'passed';
 } catch (error) {
   report.result = 'failed'; report.error = redact(error.stack || error.message); process.exitCode = 1; console.error(report.error);

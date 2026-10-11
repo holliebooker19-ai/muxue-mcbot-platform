@@ -147,7 +147,7 @@ async function independentCount(item) {
   const value = reply.match(/Found (\d+) matching item/i); assert(value, '独立库存数量无法解析：' + reply); return Number(value[1]);
 }
 async function verifyQuantity(item, op) {
-  const inventory = await tool('list-inventory');
+  const inventory = (await tool('get-status', { include: ['inventory'] })).inventory;
   const actual = inventory.filter(value => value.id === `minecraft:${item}`).reduce((sum, value) => sum + value.count, 0);
   check('原生收据与MCP库存及独立RCON数量一致', actual === op.result.pickedUpCount && await independentCount(item) === actual, { item, actual, progress: op.result });
   check('脚下支撑未破坏', /^Test passed/.test(await command('execute if block 6008 200 6012 minecraft:stone')));
@@ -179,8 +179,8 @@ try {
   client = new Client({ name: 'ore-alpha-real-smoke', version: '1' }); await client.connect(transport); mcpProcess = transport._process;
   transport.stderr?.on('data', chunk => { report.stderr = redact((report.stderr ?? '') + chunk).slice(-32768); });
   const names = (await client.listTools()).tools.map(value => value.name);
-  check('真实MCP暴露矿石所需资源／工具／停止接口', ['discover-resources', 'gather-resources', 'assess-tool', 'prepare-item', 'stop-action'].every(name => names.includes(name)), { toolCount: names.length });
-  const state = await tool('get-survival-state', { details: true });
+  check('真实MCP暴露矿石所需资源／工具／停止接口', ['discover-resources', 'gather-resources', 'equip-item', 'stop-action'].every(name => names.includes(name)), { toolCount: names.length });
+  const state = (await tool('get-status', { include: ['survival'], details: true })).survival;
   await tool('set-reflexes', { expectedRevision: state.policy.revision, autoEat: false, autoDefend: false, armed: false });
   for (const x of [6000, 6016]) for (const z of [6000, 6016]) {
     const reply = await command(`forceload query ${x} ${z}`);
@@ -196,6 +196,7 @@ try {
   });
   await scenario('wooden-pickaxe-refuses-iron', async () => {
     await arena('iron_ore', 1, 'minecraft:wooden_pickaxe');
+    // TODO(ServerBody 合并)：assess-tool 已删、没有直接替代，待决定删除或改写（不改会 unknown tool）。
     const assessment = await tool('assess-tool', { x: 6010, y: 201, z: 6010, expectedBlock: 'minecraft:iron_ore', dropPreference: 'no_silk_touch' });
     check('MC原生木镐铁矿资格为false', assessment.candidates.find(value => value.id === 'minecraft:wooden_pickaxe')?.eligible === false, assessment);
     const found = await scan('iron_ore'), floor = report.rpc.length;

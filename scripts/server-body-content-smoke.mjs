@@ -67,57 +67,57 @@ try {
   transport=new StdioClientTransport({command:process.execPath,args:[path.join(root,'client-runtime/dist/main.js'),'--body','server','--connection-file',connectionFile,'--username','ModBot','--world-id',connection.worldId,'--runtime-dir',runtime,'--controller-id',randomUUID(),'--hosted'],cwd:root,stderr:'pipe'});
   transport.stderr?.on('data',chunk=>{stderr+=chunk;});client=new Client({name:'content-D-real-smoke',version:'1'});await client.connect(transport);
   control=JSON.parse(await fs.readFile(path.join(runtime,'server-control-ModBot.json'),'utf8'));
-  const tools=(await client.listTools()).tools;check('generic container task tools work over actual MCP',['discover-containers','container-list','container-withdraw','get-container'].every(name=>tools.some(v=>v.name===name)));
+  const tools=(await client.listTools()).tools;check('generic container task tools work over actual MCP',['discover-containers','container-list','container-withdraw','container-menu'].every(name=>tools.some(v=>v.name===name)));
   await fixture('clear ModBot');await fixture('item replace entity ModBot hotbar.8 with minecraft:diamond 5');await pose();
   const ops=JSON.parse(await fs.readFile(path.join(serverDir,'ops.json'),'utf8'));check('ModBot has no OP authority',!ops.some(v=>v.name==='ModBot'));
 
   phase='range-protection';let block=await tool('get-block',{x:518,y:201,z:512});let fields=await machineItems();
-  const refused=await tool('open-container',{...block.position,expectedBlock:block.id,expectedProperties:block.properties});
-  check('far ordinary furnace open obeys interaction reach',refused.status==='failed'&&(await tool('get-container',{details:true}))===null&&(await machineItems())===fields,refused);
+  const refused=await tool('container-menu', { action: 'open', ...block.position,expectedBlock:block.id,expectedProperties:block.properties});
+  check('far ordinary furnace open obeys interaction reach',refused.status==='failed'&&(await tool('container-menu', { action: 'read', details:true}))===null&&(await machineItems())===fields,refused);
   phase='same-task-list';let referenced=await target();const listed=await terminal('container-list',{containerRef:referenced.containerRef});
   check('Mod namespace discovered and generic task lists only machine output',referenced.id==='ironfurnaces:iron_furnace'&&listed.result.items.some(v=>v.item==='minecraft:iron_ingot'&&v.count===3)&&!listed.result.items.some(v=>v.item==='minecraft:diamond'),listed);
-  check('generic list leaves source bytes and menu closed',(await machineItems())===fields&&(await tool('get-container',{details:true}))===null);
+  check('generic list leaves source bytes and menu closed',(await machineItems())===fields&&(await tool('container-menu', { action: 'read', details:true}))===null);
 
   phase='actual-menu';block=await tool('get-block',{x:518,y:201,z:512});
-  await terminal('open-container',{...block.position,expectedBlock:block.id,expectedProperties:block.properties});
-  let menu=await tool('get-container',{details:true});evidence.menu={type:menu.type,slotCount:menu.slots.length,slots:menu.slots.map(v=>({slot:v.slot,source:v.source,playerSlot:v.playerSlot,id:v.id,count:v.count,active:v.active,mayPickup:v.mayPickup}))};
+  await terminal('container-menu', { action: 'open', ...block.position,expectedBlock:block.id,expectedProperties:block.properties});
+  let menu=await tool('container-menu', { action: 'read', details:true});evidence.menu={type:menu.type,slotCount:menu.slots.length,slots:menu.slots.map(v=>({slot:v.slot,source:v.source,playerSlot:v.playerSlot,id:v.id,count:v.count,active:v.active,mayPickup:v.mayPickup}))};
   const machineStack=menu.slots.find(v=>v.source==='container'&&v.id==='minecraft:iron_ingot');assert(machineStack);
   evidence.originalComponents=machineStack.components;
   check('machine output exact components and player inventory have distinct sources',machineStack.count===3&&JSON.stringify(machineStack.components).includes('D-safe-output')&&menu.slots.some(v=>v.source==='player'&&v.id==='minecraft:diamond'&&v.count===5)&&menu.slots.filter(v=>v.source==='player').length===36, evidence.menu);
   check('version-specific active/source mapping matches backing inventories',menu.slots.length===55&&menu.slots.filter(v=>v.source==='container'&&v.active).length===3&&menu.slots.find(v=>v.slot===19)?.playerSlot===9&&menu.slots.find(v=>v.slot===46)?.playerSlot===0&&menu.slots.find(v=>v.slot===13)?.active===false&&menu.slots.find(v=>v.slot===13)?.count===11);
-  await terminal('close-container',{containerId:menu.id,expectedRevision:menu.revision});
+  await terminal('container-menu', { action: 'close', containerId:menu.id,expectedRevision:menu.revision});
 
   phase='inactive-source';referenced=await target();const hiddenBefore=await machineItems();
   const hidden=await tool('container-withdraw',{containerRef:referenced.containerRef,item:'minecraft:diamond',count:11});
   check('hidden factory stack cannot become generic task source',hidden.status==='failed'&&hidden.result.withdrawnCount===0&&(await machineItems())===hiddenBefore,hidden);
 
   phase='partial-output-refusal';referenced=await target();const partial=await tool('container-withdraw',{containerRef:referenced.containerRef,item:'minecraft:iron_ingot',count:2});
-  check('unverified partial output reinsertion is refused without consumption',partial.status==='failed'&&partial.result.withdrawnCount===0&&(await machineItems())===fields&&(await tool('get-container',{details:true}))===null,partial);
+  check('unverified partial output reinsertion is refused without consumption',partial.status==='failed'&&partial.result.withdrawnCount===0&&(await machineItems())===fields&&(await tool('container-menu', { action: 'read', details:true}))===null,partial);
 
   phase='same-task-withdraw';referenced=await target();const taken=await terminal('container-withdraw',{containerRef:referenced.containerRef,item:'minecraft:iron_ingot',count:3});
-  const inventory=await tool('list-inventory'),iron=inventory.find(v=>v.id==='minecraft:iron_ingot');
+  const inventory=(await tool('get-status', { include: ['inventory'] })).inventory,iron=inventory.find(v=>v.id==='minecraft:iron_ingot');
   check('generic withdraw transfers whole Mod output stack with exact components',taken.result.withdrawnCount===3&&taken.result.heldCount===3&&taken.result.droppedCount===0&&iron?.count===3&&isDeepStrictEqual(iron.components,machineStack.components),taken);
   const inventoryNbt=await command('data get entity ModBot Inventory'),emptyOutput=await machineItems();
   check('independent authority proves output removed and Bot holds components',!emptyOutput.includes('minecraft:iron_ingot')&&inventoryNbt.includes('minecraft:iron_ingot')&&inventoryNbt.includes('D-safe-output')&&inventoryNbt.includes('count: 3'),{inventoryNbt,emptyOutput});
-  check('Bot diamonds conserved and menu cursor closed',inventory.find(v=>v.id==='minecraft:diamond')?.count===5&&(await tool('get-container',{details:true}))===null);
+  check('Bot diamonds conserved and menu cursor closed',inventory.find(v=>v.id==='minecraft:diamond')?.count===5&&(await tool('container-menu', { action: 'read', details:true}))===null);
 
   phase='inactive-slots';await fillOutput();
-  await terminal('open-container',{...block.position,expectedBlock:block.id,expectedProperties:block.properties});menu=await tool('get-container',{details:true});
+  await terminal('container-menu', { action: 'open', ...block.position,expectedBlock:block.id,expectedProperties:block.properties});menu=await tool('container-menu', { action: 'read', details:true});
   // Filled by the version-specific verified menu contract; these slots must never be treated as ordinary item cells.
   for(const index of [3,6,13]) {
     const stack=menu.slots.find(v=>v.slot===index);assert(stack,`inactive slot ${index} snapshot absent`);
-    const before=await machineItems(),clicked=await tool('click-slot',clickGuard(menu,stack));
+    const before=await machineItems(),clicked=await tool('container-menu',{action:'click',...clickGuard(menu,stack)});
     check(`inactive upgrade or factory slot ${index} refuses ordinary click`,clicked.status==='failed'&&clicked.result?.code==='UNSUPPORTED'&&(await machineItems())===before,clicked);
-    menu=await tool('get-container',{details:true});
+    menu=await tool('container-menu', { action: 'read', details:true});
   }
-  await terminal('close-container',{containerId:menu.id,expectedRevision:menu.revision});
+  await terminal('container-menu', { action: 'close', containerId:menu.id,expectedRevision:menu.revision});
 
   phase='unsupported-mod-block';await fixture('setblock 514 201 512 ironfurnaces:gold_furnace');
   const candidates=await tool('discover-containers',{radius:8,maxResults:16});
   check('unverified Mod tier is not advertised as supported candidate',candidates.candidates.every(v=>v.id!=='ironfurnaces:gold_furnace'));
   const gold=await tool('get-block',{x:514,y:201,z:512});
-  const goldRefused=await tool('open-container',{...gold.position,expectedBlock:gold.id,expectedProperties:gold.properties});
-  check('unverified Mod tier ordinary open is explicitly refused',goldRefused.status==='failed'&&goldRefused.result?.code==='UNSUPPORTED'&&(await tool('get-container',{details:true}))===null,goldRefused);
+  const goldRefused=await tool('container-menu', { action: 'open', ...gold.position,expectedBlock:gold.id,expectedProperties:gold.properties});
+  check('unverified Mod tier ordinary open is explicitly refused',goldRefused.status==='failed'&&goldRefused.result?.code==='UNSUPPORTED'&&(await tool('container-menu', { action: 'read', details:true}))===null,goldRefused);
   await fixture('setblock 514 201 512 air');
 
   phase='stop-during-mod-approach';await fixture('clear ModBot');await pose();referenced=await target();
@@ -134,23 +134,23 @@ try {
   check('dedicated Mod furnace is entirely empty before authorized dig',(await command('execute unless data block 522 201 514 Items[0]')).trim()==='Test passed');
   await fixture('item replace entity ModBot hotbar.1 with minecraft:diamond_pickaxe');
   await fixture('tp ModBot 520.5 201 514.5');await wait(300);
-  const toolBefore=(await tool('list-inventory')).find(v=>v.slot===1);
-  await terminal('select-slot',{slot:1,expectedItem:toolBefore.id,expectedCount:toolBefore.count,expectedComponents:toolBefore.components});
+  const toolBefore=(await tool('get-status', { include: ['inventory'] })).inventory.find(v=>v.slot===1);
+  await terminal('equip-item',{hand:'main',slot:1});
   const digBlock=await tool('get-block',{x:522,y:201,z:514});
   const dug=await terminal('dig-block',{...digBlock.position,expectedBlock:digBlock.id,expectedProperties:digBlock.properties,timeoutMs:15000});
   check('native survival dig removes exact empty namespaced furnace',(await command('execute if block 522 201 514 air')).trim()==='Test passed',dug);
-  const toolAfter=(await tool('list-inventory')).find(v=>v.slot===1);
+  const toolAfter=(await tool('get-status', { include: ['inventory'] })).inventory.find(v=>v.slot===1);
   check('native Mod dig wears the selected pickaxe',(toolAfter.components['minecraft:damage']?.value??0)>(toolBefore.components['minecraft:damage']?.value??0),{before:toolBefore.components,after:toolAfter.components});
   check('native Mod dig creates actual furnace item drop',(await command('execute if entity @e[type=minecraft:item,x=522,y=201,z=514,distance=..4,nbt={Item:{id:"ironfurnaces:iron_furnace"}}]')).trim().startsWith('Test passed'));
-  await wait(550);await terminal('move-to-position',{x:522.5,y:201,z:514.5,tolerance:0.3,timeoutMs:10000});
+  await wait(550);await terminal('go-to',{x:522.5,y:201,z:514.5,tolerance:0.3,timeoutMs:10000});
   let picked,deadline=performance.now()+5000;
-  while(performance.now()<deadline){picked=(await tool('list-inventory')).find(v=>v.id==='ironfurnaces:iron_furnace'&&v.count===1);if(picked)break;await wait(100);}
+  while(performance.now()<deadline){picked=(await tool('get-status', { include: ['inventory'] })).inventory.find(v=>v.id==='ironfurnaces:iron_furnace'&&v.count===1);if(picked)break;await wait(100);}
   check('native movement and pickup acquire one namespaced furnace item',!!picked,{picked});
   assert(picked.slot>=0&&picked.slot<=8,'Native item pickup must land in an available hotbar slot');
-  await terminal('move-to-position',{x:520.5,y:201,z:514.5,tolerance:0.3,timeoutMs:10000});
+  await terminal('go-to',{x:520.5,y:201,z:514.5,tolerance:0.3,timeoutMs:10000});
   const support=await tool('get-block',{x:522,y:200,z:514});
   const placed=await terminal('place-block',{...support.position,expectedBlock:support.id,expectedProperties:support.properties,face:'up',slot:picked.slot,expectedItem:picked.id,expectedCount:picked.count,expectedComponents:picked.components,timeoutMs:10000});
-  const afterPlace=await tool('list-inventory'),remaining=afterPlace.filter(v=>v.id==='ironfurnaces:iron_furnace').reduce((a,v)=>a+v.count,0);
+  const afterPlace=(await tool('get-status', { include: ['inventory'] })).inventory,remaining=afterPlace.filter(v=>v.id==='ironfurnaces:iron_furnace').reduce((a,v)=>a+v.count,0);
   check('native placement restores Mod furnace and consumes exactly one item',(await command('execute if block 522 201 514 ironfurnaces:iron_furnace')).trim()==='Test passed'&&remaining===0,{placed,remaining});
   check('placed dedicated Mod machine remains inventory empty',(await command('execute unless data block 522 201 514 Items[0]')).trim()==='Test passed');
   check('runtime stderr contains no credentials',!stderr.includes(connection.token)&&!stderr.includes(control.stopToken));evidence.result='passed';

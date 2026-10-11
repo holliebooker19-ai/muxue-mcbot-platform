@@ -63,7 +63,7 @@ async function until(read, accept, description, timeout = 20000) {
   while (Date.now() < deadline) { value = await read(); if (accept(value)) return value; await wait(100); }
   throw Error(description + ': ' + JSON.stringify(value));
 }
-const mode = () => tool('get-companion-mode');
+const mode = async () => (await tool('get-status')).companionMode;
 const settled = () => until(mode, value => value.state === 'waiting' && value.intent === 'follow' && value.activity !== 'picking-up' && value.activity !== 'switching', '未回到跟随等待');
 const follow = () => tool('companion-mode', { action: 'follow', player: 'C2Tester', distance: 2, pickup: { items: ['minecraft:snowball'], radius: 4 } });
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
@@ -73,7 +73,7 @@ async function position(name = 'Claude') {
   assert(fields?.length === 3 && fields.every(Number.isFinite), '独立位置证据无效');
   return { x: fields[0], y: fields[1], z: fields[2] };
 }
-async function amount(item) { return (await tool('list-inventory')).filter(stack => stack.id === item).reduce((n, stack) => n + stack.count, 0); }
+async function amount(item) { return (await tool('get-status', { include: ['inventory'] })).inventory.filter(stack => stack.id === item).reduce((n, stack) => n + stack.count, 0); }
 async function arena() {
   await tool('stop-action');
   await fixture('kill @e[type=minecraft:item,x=2400,y=199,z=2400,dx=44,dy=8,dz=44]');
@@ -110,7 +110,7 @@ try {
     '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--hosted'], cwd: root, stderr: 'pipe' });
   transport.stderr?.on('data', chunk => { stderr += chunk; }); client = new Client({ name: 'escort-real-smoke', version: '1' }); await client.connect(transport);
   const names = (await client.listTools()).tools.map(value => value.name);
-  check('陪伴与有限收取工具可用，底层拾取不作为模型工具', names.includes('companion-mode') && names.includes('get-companion-mode') && names.includes('collect-items') && !names.includes('pickup-item'));
+  check('陪伴与有限收取工具可用，底层拾取不作为模型工具', names.includes('companion-mode') && names.includes('collect-items') && !names.includes('pickup-item'));
   await startPeer(); await fixture('forceload add 2400 2400 2444 2444'); forced = true;
 
   phase = 'ordinary-follow'; await arena();

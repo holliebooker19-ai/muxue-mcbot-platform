@@ -61,7 +61,7 @@ async function tool(name, args = {}) {
   const text = reply.content[0].text; let value; try { value = JSON.parse(text); } catch { value = { text }; }
   return { error: !!reply.isError, value };
 }
-const mode = async () => (await tool('get-companion-mode')).value;
+const mode = async () => (await tool('get-status')).value.companionMode;
 async function until(read, predicate, description, timeout = 20000) {
   const deadline = Date.now() + timeout; let latest;
   while (Date.now() < deadline) { latest = await read(); if (predicate(latest)) return latest; await wait(250); }

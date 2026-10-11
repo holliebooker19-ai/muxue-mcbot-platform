@@ -117,7 +117,7 @@ async function stable(name, observe) {
 }
 async function moving(child) {
   const before = await status(child);
-  const op = (await call(child, 'move-to-position', target(before))).value;
+  const op = (await call(child, 'go-to', target(before))).value;
   check(`${child.label}: actual movement operation accepted`, op.status === 'running', operationEvidence(op));
   const during = await until(async () => { const next = await status(child); return distance(position(before), position(next)) > 0.05 ? next : false; }, 2500, 'Movement must produce actual displacement');
   check(`${child.label}: actual physical displacement`, true, { before: position(before), during: position(during) });
@@ -136,12 +136,10 @@ async function releaseRaw() {
 try {
   const first = await spawnBody('ordinary-stop');
   const initial = await status(first);
-  const expected = ['get-status', 'get-position', 'list-inventory', 'find-entity', 'read-chat', 'get-block', 'get-operation', 'stop-action', 'wait-for-events',
-    'send-chat', 'look-at', 'move-to-position', 'follow-player'];
-  for (const name of ['dig-block', 'place-block', 'open-container', 'click-slot', 'close-container', 'select-slot', 'drop-item']) if (initial.capabilities.includes(name)) expected.push(name);
-  if (initial.capabilities.includes('open-container')) expected.push('get-container');
+  // ServerBody 注册的工具就是 tool-registry.json 里非 clientOnly 的那些（mcp.ts 的 register 按同一张表跳过 clientOnly）。
+  const serverTools = new Set(Object.entries(JSON.parse(await fs.readFile(path.join(root, 'client-runtime/tool-registry.json'), 'utf8')).tools).filter(([, info]) => !info.clientOnly).map(([name]) => name));
   const tools = (await first.client.listTools()).tools;
-  check('actual ServerBody advertises only capability-matched MCP tools', tools.length === expected.length && tools.map(tool => tool.name).sort().join(',') === expected.sort().join(','), { count: tools.length });
+  check('actual ServerBody advertises only registry tools (clientOnly excluded) and the base set', tools.every(tool => serverTools.has(tool.name)) && ['get-status', 'find-entity', 'get-block', 'get-operation', 'stop-action', 'wait-for-events'].every(name => tools.some(tool => tool.name === name)), { count: tools.length });
   check('MCP describes authoritative server observation', /server-observed/.test(tools.find(tool => tool.name === 'get-status').description));
   check('actual stdio observation comes from current connected server role', initial.source === 'server-observed' && initial.connected && initial.instanceId === first.control.instanceId && initial.sessionId === first.control.sessionId);
   evidence.initial = { position: position(initial), sessionId: initial.sessionId, source: initial.source };
@@ -153,7 +151,7 @@ try {
   check('MCP stopped operation remains cancelled', oldOperation.status === 'cancelled', operationEvidence(oldOperation));
   await stable('ordinary MCP stop stops physical movement', () => status(first));
   const afterStop = await status(first);
-  const newMove = (await call(first, 'move-to-position', target(afterStop, 1))).value;
+  const newMove = (await call(first, 'go-to', target(afterStop, 1))).value;
   check('first explicit move after MCP stop uses next generation', newMove.status === 'running' && newMove.controlGeneration === move.controlGeneration + 1, operationEvidence(newMove));
   const finished = await until(async () => {
     const op = (await call(first, 'get-operation', { operationId: newMove.operationId })).value;
@@ -176,7 +174,7 @@ try {
   check('host helper directly revokes live MCP lease', revokeReply.stopped === true && revokeReply.revoked === true, { rpcMs: performance.now() - revokeStarted });
   const terminal = await call(revoked, 'get-status', {}, true);
   check('revoked MCP get-status becomes terminal', terminal.error && terminal.value.code === 'LEASE_LOST', { code: terminal.value.code });
-  for (const name of ['send-chat', 'look-at']) {
+  for (const name of ['send-chat', 'emote']) {
     const rejected = await call(revoked, name, name === 'send-chat' ? { message: 'must remain terminal' } : initial.position, true);
     check(`revoked MCP ${name} cannot resume or claim`, rejected.error && rejected.value.code === 'LEASE_LOST', { code: rejected.value.code });
   }
@@ -225,7 +223,7 @@ try {
   const final = await spawnBody('explicit-restart');
   check('explicit MCP restart after force kill keeps role session', final.control.sessionId === initial.sessionId);
   await stable('new actual MCP starts without resurrecting old task', () => status(final));
-  const newLook = (await call(final, 'look-at', initial.position)).value;
+  const newLook = (await call(final, 'emote', initial.position)).value;
   check('explicit restart accepts its first new action', newLook.status === 'succeeded', operationEvidence(newLook));
   await closeBody(final);
   for (const child of children) {

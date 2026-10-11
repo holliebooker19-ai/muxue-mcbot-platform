@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 10-08 试玩反馈的三处修正实测：隔离服高空平台上，不用测试玩家、不调用模型。
 //   1. equip-item：下界合金胸甲穿上；钻石胸甲换上、下界合金的换回背包；铁头盔戴上；石头不是护甲，被拒绝；
-//   2. 游泳：Claude 在 4 格深的水池中央，move-to-position 到岸上的点，游到岸边爬上去走到；
+//   2. 游泳：Claude 在 4 格深的水池中央，go-to 到岸上的点，游到岸边爬上去走到；
 //   2b. 加 --with-peer（要先挪开测试服的客户端模组）：测试玩家站在岸上，Claude 在水池里开始跟随，游上岸走到玩家身边；
 //   3. 下线：宿主带 leave 撤销后 Claude 下线；新的 MCP 接管时在原地重新上线，护甲还在；最后再下线。
 // 不启停服务器、不计算哈希。需要：隔离服开着（25568），服务器上没有别的真人玩家。
@@ -139,7 +139,7 @@ try {
   // 2. 游泳上岸：从水池中央（水下）走到池外 6 格的岸上
   await fixture(`tp Claude 4007.5 ${Y - 2} 4007.5`); await wait(800);
   const target = { x: 4016.5, y: Y + 1, z: 4007.5 };
-  op = await finished('move-to-position', { ...target, timeoutMs: 40000 });
+  op = await finished('go-to', { ...target, timeoutMs: 40000 });
   const landed = await pos('Claude');
   check('从水里游上岸，走到岸上的目标点', op.status === 'succeeded' && Math.hypot(landed.x - target.x, landed.z - target.z) < 1.5 && Math.abs(landed.y - target.y) < 0.6,
     { status: op.status, summary: op.summary, landed, navigation: op.result?.navigation });
@@ -147,7 +147,7 @@ try {
   // 反方向：池子另一侧的岸上
   await fixture(`tp Claude 4007.5 ${Y - 2} 4007.5`); await wait(800);
   const back = { x: 4001.5, y: Y + 1, z: 4007.5 };
-  op = await finished('move-to-position', { ...back, timeoutMs: 40000 });
+  op = await finished('go-to', { ...back, timeoutMs: 40000 });
   const other = await pos('Claude');
   check('另一侧也能游上岸', op.status === 'succeeded' && Math.hypot(other.x - back.x, other.z - back.z) < 1.5, { status: op.status, summary: op.summary, other });
 
@@ -155,7 +155,7 @@ try {
   await fixture(`fill 4012 ${Y - 1} 4001 4018 ${Y} 4003 air`); await fixture(`fill 4012 ${Y - 1} 4001 4018 ${Y - 1} 4003 water`);
   await fixture(`tp Claude 4015.5 ${Y - 1} 4002.5`); await wait(1200);
   const up = { x: 4015.5, y: Y + 1, z: 4006.5 };
-  op = await finished('move-to-position', { ...up, timeoutMs: 40000 });
+  op = await finished('go-to', { ...up, timeoutMs: 40000 });
   const high = await pos('Claude');
   report.highBankOnly = { status: op.status, summary: op.summary, at: high, navigation: op.result?.navigation };
   console.log('只有高一格的岸：', JSON.stringify(report.highBankOnly));
@@ -164,7 +164,7 @@ try {
   // 加一个和水面齐平的缺口（离起点比高岸远），应该改从缺口上岸
   await fixture(`setblock 4011 ${Y} 4002 air`);
   await fixture(`tp Claude 4015.5 ${Y - 1} 4002.5`); await wait(1200);
-  op = await finished('move-to-position', { ...up, timeoutMs: 40000 });
+  op = await finished('go-to', { ...up, timeoutMs: 40000 });
   const out = await pos('Claude');
   check('有齐平的缺口时从缺口上岸，走到目标', op.status === 'succeeded' && Math.hypot(out.x - up.x, out.z - up.z) < 1.5 && Math.abs(out.y - up.y) < 0.6,
     { status: op.status, summary: op.summary, out, navigation: op.result?.navigation });
@@ -179,7 +179,7 @@ try {
     await fixture(`tp Claude 4007.5 ${Y - 2} 4007.5`); await wait(800);
     const started = await tool('companion-mode', { action: 'follow', player: 'C2Tester', guard: false });
     check('在水里也能开始跟随', !started.error && started.value.state !== 'blocked', started.value);
-    const settled = await until(async () => (await tool('get-companion-mode')).value, value => ['waiting', 'blocked', 'stopped'].includes(value.state), '跟随没有走到玩家身边', 40000);
+    const settled = await until(async () => (await tool('get-status')).value.companionMode, value => ['waiting', 'blocked', 'stopped'].includes(value.state), '跟随没有走到玩家身边', 40000);
     const at = await pos('Claude'), player = await pos('C2Tester');
     check('游上岸走到玩家身边，跟随没有中断', settled.state === 'waiting' && Math.abs(at.y - (Y + 1)) < 0.6 && Math.hypot(at.x - player.x, at.z - player.z) < 4, { settled, at, player });
     await tool('companion-mode', { action: 'stop' });

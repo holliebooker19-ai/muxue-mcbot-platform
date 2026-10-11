@@ -72,7 +72,7 @@ try {
   await client.connect(new StdioClientTransport({ command: process.execPath, cwd: root, stderr: 'pipe',
     args: [path.join(root, 'client-runtime/dist/main.js'), '--body', 'server', '--connection-file', path.join(serverDir, 'config/mcbot-server-control/connection.json'),
       '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()] }));
-  await tool('get-companion-mode');
+  await tool('get-status');
 
   // 1. 没有动作：测试玩家站在旁边，Bot 转头看她
   await command('tp Claude 3.5 96 -6.5'); await wait(1500);
@@ -102,11 +102,11 @@ try {
   // 4. 明确的 look-at 之后几秒内不被待机转头覆盖
   await place(7.5, 95, -6.5); await wait(2500);
   const bot = await vec('Claude', 'Pos');
-  const look = await tool('look-at', { x: bot[0], y: bot[1] + 1.6, z: bot[2] - 10 });
-  check('look-at 成功', !look.error, look.value);
+  const look = await tool('emote', { x: bot[0], y: bot[1] + 1.6, z: bot[2] - 10 });
+  check('emote 看向成功', !look.error, look.value);
   await wait(1500);
   const held = (await vec('Claude', 'Rotation'))[0];
-  check('look-at 后 1.5 秒仍看着指定方向（北边，yaw≈180）', Math.abs(wrap(held - 180)) <= 10, { held });
+  check('emote 看向后 1.5 秒仍看着指定方向（北边，yaw≈180）', Math.abs(wrap(held - 180)) <= 10, { held });
   await wait(3500);
   s = await facingError('GazePeer');
   check('之后又回头看旁边的玩家', s.error <= 20, s);
@@ -115,7 +115,7 @@ try {
   const follow = await tool('companion-mode', { action: 'follow', player: 'GazePeer' });
   check('开始跟随测试玩家', !follow.error, follow.value);
   await place(4.5, 97, -11.5); await wait(6000);
-  const state = (await tool('get-companion-mode')).value;
+  const state = (await tool('get-status')).value.companionMode;
   s = await facingError('GazePeer');
   check('跟随等待中（waiting）也转头看玩家', JSON.stringify(state).includes('waiting') && s.error <= 20, { state, ...s });
   await tool('stop-action');

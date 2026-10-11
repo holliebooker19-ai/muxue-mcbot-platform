@@ -124,7 +124,7 @@ async function terminal(name, args, supplied) {
   const row = safe({ ...stamp(), session: active?.index, name, args, ms: Math.round(performance.now() - started), operation: op });
   evidence.tasks.push(row); record('task-terminal', row); return op;
 }
-const mode = () => tool('get-companion-mode');
+const mode = async () => (await tool('get-status')).companionMode;
 const settled = () => until(mode, value => value.state === 'waiting' && value.intent === 'follow' && value.stage === 'active' && !['switching', 'picking-up'].includes(value.activity), '未进入跟随等待');
 const follow = () => tool('companion-mode', { action: 'follow', player: 'C2Tester', distance: 2, pickup: { items: ['minecraft:snowball'], radius: 4 } });
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
@@ -132,7 +132,7 @@ async function position(name = 'Claude') {
   const text = await command(`data get entity ${name} Pos`), fields = text.match(/\[([^\]]+)\]/)?.[1].split(',').map(value => Number.parseFloat(value));
   assert(fields?.length === 3 && fields.every(Number.isFinite), '独立位置证据无效'); return { x: fields[0], y: fields[1], z: fields[2] };
 }
-const amount = async item => (await tool('list-inventory')).filter(stack => stack.id === item).reduce((sum, stack) => sum + stack.count, 0);
+const amount = async item => (await tool('get-status', { include: ['inventory'] })).inventory.filter(stack => stack.id === item).reduce((sum, stack) => sum + stack.count, 0);
 async function stationary(name, duration = 900) {
   const first = await position(); await wait(duration); const last = await position();
   check(name, distance(first, last) < 0.15, { first, last, durationMs: duration }); return last;
@@ -212,7 +212,7 @@ async function connect(label) {
   await session.client.connect(session.transport); session.lease = evidence.leases.at(-1)?.index;
   record('explicit-claim', { session: index, lease: session.lease, label });
   const names = (await session.client.listTools()).tools.map(value => value.name);
-  check('显式接管列出既有混合工具', ['companion-mode', 'get-companion-mode', 'collect-items', 'discover-containers', 'fetch-and-give', 'stop-action'].every(name => names.includes(name)), { session: index, toolCount: names.length });
+  check('显式接管列出既有混合工具', ['companion-mode', 'collect-items', 'discover-containers', 'container-withdraw', 'give-item', 'stop-action'].every(name => names.includes(name)), { session: index, toolCount: names.length });
   const state = await mode(); check('新接管没有旧陪伴意图', state.state === 'idle' && !state.intent && !state.pickup, state);
   const status = await tool('get-status'); check('夹具角色位于预期主世界', status.dimension === 'minecraft:overworld', { dimension: status.dimension });
 }
@@ -279,12 +279,13 @@ async function roundBody() {
     await wait(350); const found = await tool('discover-containers', { radius: 8, maxResults: 16 });
     const target = found.candidates.find(value => value.position.x === 2415 && value.position.y === 201 && value.position.z === 2422); assert(target, '没有发现指定夹具箱子');
     const floor = (await peerEvents()).length;
+    // TODO(ServerBody 合并)：fetch-and-give 已删。合成任务的结果与取消测试待改写。
     const op = await terminal('fetch-and-give', { containerRef: target.containerRef, item: 'minecraft:oak_log', count: 3, player: 'C2Tester', say: `第${round}轮，我取三个原木给你。` });
     check('容器任务确认取出／丢出各三，未编造玩家拾取', op.status === 'succeeded' && op.result?.withdrawnCount === 3 && op.result?.droppedCount === 3 && op.result?.pickup === 'unconfirmed', op);
     await until(async () => { await send({ type: 'inventory' }); return peerEvents(); }, rows => rows.slice(floor).some(row => row.type === 'inventory' && row.inventory.some(item => item.name === 'oak_log' && item.count === 3)), '指定玩家未实收三个原木', 12000);
     const chest = await command('data get block 2415 201 2422 Items'), received = await command('data get entity C2Tester Inventory');
     check('独立服务端核对箱子剩五／玩家收到三', chest.includes('minecraft:oak_log') && /count: 5(?:[,}])/.test(chest) && received.includes('minecraft:oak_log') && /count: 3(?:[,}])/.test(received), { chest, received });
-    check('取物任务关箱且不恢复陪伴', (await tool('get-container', { details: true })) === null && !(await mode()).intent);
+    check('取物任务关箱且不恢复陪伴', (await tool('container-menu', { action: 'read', details: true })) === null && !(await mode()).intent);
   });
   await step(`round-${round}-container-stop-immediate-new`, async () => {
     await fixture('tp Claude 2422.5 201 2422.5'); await fixture('tp C2Tester 2421.5 201 2422.5');
@@ -295,6 +296,7 @@ async function roundBody() {
     const target = found.candidates.find(value => value.position.x === 2430 && value.position.y === 201 && value.position.z === 2422); assert(target, '未发现远处取消夹具箱子');
     const floor = evidence.rpc.length;
     // 容器任务调用要保持在途；先安装失败处理，避免取消响应变成未处理 rejection。
+    // TODO(ServerBody 合并)：fetch-and-give 已删。停止合成任务的测试待改写。
     const oldPending = tool('fetch-and-give', { containerRef: target.containerRef, item: 'minecraft:oak_log', count: 48, player: 'C2Tester' }, true)
       .then(value => ({ value }), error => ({ error }));
     const rows = await until(async () => evidence.rpc.slice(floor), values => values.some(row => row.method === 'act' && row.action === 'approach-container' && row.ok && row.status === 'running'), '容器任务未受理走近箱子的原生动作');
@@ -306,6 +308,7 @@ async function roundBody() {
     const first = await terminal('collect-items', { item: 'minecraft:dirt', count: 1, radius: 6 }, fresh);
     const oldReply = await oldPending;
     if (oldReply.error) throw oldReply.error;
+    // TODO(ServerBody 合并)：cancelled-fetch-and-give 不是注册的工具名，待改写。
     const cancelled = await terminal('cancelled-fetch-and-give', {}, oldReply.value);
     check('真实在途容器任务 stop 后 cancelled', cancelled.status === 'cancelled', cancelled);
     check('容器 stop 确认后首个新有限任务成功（R4 不重试）', first.status === 'succeeded' && first.result?.pickedUpCount === 1, first);

@@ -77,7 +77,7 @@ try {
   transport.stderr?.on('data', data => { fs.appendFile(path.join(dir, 'runtime-stderr.log'), redact(data.toString())).catch(() => {}); });
   await client.connect(transport);
   // The body comes online with the controller; only then can it be moved and cleared.
-  await tool('get-position');
+  await tool('get-status');
   await command(`tp Claude ${start.join(' ')}`); await wait(1500);
   await command('clear Claude'); await command('xp set Claude 0 levels'); await command('xp set Claude 0 points');
   const names = (await client.listTools()).tools.map(t => t.name);

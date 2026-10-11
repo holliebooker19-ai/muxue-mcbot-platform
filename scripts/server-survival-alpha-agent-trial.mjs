@@ -171,20 +171,21 @@ try {
     catch (error) { decodeFailure = error; }
   });
   const context = '这是隔离服固定评测输入，不是玩家游戏聊天。只使用Minecraft MCP，只操作本次列出的测试物品，不移动、不挖放、不追逐实体。running不是完成，请查询get-operation直至终态；failed/unknown立即报告并停止，不重试。';
-  await phase('query-and-policy', context + '先get-survival-state读取有效policy revision，然后set-reflexes使用该expectedRevision设置autoEat:false、armed:false、toolPolicy:fastest_valid。不要吃东西。', ['get-survival-state', 'set-reflexes'], async row => {
+  await phase('query-and-policy', context + '先get-status(include:["survival"])读取survival里的有效policy revision，然后set-reflexes使用该expectedRevision设置autoEat:false、armed:false、toolPolicy:fastest_valid。不要吃东西。', ['get-status', 'set-reflexes'], async row => {
     const accepted = row.responses.find(value => value.name === 'set-reflexes' && value.value?.autoEat === false
       && value.value.armed === false && value.value.toolPolicy === 'fastest_valid');
     assert(accepted, 'No parsed successful effective disarmed autoEat:false/fastest_valid policy receipt');
   });
   // Food is introduced only after the model disabled automatic consumption.
   await fixture('item replace entity Claude inventory.2 with minecraft:bread 3');
-  await phase('prepare-backpack-tool', context + '使用prepare-item将主背包slot:10的钻石镐准备到targetSlot:0。确认成功后结束这一阶段，不吃东西。', ['prepare-item'], async row => {
+  await phase('prepare-backpack-tool', context + '使用equip-item(hand:"main")将主背包slot:10的钻石镐准备到targetSlot:0。确认成功后结束这一阶段，不吃东西。', ['equip-item'], async row => {
     assert(row.responses.some(value => ['prepare-item', 'get-operation'].includes(value.name) && value.value?.status === 'succeeded'), 'No parsed successful prepare-item operation receipt');
     const preparedId = await command('data get entity Claude Inventory[{Slot:0b}].id');
     assert(/entity data:\s*"minecraft:diamond_pickaxe"\s*$/.test(preparedId), 'Independent hotbar slot 0 did not contain the prepared pickaxe');
     assert.equal(integerField(await command('data get entity Claude SelectedItemSlot')), 0);
   });
   const beforeAssess = await command('data get entity Claude Inventory');
+  // TODO(ServerBody 合并)：assess-tool 已删、没有直接替代，这个阶段仍用旧名，待决定删除或改写（不改会 unknown tool）。
   await phase('assess-native-tool', context + '调用assess-tool评估x:2414,y:201,z:2422、expectedBlock:minecraft:stone，policy:fastest_valid、dropPreference:any。简短说明当前推荐及估计的边界，不换手、不挖。', ['assess-tool'], async row => {
     assert(row.responses.some(value => value.name === 'assess-tool' && value.value?.blockId === 'minecraft:stone' && Array.isArray(value.value.candidates)), 'No parsed native tool assessment of the fixture block');
     assert.equal(await command('data get entity Claude Inventory'), beforeAssess); assert.equal(integerField(await command('data get entity Claude SelectedItemSlot')), 0);
@@ -196,8 +197,8 @@ try {
     const counts = await command('data get entity Claude Inventory[{id:"minecraft:bread"}].count'); assert.equal(integerField(counts), 2);
     row.foodBefore = beforeFood; row.foodAfter = await foodLevel(); assert(row.foodAfter > beforeFood);
   });
-  await phase('game-completion-message', context + '用send-chat发送精确文本ALPHA_AGENT_DONE，然后get-survival-state查询当前状态，确认autoEat仍false。不再操作物品，结束本次评测。', ['send-chat', 'get-survival-state'], async row => {
-    assert(row.responses.some(value => value.name === 'get-survival-state' && value.value?.policy?.autoEat === false), 'No final effective autoEat:false state receipt');
+  await phase('game-completion-message', context + '用send-chat发送精确文本ALPHA_AGENT_DONE，然后get-status(include:["survival"])查询当前状态，确认autoEat仍false。不再操作物品，结束本次评测。', ['send-chat', 'get-status'], async row => {
+    assert(row.responses.some(value => value.name === 'get-status' && value.value?.survival?.policy?.autoEat === false), 'No final effective autoEat:false state receipt');
     await until(async () => (await peerEvents()).some(event => event.type === 'chat' && event.username === 'Claude' && event.message === 'ALPHA_AGENT_DONE' && Date.parse(event.time) >= row.start), 'independent in-game completion marker', 3000);
     row.independentGameChatObserved = true;
   });

@@ -77,7 +77,7 @@ try {
     while (Date.now() - started < 20000) {
       await wait(1000);
       bot = await posOf('Claude');
-      state = (await tool('get-companion-mode')).value;
+      state = (await tool('get-status')).value.companionMode;
       if (JSON.stringify(state).includes('"blocked"') || JSON.stringify(state).includes('BLOCKED') || dist(bot, target) <= 3.5) break;
     }
     const leg = { target, bot, distance: Math.round(dist(bot, target) * 10) / 10, seconds: Math.round((Date.now() - started) / 100) / 10, heightDiff: Math.round((target[1] - bot[1]) * 10) / 10, state };

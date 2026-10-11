@@ -112,7 +112,7 @@ try {
   check('半径 6 找不到这根原木', !(near.candidates ?? []).length, near);
   const found = await tool('discover-resources', { blockIds: ['minecraft:oak_log'], radius: 16 });
   check('半径 16 找到这根原木', found.candidates?.some(c => c.position.x === log[0] && c.position.y === log[1] && c.position.z === log[2]), found);
-  const before = (await tool('list-inventory')).filter?.(s => s.item === 'minecraft:oak_log' || s.id === 'minecraft:oak_log').reduce((n, s) => n + s.count, 0) ?? 0;
+  const before = (await tool('get-status', { include: ['inventory'] })).inventory.filter?.(s => s.item === 'minecraft:oak_log' || s.id === 'minecraft:oak_log').reduce((n, s) => n + s.count, 0) ?? 0;
   let op = await tool('gather-resources', { resourceRef: found.resourceRef, item: 'minecraft:oak_log', count: 1, timeoutMs: 60000 });
   const started = Date.now();
   while (op.status === 'running' && Date.now() - started < 70000) { await wait(1000); op = await tool('get-operation', { operationId: op.operationId }); }

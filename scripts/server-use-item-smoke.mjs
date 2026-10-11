@@ -70,7 +70,7 @@ try {
   const tools = (await client.listTools()).tools;
   const interact = tools.find(t => t.name === 'interact-block');
   check('真实 MCP 发布 interact-block，不发布原子动作', interact && !tools.some(t => t.name === 'use-item-on-block' || t.name === 'use-item'), { toolCount: tools.length });
-  const survival = (await tool('get-survival-state', { details: false })).value;
+  const survival = (await tool('get-status', { include: ['survival'], details: false })).value.survival;
   await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false }); await tool('stop-action');
 
   await fixture('forceload add 6392 6392 6415 6415'); forced.push('6392 6392 6415 6415');

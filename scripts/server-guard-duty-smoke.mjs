@@ -64,7 +64,7 @@ async function tool(name, args = {}) {
   const text = reply.content[0].text; let value; try { value = JSON.parse(text); } catch { value = { text }; }
   return { error: !!reply.isError, value };
 }
-const mode = async () => (await tool('get-companion-mode')).value;
+const mode = async () => (await tool('get-status')).value.companionMode;
 async function until(read, predicate, description, timeout = 20000) {
   const deadline = Date.now() + timeout; let latest;
   while (Date.now() < deadline) { latest = await read(); if (predicate(latest)) return latest; await wait(250); }
@@ -137,7 +137,7 @@ try {
     const spot = await pos('Claude');
     await summon('husk', P.x + 6, P.z, 'w1', ',NoAI:1b');
     await until(async () => !(await exists('w1')), v => v, '等待中玩家身边的尸壳没被打死', 30000);
-    // get-companion-mode does not show the walk back: watch the body come back instead.
+    // get-status 的 companionMode 不显示走回去的过程: watch the body come back instead.
     const at = await until(() => pos('Claude'), p => distance(p, spot) <= 2, '打完没有回原地', 20000).catch(async () => pos('Claude'));
     const back = await mode();
     report.runs.wait = { guard: back.guard, spot, at };

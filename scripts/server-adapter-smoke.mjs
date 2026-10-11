@@ -74,9 +74,9 @@ try {
     '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()], cwd: root, stderr: 'pipe' });
   client = new Client({ name: 'adapter-fixture', version: '1' }); await client.connect(transport);
   const tools = (await client.listTools()).tools;
-  check('interact-block 的说明列出 JSON 交互，open-container 的说明列出 Mod 适配', tools.find(t => t.name === 'interact-block')?.description.includes('minecraft:respawn_anchor/charge') &&
-    tools.find(t => t.name === 'open-container')?.description.includes('ironfurnaces:iron_furnace'));
-  const survival = (await tool('get-survival-state', { details: false })).value;
+  check('interact-block 的说明列出 JSON 交互，container-menu 的说明列出 Mod 适配', tools.find(t => t.name === 'interact-block')?.description.includes('minecraft:respawn_anchor/charge') &&
+    tools.find(t => t.name === 'container-menu')?.description.includes('ironfurnaces:iron_furnace'));
+  const survival = (await tool('get-status', { include: ['survival'], details: false })).value.survival;
   await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false }); await tool('stop-action');
 
   await fixture('forceload add 6392 6392 6415 6415'); forced.push('6392 6392 6415 6415');
@@ -120,21 +120,21 @@ try {
   const taken = await terminal('container-withdraw', { containerRef: again.containerRef, item: 'minecraft:iron_ingot', count: 3 });
   check('container-withdraw 取出 3 个铁锭', taken.status === 'succeeded' && count(await inventory(), 'minecraft:iron_ingot') === 3, taken);
   const furnaceBlock = await block(...FURNACE);
-  const opened = await terminal('open-container', { ...xyz(FURNACE), expectedBlock: furnaceBlock.id, expectedProperties: furnaceBlock.properties });
-  const menu = (await tool('get-container', { details: true })).value;
+  const opened = await terminal('container-menu', { action: 'open', ...xyz(FURNACE), expectedBlock: furnaceBlock.id, expectedProperties: furnaceBlock.properties });
+  const menu = (await tool('container-menu', { action: 'read', details: true })).value;
   const sources = menu?.slots?.reduce((m, s) => ({ ...m, [s.source]: (m[s.source] ?? 0) + 1 }), {});
   check('打开铁炉：55 个槽，19 个归容器、36 个归玩家，没有来源不明的槽', opened.status === 'succeeded' && menu?.slots?.length === 55 && sources.container === 19 && sources.player === 36 && !sources.unknown, { opened, sources });
-  await terminal('close-container', { containerId: menu.id, expectedRevision: menu.revision });
+  await terminal('container-menu', { action: 'close', containerId: menu.id, expectedRevision: menu.revision });
 
   // 5. 没验证过的同 Mod 方块：不当作容器，也打不开
   await fixture(`setblock ${at(GOLD)} ironfurnaces:gold_furnace`); await wait(200);
   const list2 = (await tool('discover-containers', { radius: 8, maxResults: 16 })).value.candidates ?? [];
   check('金炉（没验证过）不出现在可用容器里', list2.every(c => c.id !== 'ironfurnaces:gold_furnace'), list2.map(c => c.id));
   const goldBlock = await block(...GOLD);
-  const gold = await tool('open-container', { ...xyz(GOLD), expectedBlock: goldBlock.id, expectedProperties: goldBlock.properties });
+  const gold = await tool('container-menu', { action: 'open', ...xyz(GOLD), expectedBlock: goldBlock.id, expectedProperties: goldBlock.properties });
   let goldResult = gold.value;
   if (!gold.error && goldResult.status === 'running') goldResult = await terminal('get-operation', { operationId: goldResult.operationId, details: true });
-  check('打开金炉：UNSUPPORTED，菜单没开', (gold.error ? gold.value.code : goldResult.result?.code ?? goldResult.code) === 'UNSUPPORTED' && (await tool('get-container', { details: true })).value === null, gold.value);
+  check('打开金炉：UNSUPPORTED，菜单没开', (gold.error ? gold.value.code : goldResult.result?.code ?? goldResult.code) === 'UNSUPPORTED' && (await tool('container-menu', { action: 'read', details: true })).value === null, gold.value);
   report.result = 'passed';
 } catch (error) {
   report.result = 'failed'; report.error = redact(error.stack ?? error.message); process.exitCode = 1; console.error(redact(error.message));

@@ -71,7 +71,7 @@ try {
   await fixture(`execute at ${values.player} run tp ${fresh.username} ~3 ~ ~`); await wait(500);
   const follow = await tool('companion-mode', { action: 'follow', player: values.player, distance: 2.5 });
   check('跟随单人世界的房主', !follow.error, follow.value);
-  const following = await until(async () => (await tool('get-companion-mode')).value, value => ['following', 'waiting'].includes(value.state) && value.stage === 'active', '跟随没有进入稳定状态');
+  const following = await until(async () => (await tool('get-status')).value.companionMode, value => ['following', 'waiting'].includes(value.state) && value.stage === 'active', '跟随没有进入稳定状态');
   check('跟随进入稳定状态', true, following);
   const stopped = await tool('stop-action');
   check('叫停', !stopped.error, stopped.value);

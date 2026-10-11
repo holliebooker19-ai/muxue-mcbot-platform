@@ -252,7 +252,7 @@ async function acceptedPolicy(row, expected) {
   assert(matching, 'No successful effective policy with expected fields'); row.policy = matching.policy; return matching.policy;
 }
 async function disable() {
-  return request('read-survival-and-disable-reflexes', '只调用get-survival-state读取生命、饥饿、有效策略revision，再set-reflexes当前expectedRevision设autoEat:false、autoDefend:false、armed:false；不移动攻击。', ['get-survival-state', 'set-reflexes'], row => acceptedPolicy(row, { autoEat: false, autoDefend: false, armed: false }));
+  return request('read-survival-and-disable-reflexes', '只调用get-status(include:["survival"])读取生命、饥饿、有效策略revision，再set-reflexes当前expectedRevision设autoEat:false、autoDefend:false、armed:false；不移动攻击。', ['get-status', 'set-reflexes'], row => acceptedPolicy(row, { autoEat: false, autoDefend: false, armed: false }));
 }
 async function hardStop(name = 'explicit-hard-stop') {
   const offset = (await driverText()).length, row = { name, start: Date.now(), result: 'running' }; report.phases.push(row);
@@ -317,7 +317,8 @@ try {
     report.natural.observedHeightRange = { min: Math.min(...heights), max: Math.max(...heights) };
     report.natural.actualBodyMotion = totalMotion; await hardStop('natural-follow-hard-stop'); report.natural.result = 'passed';
   } else {
-    await request('read-tool-and-prepare-main-inventory', '用assess-tool评估2816,201,2813的minecraft:iron_ore，dropPreference:no_silk_touch；prepare-item槽10到targetSlot:0，再prepare-item槽11到targetSlot:1，不吃不挖。', ['assess-tool', 'prepare-item'], async row => {
+    // TODO(ServerBody 合并)：assess-tool 已删，这个阶段待改写（不改会 unknown tool）。
+    await request('read-tool-and-prepare-main-inventory', '用assess-tool评估2816,201,2813的minecraft:iron_ore，dropPreference:no_silk_touch；equip-item(hand:"main")槽10到targetSlot:0，再equip-item(hand:"main")槽11到targetSlot:1，不吃不挖。', ['assess-tool', 'equip-item'], async row => {
       row.inventory = await command('data get entity Claude Inventory');
       assert(/^Test passed/.test(await command('execute if items entity Claude weapon.mainhand minecraft:bread')), 'Last prepared bread was not selected');
       assert(/^Test passed/.test(await command('execute if items entity Claude hotbar.0 minecraft:diamond_pickaxe')));
@@ -329,7 +330,7 @@ try {
     try { await until(async () => await nativeNumber('foodLevel') <= 10, 'Actual native hunger', 9000); }
     finally { await fixture('effect clear Claude minecraft:hunger'); }
     const beforeFood = await nativeNumber('foodLevel');
-    await request('native-main-inventory-food', 'get-survival-state读现在饥饿；用eat-food槽11只吃一次，确认后报告原生消费；不改本能，不采矿。', ['get-survival-state', 'eat-food'], async row => {
+    await request('native-main-inventory-food', 'get-status(include:["survival"])读现在饥饿；用eat-food槽11只吃一次，确认后报告原生消费；不改本能，不采矿。', ['get-status', 'eat-food'], async row => {
       const op = await receipt(row, 'eat'); assert.equal(op.result?.consumedCount, 1); assert.equal(op.result?.consumption, 'confirmed');
       assert.equal(await inventoryCount('minecraft:bread'), 2); row.foodBefore = beforeFood; row.foodAfter = await nativeNumber('foodLevel'); assert(row.foodAfter > beforeFood);
     });
@@ -341,11 +342,11 @@ try {
     await fixture('item replace entity Claude inventory.3 with minecraft:diamond_axe');
     await fixture(`summon minecraft:husk ${defenseBody.x + 2} ${defenseBody.y} ${defenseBody.z} {Tags:["mcbot_alpha_codex_defense"],PersistenceRequired:1b,NoAI:1b,Silent:1b}`);
     defenseTarget = await taggedDefenseUUID(); const enemyHealthBefore = await entityHealth(defenseTarget);
-    await request('finite-native-defense', 'get-survival-state读取本轮唯一husk的UUID和敌对来源；set-reflexes当前expectedRevision设autoEat:false、autoDefend:false、armed:false、maxAttacks:1；defend-self指定该UUID，斧在主背包slot12。只打一次不追击，确认原生伤害后回应。', ['get-survival-state', 'set-reflexes', 'defend-self'], async row => {
+    await request('finite-native-defense', 'get-status(include:["survival"])读取本轮唯一husk的UUID和敌对来源；set-reflexes当前expectedRevision设autoEat:false、autoDefend:false、armed:false、maxAttacks:1；defend-self指定该UUID，斧在主背包slot12。只打一次不追击，确认原生伤害后回应。', ['get-status', 'set-reflexes', 'defend-self'], async row => {
       await acceptedPolicy(row, { autoEat: false, autoDefend: false, armed: false, maxAttacks: 1 });
       const actual = await receipt(row, 'defend-self');
       assert(actual.result?.confirmedHits >= 1 && actual.result?.confirmedDamage > 0 && actual.result?.damageConfirmation === 'native_damage_event', 'No native confirmed defense damage');
-      const observed = (await lines(observerFile)).filter(record => record.name === 'get-survival-state' && record.accepted === true && record.requestedAt >= row.start);
+      const observed = (await lines(observerFile)).filter(record => record.name === 'get-status' && record.accepted === true && record.requestedAt >= row.start);
       const targets = [...new Set(observed.flatMap(record => record.threats ?? []).filter(threat => threat.type === 'minecraft:husk').map(threat => threat.entityId))];
       assert.deepEqual(targets, [defenseTarget], 'Actual Codex threat UUID does not match the native owned fixture');
       row.targetUUID = defenseTarget; row.enemyHealthBefore = enemyHealthBefore; row.enemyHealthAfter = await entityHealth(defenseTarget);
@@ -371,12 +372,12 @@ try {
     await request('pause-before-next-finite-task', 'companion-mode action:pause，暂停当前跟随保留意图；这是软件软暂停，不发stop-action。先回应。', ['companion-mode']);
     const offset = (await driverText()).length, busyStart = Date.now();
     await send({ type: 'chat', message: '小克，这是新动作：先说“开始长距离移动”，再move-to-position到2824.5,201,2824.5，timeoutMs:20000；查询到完成再说结果。' });
-    await until(async () => /· move-to-position /.test((await driverText()).slice(offset)), 'Actual Codex move invocation while busy');
-    const current = (await driverText()).slice(offset), moveIndex = current.lastIndexOf('· move-to-position ');
+    await until(async () => /· go-to /.test((await driverText()).slice(offset)), 'Actual Codex move invocation while busy');
+    const current = (await driverText()).slice(offset), moveIndex = current.lastIndexOf('· go-to ');
     assert(!/本轮结束/.test(current.slice(moveIndex)), 'Move turn already ended; not busy-stop evidence');
     const stop = await hardStop('busy-turn-explicit-host-stop'); stop.busyToolObserved = true; stop.busyPhaseStarted = busyStart;
-    await request('first-new-task-after-stop-once', '这是叫停后的唯一新任务，只调用一次get-survival-state读取生命和饥饿，send-chat仅回复一次ALPHA_NEW_TASK；不继续移动或恢复跟随。', ['get-survival-state'], async row => {
-      assert.equal(row.tools.filter(name => name === 'get-survival-state').length, 1, 'First new task was re-executed');
+    await request('first-new-task-after-stop-once', '这是叫停后的唯一新任务，只调用一次get-status(include:["survival"])读取生命和饥饿，send-chat仅回复一次ALPHA_NEW_TASK；不继续移动或恢复跟随。', ['get-status'], async row => {
+      assert.equal(row.tools.filter(name => name === 'get-status').length, 1, 'First new task was re-executed');
       assert.equal(row.replies.filter(reply => reply.message.includes('ALPHA_NEW_TASK')).length, 1, 'First new chat reply duplicated'); row.newIdentity = await identity();
       assert.equal(row.newIdentity.instanceId, report.identity.instanceId); assert.equal(row.newIdentity.sessionId, report.identity.sessionId);
     });

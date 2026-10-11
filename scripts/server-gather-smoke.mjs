@@ -56,7 +56,7 @@ async function drop(item, count, maximum, x = 2012.5, z = 2012.5) {
   await fixture(`summon item ${x} 201.1 ${z} {Item:{id:"${item}",count:${count}${components}},PickupDelay:0}`); await wait(300);
 }
 const blockStill = async (x, z, block = 'minecraft:stone') => /^Test passed/.test(await command(`execute if block ${x} 201 ${z} ${block}`));
-const received = async (item, count) => { const state = await tool('list-inventory'); return state.filter(stack => stack.id === item).reduce((sum, stack) => sum + stack.count, 0) === count; };
+const received = async (item, count) => { const state = (await tool('get-status', { include: ['inventory'] })).inventory; return state.filter(stack => stack.id === item).reduce((sum, stack) => sum + stack.count, 0) === count; };
 try {
   await alone();
   const heartbeatFile = path.join(runtime, 'companion-Claude.json');
@@ -74,7 +74,7 @@ try {
   await fixture('item replace entity Claude hotbar.1 with minecraft:snowball 16');
   await fixture('item replace entity Claude hotbar.2 with minecraft:cobblestone 64');
   await fixture('item replace entity Claude hotbar.3 with minecraft:stone[minecraft:max_stack_size=99] 99');
-  const inventory = await tool('list-inventory');
+  const inventory = (await tool('get-status', { include: ['inventory'] })).inventory;
   check('effective maximums 16, 64 and component-modified 99', inventory.find(v => v.slot === 1)?.maxStackSize === 16 && inventory.find(v => v.slot === 2)?.maxStackSize === 64 && inventory.find(v => v.slot === 3)?.maxStackSize === 99);
 
   for (const [item, maximum] of [['minecraft:snowball', 16], ['minecraft:cobblestone', 64], ['minecraft:stone', 99]]) {
@@ -92,6 +92,7 @@ try {
   await fixture('tp C2Tester 2007.5 201 2012.5'); await wait(300);
   const containers = await tool('discover-containers', { radius: 6 });
   const target = containers.candidates.find(value => value.position.x === 2010 && value.position.z === 2014); assert(target);
+  // TODO(ServerBody 合并)：fetch-and-give 已删。下面断言合成任务的 withdrawnCount/droppedCount，拆成 container-withdraw＋give-item 两步会改变测试内容，待决定。
   const given = await terminal('fetch-and-give', { containerRef: target.containerRef, item: 'minecraft:stone', stacks: 1, player: 'C2Tester' });
   check('container one modified group transfers beyond atomic drop limit', given.status === 'succeeded' && given.result.withdrawnCount === 99 && given.result.droppedCount === 99, given);
   await until(async () => { await send({ type: 'inventory' }); return peerEvents(); }, values => values.some(value => value.type === 'inventory' && value.inventory.some(item => item.name === 'stone' && item.count === 99)), 'Peer did not receive modified stack', 10000);
@@ -103,7 +104,7 @@ try {
   const started = await tool('gather-resources', { resourceRef: found.resourceRef, item: 'minecraft:cobblestone', count: 3, say: '我采三个圆石。' });
   check('gather accepted asynchronously', started.status === 'running');
   await tool('send-chat', { message: '采集时也能聊天。' });
-  const busy = await tool('move-to-position', { x: 2008.5, y: 201, z: 2013.5 }, true); check('finite task owns body write lock', busy.code === 'BUSY');
+  const busy = await tool('go-to', { x: 2008.5, y: 201, z: 2013.5 }, true); check('finite task owns body write lock', busy.code === 'BUSY');
   const gathered = await until(() => tool('get-operation', { operationId: started.operationId }), op => op.status !== 'running', 'Mining did not finish', 60000);
   check('three blocks and three native pickups are distinct confirmed counts', gathered.status === 'succeeded' && gathered.result.pickedUpCount === 3 && gathered.result.minedBlocks === 3, gathered);
   check('world and inventory independently confirm collection', await received('minecraft:cobblestone', 3) && (await Promise.all(resourcePositions.map(([x, z]) => blockStill(x, z, 'minecraft:air')))).every(Boolean));

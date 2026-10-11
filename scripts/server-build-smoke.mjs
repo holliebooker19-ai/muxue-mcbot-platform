@@ -114,8 +114,8 @@ try {
   // The body joins when the runtime claims it: move it and empty its inventory only now.
   await fixture('tp Claude 2398.5 -60 2398.5'); await fixture('clear Claude'); await wait(1500);
   const names = (await client.listTools()).tools.map(t => t.name);
-  check('build、list-blueprints、save-blueprint 已发布', ['build', 'list-blueprints', 'save-blueprint'].every(n => names.includes(n)), names);
-  const saved = await tool('save-blueprint', { name: '小亭', description: '3x3 测试小亭', ...pavilion });
+  check('build、blueprints 已发布', ['build', 'blueprints'].every(n => names.includes(n)), names);
+  const saved = await tool('blueprints', { action: 'save', name: '小亭', description: '3x3 测试小亭', ...pavilion });
   check('小亭存成蓝图（3x7x3，41 格）', !saved.error && saved.value.size?.x === 3 && saved.value.size?.y === 7 && saved.value.blocks === 41, saved.value);
 
   if (want('pavilion')) {

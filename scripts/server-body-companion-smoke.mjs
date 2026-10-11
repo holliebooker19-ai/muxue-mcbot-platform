@@ -51,7 +51,7 @@ async function until(read, predicate, description, timeout = 20000) {
   while (Date.now() < deadline) { latest = await read(); if (predicate(latest)) return latest; await wait(150); }
   throw new Error(`${description}: ${JSON.stringify(latest)}`);
 }
-const mode = () => tool('get-companion-mode');
+const mode = async () => (await tool('get-status')).companionMode;
 const settled = () => until(mode, state => state.state === 'waiting' && state.intent === 'follow', 'Follow did not reach waiting');
 async function position(name = 'Claude') {
   const text = await command(`data get entity ${name} Pos`);
@@ -90,7 +90,7 @@ try {
   transport.stderr?.on('data', chunk => { stderr += chunk; });
   client = new Client({ name: 'companion-real-smoke', version: '1' }); await client.connect(transport);
   const tools = (await client.listTools()).tools.map(value => value.name);
-  check('two companion tools exposed, native sustained action stays internal', tools.includes('companion-mode') && tools.includes('get-companion-mode') && !tools.includes('follow-companion'), { toolCount: tools.length });
+  check('one companion tool exposed (no get-companion-mode), native sustained action stays internal', tools.includes('companion-mode') && !tools.includes('get-companion-mode') && !tools.includes('follow-companion'), { toolCount: tools.length });
   await startPeer();
   await fixture('forceload add 1600 1600 1644 1644');
   await arena();
@@ -105,7 +105,7 @@ try {
   await tool('send-chat', { message: '可以，我还在跟着你。' });
   const status = await tool('get-status');
   check('chat and observation preserve active mode', status.companionMode?.intent === 'follow' && (await mode()).operationId === first.operationId);
-  const busy = await tool('move-to-position', { x: 1610.5, y: 201, z: 1622.5 }, true);
+  const busy = await tool('go-to', { x: 1610.5, y: 201, z: 1622.5 }, true);
   check('companion write lock rejects competing movement', busy.code === 'BUSY');
   console.log('Holding one follow operation beyond the old 60-second timeout...');
   while (Date.now() - began < 65000) { await wait(1000); assert.equal((await mode()).operationId, first.operationId); }

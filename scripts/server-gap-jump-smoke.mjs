@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 跳一格空隙实测：平坦隔离服高空搭两块平台，中间一条 1 格宽、3 格深的沟（掉下去不掉血，但爬不出来，绕不过去），
-// Bot 用真实的 move-to-position 和 companion-mode 跟随过沟，看它助跑起跳、落在对面、不掉进沟里；
+// Bot 用真实的 go-to 和 companion-mode 跟随过沟，看它助跑起跳、落在对面、不掉进沟里；
 // 沟宽 2 格时不跳、直接说走不到。测试玩家 GapPeer（原版协议、创造模式）用 RCON 换位置。
 // 不启停服务器、不调用模型、不计算哈希。需要：隔离服开着、平坦世界、没装要求客户端的 Mod。
 import assert from 'node:assert/strict';
@@ -76,7 +76,7 @@ async function leg(name, start, target, run) {
   report.legs.push(entry); await save(); return entry;
 }
 async function moveTo(target) {
-  let op = await tool('move-to-position', { x: target[0], y: target[1], z: target[2], tolerance: 0.5, timeoutMs: 30000 });
+  let op = await tool('go-to', { x: target[0], y: target[1], z: target[2], tolerance: 0.5, timeoutMs: 30000 });
   const deadline = Date.now() + 40000;
   while (!op.error && op.value?.status === 'running' && Date.now() < deadline) { await wait(300); op = await tool('get-operation', { operationId: op.value.operationId, details: true }); }
   return op;
@@ -93,14 +93,14 @@ try {
   await client.connect(new StdioClientTransport({ command: process.execPath, cwd: root, stderr: 'pipe',
     args: [path.join(root, 'client-runtime/dist/main.js'), '--body', 'server', '--connection-file', path.join(serverDir, 'config/mcbot-server-control/connection.json'),
       '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()] }));
-  await tool('get-companion-mode');
+  await tool('get-status');
   await command('tp GapPeer 3205.5 201 3208.5');
   await build(1);
 
   // 1. 东西向过 1 格沟（去）
   const west = [3205.5, Y + 1, 3205.5], east = [3215.5, Y + 1, 3205.5];
   let go = await leg('往东过 1 格沟', west, east, () => moveTo(east));
-  check('move-to-position 过 1 格沟到了对面', !go.result.error && go.result.value?.status === 'succeeded' && flat(go.end, east) <= 0.8, go);
+  check('go-to 过 1 格沟到了对面', !go.result.error && go.result.value?.status === 'succeeded' && flat(go.end, east) <= 0.8, go);
   check('过沟时没有掉进沟里（最低点不低于平台）', go.lowest >= Y + 0.9, { lowest: go.lowest });
   // 2. 回程（从近处起步，要先往后退助跑）
   const nearEdge = [3211.7, Y + 1, 3205.5];
@@ -114,7 +114,7 @@ try {
     const started = await tool('companion-mode', { action: 'follow', player: 'GapPeer' });
     assert(!started.error, JSON.stringify(started.value));
     const deadline = Date.now() + 25000; let state;
-    while (Date.now() < deadline) { await wait(500); state = (await tool('get-companion-mode')).value; if ((await pos('Claude'))[0] > GAP + 1 && state?.state === 'waiting') break; }
+    while (Date.now() < deadline) { await wait(500); state = (await tool('get-status')).value.companionMode; if ((await pos('Claude'))[0] > GAP + 1 && state?.state === 'waiting') break; }
     await tool('stop-action'); return state;
   });
   check('跟随时跳过沟追上玩家', follow.end[0] > GAP + 1 && flat(follow.end, [3216.5, 0, 3207.5]) <= 4, follow);

@@ -81,7 +81,7 @@ const makeTool = client => async (name, args = {}) => {
   return { error: !!reply.isError, value };
 };
 const inventoryOf = async tool => {
-  const items = (await tool('list-inventory')).value; const n = {};
+  const items = (await tool('get-status', { include: ['inventory'] })).value.inventory; const n = {};
   for (const s of Array.isArray(items) ? items : []) if (s.id !== 'minecraft:air') n[s.id] = (n[s.id] ?? 0) + s.count;
   return n;
 };

@@ -73,13 +73,13 @@ const withUuid = (id, uuid) => `${id}[sophisticatedcore:storage_uuid=[I;${ints(u
 const PICKUP = '6d63626f-7400-4000-8000-000000000001', STOCKED = '6d63626f-7400-4000-8000-000000000002',
   STACKED = '6d63626f-7400-4000-8000-000000000003', VOIDED = '6d63626f-7400-4000-8000-000000000004';
 const OPEN = 'sophisticatedbackpacks:backpack/open', BACKPACK = 'sophisticatedbackpacks:backpack';
-const container = async () => (await tool('get-container', { details: true })).value;
+const container = async () => (await tool('container-menu', { action: 'read', details: true })).value;
 async function click(slot) {
   const c = await container(); const s = c.slots[slot];
-  return settle(await tool('click-slot', { containerId: c.id, expectedRevision: c.revision, slot, expectedItem: s.id, expectedCount: s.count, expectedComponents: s.components,
+  return settle(await tool('container-menu', { action: 'click', containerId: c.id, expectedRevision: c.revision, slot, expectedItem: s.id, expectedCount: s.count, expectedComponents: s.components,
     expectedCarriedItem: c.carried.id, expectedCarriedCount: c.carried.count, expectedCarriedComponents: c.carried.components }));
 }
-async function close() { const c = await container(); if (c && c.id) return settle(await tool('close-container', { containerId: c.id, expectedRevision: c.revision })); }
+async function close() { const c = await container(); if (c && c.id) return settle(await tool('container-menu', { action: 'close', containerId: c.id, expectedRevision: c.revision })); }
 async function reset(items) {
   await fixture('clear Claude'); await fixture('tp Claude 6400.5 201 6400.5 -90 0');
   for (const [slot, item] of items) await fixture(`item replace entity Claude hotbar.${slot} with ${item}`);
@@ -95,7 +95,7 @@ try {
   client = new Client({ name: 'backpack-fixture', version: '1' }); await client.connect(transport);
   const tools = (await client.listTools()).tools;
   check('MCP 里有 use-item 工具，说明里列出打开背包', tools.some(t => t.name === 'use-item' && t.description.includes(OPEN)) && !tools.find(t => t.name === 'interact-block')?.description.includes(OPEN));
-  const survival = (await tool('get-survival-state', { details: false })).value;
+  const survival = (await tool('get-status', { include: ['survival'], details: false })).value.survival;
   await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false }); await tool('stop-action');
 
   await fixture('forceload add 6392 6392 6415 6415'); forced.push('6392 6392 6415 6415');
@@ -141,10 +141,10 @@ try {
   const ref = found.candidates?.find(c => c.position?.x === placed.x && c.position?.z === placed.z && c.id === BACKPACK)?.containerRef;
   check('discover-containers 找到地上的背包', !!ref, found);
   const placedState = (await tool('get-block', placed)).value;
-  const rawOpen = await settle(await tool('open-container', { ...placed, expectedBlock: BACKPACK, expectedProperties: placedState.properties ?? {} }));
+  const rawOpen = await settle(await tool('container-menu', { action: 'open', ...placed, expectedBlock: BACKPACK, expectedProperties: placedState.properties ?? {} }));
   if (!ok(rawOpen)) rawOpen.value.details = (await tool('get-operation', { operationId: rawOpen.value.operationId, details: true })).value;
   menu = await container();
-  check('open-container 直接打开地上的背包：27 个容器槽', ok(rawOpen) && menu?.slots.filter(s => s.source === 'container').length === 27, rawOpen.value);
+  check('container-menu open 直接打开地上的背包：27 个容器槽', ok(rawOpen) && menu?.slots.filter(s => s.source === 'container').length === 27, rawOpen.value);
   await close();
   const listed = await settle(await tool('container-list', { containerRef: ref }));
   check('container-list：列出 8 圆石、3 橡木原木', ok(listed) && /cobblestone/.test(JSON.stringify(listed.value)) && /oak_log/.test(JSON.stringify(listed.value)), listed.value);
@@ -154,8 +154,8 @@ try {
   await fixture(`setblock ${placed.x} ${placed.y} ${placed.z} minecraft:air`);
   await fixture(`setblock ${placed.x} ${placed.y} ${placed.z} ${BACKPACK}[facing=west]{backpackData:{id:"${BACKPACK}",count:1,components:{"sophisticatedcore:storage_uuid":[I;${ints(STACKED)}]}}}`); await wait(300);
   const blockState = (await tool('get-block', placed)).value;
-  const refused = await tool('open-container', { ...placed, expectedBlock: BACKPACK, expectedProperties: blockState.properties ?? {} });
-  check('地上带堆叠升级的背包：open-container 右键前拒绝（UNSUPPORTED）', code(refused) === 'UNSUPPORTED' && (await container()) === null, refused.value);
+  const refused = await tool('container-menu', { action: 'open', ...placed, expectedBlock: BACKPACK, expectedProperties: blockState.properties ?? {} });
+  check('地上带堆叠升级的背包：container-menu open 右键前拒绝（UNSUPPORTED）', code(refused) === 'UNSUPPORTED' && (await container()) === null, refused.value);
   await fixture(`setblock ${placed.x} ${placed.y} ${placed.z} minecraft:air`);
 
   // 5. 拾取升级：掉落物进了背包，回执记到背包名下

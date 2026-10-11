@@ -2,7 +2,7 @@
 // 睡觉实测（第 8e 步）：平坦隔离服高空平台上
 //   1. 白天 sleep-in-bed 拒绝（NOT_NIGHT），没床时拒绝（NO_BED），都不动身；
 //   2. 晚上近处一张床标了有人睡（occupied），远处一张空床：走过去躺在空床上，服务端确认在睡，重生点设到这张床；
-//   3. 睡着时走路被拒绝（SLEEPING），wake-up 起床；
+//   3. 睡着时走路被拒绝（SLEEPING），get-up 起床；
 //   4. 床边 5 格有怪（关在玻璃里、不会动）：拒绝（NOT_SAFE）；
 //   5. 只有 Bot 一个玩家时再躺下：跳夜到早上，Bot 自己起床，运行端发出 woke 事件。
 // 玩家上床的 player_sleep 事件要真实客户端才能触发，这里没测（离线测试覆盖）。
@@ -91,7 +91,7 @@ try {
     args: [path.join(root, 'client-runtime/dist/main.js'), '--body', 'server', '--connection-file', path.join(serverDir, 'config/mcbot-server-control/connection.json'),
       '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()] }));
   const names = (await client.listTools()).tools.map(t => t.name);
-  check('sleep-in-bed／wake-up 工具已发布', names.includes('sleep-in-bed') && names.includes('wake-up'), names);
+  check('sleep-in-bed／get-up 工具已发布', names.includes('sleep-in-bed') && names.includes('get-up'), names);
 
   // 1. 白天拒绝、没床拒绝
   await ground(); await bed(free, false);
@@ -117,13 +117,13 @@ try {
   const spawn = await command('data get entity Claude SpawnX');
   check('重生点设到了这张床（和玩家一样）', new RegExp(`data: ${free.head[0]}\\b`).test(spawn), spawn);
 
-  // 3. 睡着时不能走；wake-up 起床
-  const walk = await settle(await tool('move-to-position', { x: start[0], y: start[1], z: start[2] }));
-  check('睡着时 move-to-position 被拒绝（SLEEPING）', codeOf(walk) === 'SLEEPING', walk.value);
-  const up = await settle(await tool('wake-up'));
-  check('wake-up 起床：回执 wasSleeping，服务端不再在睡', !up.error && up.value.status === 'succeeded' && up.value.result?.wasSleeping === true && await sleepingAt() === null, { up: up.value, sleepingX: await sleepingAt() });
-  const again = await settle(await tool('wake-up'));
-  check('已经醒着时 wake-up 也成功（wasSleeping false）', !again.error && again.value.status === 'succeeded' && again.value.result?.wasSleeping === false, again.value);
+  // 3. 睡着时不能走；get-up 起床
+  const walk = await settle(await tool('go-to', { x: start[0], y: start[1], z: start[2] }));
+  check('睡着时 go-to 被拒绝（SLEEPING）', codeOf(walk) === 'SLEEPING', walk.value);
+  const up = await settle(await tool('get-up'));
+  check('get-up 起床：回执 wasSleeping，服务端不再在睡', !up.error && up.value.status === 'succeeded' && up.value.result?.wasSleeping === true && await sleepingAt() === null, { up: up.value, sleepingX: await sleepingAt() });
+  const again = await settle(await tool('get-up'));
+  check('已经醒着时 get-up 也成功（wasSleeping false）', !again.error && again.value.status === 'succeeded' && again.value.result?.wasSleeping === false, again.value);
 
   // 4. 床边有怪：拒绝
   await command(`fill 3704 ${Y + 1} 3708 3706 ${Y + 3} 3710 glass hollow`);
@@ -153,7 +153,7 @@ try {
 } catch (error) {
   report.result = 'failed'; report.error = redact(error.stack || error.message); process.exitCode = 1; console.error(report.error);
 } finally {
-  try { await tool('wake-up'); } catch {}
+  try { await tool('get-up'); } catch {}
   try { await tool('stop-action'); } catch {}
   try { await client?.close(); } catch {}
   try {

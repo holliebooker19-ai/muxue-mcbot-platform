@@ -96,7 +96,7 @@ async function until(read, accept, label, timeout = 30000, cleaning = false) {
   }
   throw Error(label + ': ' + redact(JSON.stringify(value)).slice(0, 2500));
 }
-const mode = () => tool('get-companion-mode');
+const mode = async () => (await tool('get-status')).companionMode;
 const digCalls = floor => report.rpc.slice(floor).filter(row => row.method === 'act' && row.action === 'dig-block');
 const miningConfig = (maxBlocks = 2, durationMs = 60000) => ({ blockIds: ['minecraft:coal_ore', 'minecraft:deepslate_coal_ore'], radius: 4, maxBlocks, durationMs });
 const targets = [{ x: 6415, y: 201, z: 6412 }, { x: 6414, y: 201, z: 6415 }, { x: 6410, y: 201, z: 6415 }];
@@ -133,7 +133,7 @@ async function settledMining(count) {
 const coalPicked = snapshot => (snapshot.mining?.newPickedByItem ?? []).filter(value => value.item === 'minecraft:coal').reduce((sum, value) => sum + value.count, 0);
 async function verifyActualMining(count, row) {
   const snapshot = await settledMining(count); row.snapshot = snapshot;
-  const inventory = await tool('list-inventory'), actual = inventory.filter(stack => stack.id === 'minecraft:coal').reduce((sum, stack) => sum + stack.count, 0);
+  const inventory = (await tool('get-status', { include: ['inventory'] })).inventory, actual = inventory.filter(stack => stack.id === 'minecraft:coal').reduce((sum, stack) => sum + stack.count, 0);
   check('原生新拾取和库存独立核对，挖块不冒充拾取', snapshot.mining.minedBlocks === count && snapshot.mining.countStatus === 'confirmed' && coalPicked(snapshot) === actual && await amount('coal') === actual && actual >= count && snapshot.mining.dropAttribution === 'unconfirmed', { minedBlocks: count, newPicked: coalPicked(snapshot), actual, attribution: snapshot.mining.dropAttribution });
 }
 function playerDig(status, pos) {
@@ -184,7 +184,7 @@ try {
     '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--hosted'], cwd: root, stderr: 'pipe' });
   client = new Client({ name: 'companion-mining-real-smoke', version: '1' }); await client.connect(transport);
   transport.stderr?.on('data', chunk => { report.stderr = redact((report.stderr ?? '') + chunk).slice(-16000); });
-  const survival = await tool('get-survival-state'); await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false });
+  const survival = (await tool('get-status', { include: ['survival'] })).survival; await tool('set-reflexes', { expectedRevision: survival.policy.revision, autoEat: false, autoDefend: false, armed: false });
   const status = await tool('get-status'); check('新ServerBody明确暴露companion-mining能力', status.capabilities.includes('companion-mining'));
   const peerRow = { label: 'native-test-player', username: 'C2Tester', ended: false }; report.processes.push(peerRow);
   peer = mineflayer.createBot({ host: '127.0.0.1', port: 25568, username: 'C2Tester', auth: 'offline', version: '1.21.1' });

@@ -161,7 +161,7 @@ try {
   driver = launch('production-codex-host', [path.join(root, 'scripts/companion.mjs'), '--agent', 'codex', '--body', 'server', '--name', 'Claude', '--nickname', '小克', '--mcp-config', mcpConfig, '--effort', 'low', '--headless'], { ...process.env, COMPANION_RUNTIME_DIR: runtime });
   await until(async () => ended(await driverText()), '真实Codex启动'); report.identity = await identity();
   let miningFloor, budget;
-  await request('one-chat-two-candidates', '先get-survival-state读revision，set-reflexes设autoEat:false、autoDefend:false、armed:false。跟随C2Tester保持2.5格，顺手采coal_ore；companion-mode mining明确blockIds:[minecraft:coal_ore],maxBlocks:2,radius:4,durationMs:60000。先回应，别提交gather-resources或循环加量。', ['get-survival-state', 'set-reflexes', 'companion-mode'], async (row, offset) => {
+  await request('one-chat-two-candidates', '先get-status(include:["survival"])读revision，set-reflexes设autoEat:false、autoDefend:false、armed:false。跟随C2Tester保持2.5格，顺手采coal_ore；companion-mode mining明确blockIds:[minecraft:coal_ore],maxBlocks:2,radius:4,durationMs:60000。先回应，别提交gather-resources或循环加量。', ['get-status', 'set-reflexes', 'companion-mode'], async (row, offset) => {
     miningFloor = offset;
     await until(async () => await blockIs(pos1, 'air') && await amount() === 1, '第一块原生实收', 30000);
     row.firstCount = await amount(); row.firstBlockRemoved = true;
@@ -179,7 +179,7 @@ try {
     assert(!toolNames((await driverText()).slice(offset)).includes('gather-resources'), '模型用滚动有限采集替代程序陪挖');
   });
   const chatIdentity = await identity(), chatRpcFloor = report.rpc.length;
-  await request('ordinary-chat-keeps-follow-and-budget', '刚才两块预算到了，保持现有跟随，不重新开启采矿、不补额度；普通聊天告诉我心情，再get-companion-mode确认采矿关闭及remainingBlocks为0。', ['get-companion-mode'], async row => {
+  await request('ordinary-chat-keeps-follow-and-budget', '刚才两块预算到了，保持现有跟随，不重新开启采矿、不补额度；普通聊天告诉我心情，再get-status读companionMode确认采矿关闭及remainingBlocks为0。', ['get-status'], async row => {
     assert.deepEqual(await identity(), chatIdentity); assert(await blockIs(pos3, 'coal_ore')); assert.equal(await amount(), 2);
     const laterNames = toolNames((await driverText()).slice(miningFloor)); assert.equal(laterNames.filter(name => name === 'companion-mode').length, 1, '普通聊天改模式或偷偷补预算');
     assert(!report.rpc.slice(chatRpcFloor).some(call => ['stop', 'revoke', 'release'].includes(call.method)), '普通聊天撤销原有控制');
@@ -201,8 +201,8 @@ try {
   assert(await blockIs(pos1, 'deepslate_coal_ore'), '停止后旧矿延迟破坏'); assert(distance(settled, await position()) < 0.1, '旧跟随复活');
   assert.equal(report.rpc.slice(rpcFloor).filter(call => call.action === 'dig-block').length, 1, '旧采矿重复提交');
   assert((await alone()).includes('Claude'), '叫停把角色踢出'); busy.result = 'passed'; busy.roleRetained = true; busy.tools = toolNames((await driverText()).slice(busyOffset)); await checkpoint();
-  await request('first-new-query-once', '这是叫停后唯一新任务：只调用一次get-survival-state，send-chat只回复一次CM_NEW；不移动、不采矿、不恢复旧模式。', ['get-survival-state'], async (row, offset) => {
-    const names = toolNames((await driverText()).slice(offset)); assert.equal(names.filter(name => name === 'get-survival-state').length, 1);
+  await request('first-new-query-once', '这是叫停后唯一新任务：只调用一次get-status(include:["survival"])，send-chat只回复一次CM_NEW；不移动、不采矿、不恢复旧模式。', ['get-status'], async (row, offset) => {
+    const names = toolNames((await driverText()).slice(offset)); assert.equal(names.filter(name => name === 'get-status').length, 1);
     const replies = (await lines(peerFile)).filter(event => event.type === 'chat' && event.username === 'Claude' && Date.parse(event.time) >= row.start && event.message.includes('CM_NEW')); assert.equal(replies.length, 1);
     assert(await blockIs(pos1, 'deepslate_coal_ore')); row.newIdentity = await identity(); assert.deepEqual(row.newIdentity, report.identity);
   });

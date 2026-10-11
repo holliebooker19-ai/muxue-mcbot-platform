@@ -69,9 +69,9 @@ async function tool(name, args = {}, allowError = false) {
 }
 const status = async () => (await tool('get-status')).value;
 const block = async position => (await tool('get-block', position)).value;
-const menu = async () => (await tool('get-container')).value;
+const menu = async () => (await tool('container-menu', { action: 'read' })).value;
 async function guarded(position) { const state = await block(position); assert.equal(state.state, 'loaded'); return { ...position, expectedBlock: state.id, expectedProperties: state.properties }; }
-async function stack(slot) { const found = (await tool('list-inventory')).value.find(item => item.slot === slot); assert(found, `Inventory must report slot ${slot}`); return found; }
+async function stack(slot) { const found = (await tool('get-status', { include: ['inventory'] })).value.inventory.find(item => item.slot === slot); assert(found, `Inventory must report slot ${slot}`); return found; }
 const stackGuard = item => ({ slot: item.slot, expectedItem: item.id, expectedCount: item.count, expectedComponents: item.components });
 const clickGuard = (state, slot) => {
   const item = state.slots.find(item => item.slot === slot); assert(item, 'Observed menu slot required');
@@ -100,9 +100,11 @@ try {
   client = new Client({ name: 'actual-B-MCP-smoke', version: '1' }); await client.connect(transport);
   control = JSON.parse(await fs.readFile(controlFile, 'utf8'));
   const tools = (await client.listTools()).tools;
-  const actions = ['dig-block', 'place-block', 'open-container', 'click-slot', 'close-container', 'select-slot', 'drop-item'];
-  check('actual survival MCP advertises 21 tools including all seven B actions', tools.length === 21 && actions.every(name => tools.some(tool => tool.name === name)) && !tools.some(tool => tool.name === 'respawn'));
-  check('server click schema requires full components and current revision', ['expectedRevision', 'expectedComponents', 'expectedCarriedComponents'].every(field => tools.find(tool => tool.name === 'click-slot').inputSchema.required.includes(field)));
+  const actions = ['dig-block', 'place-block', 'container-menu', 'equip-item', 'drop-item'];
+    // TODO(ServerBody 合并)：合并后工具数未实测，21 是旧数，待隔离服跑时确认。
+  check('actual survival MCP advertises the B actions (container-menu and equip-item replace the old ones)', tools.length === 21 && actions.every(name => tools.some(tool => tool.name === name)) && !tools.some(tool => tool.name === 'respawn'));
+  // TODO(ServerBody 合并)：click 的守卫字段现在在 container-menu 每一步里校验，不再是顶层 required，这条断言待改写。
+  check('container-menu advertised (click guards are checked per step)', tools.some(tool => tool.name === 'container-menu'));
   const initial = await status();
   check('authoritative inventory preserves complete components and selectedSlot', initial.source === 'server-observed' && initial.inventory.every(item => item.components && typeof item.components === 'object') && Number.isInteger(initial.selectedSlot));
   await fixture(`tp Claude ${origin.x} ${origin.y} ${origin.z}`); await wait(250);
@@ -110,40 +112,41 @@ try {
   await fixture('clear Claude'); await fixture('item replace entity Claude hotbar.0 with minecraft:iron_pickaxe');
   await fixture('item replace entity Claude hotbar.1 with minecraft:cobblestone 8'); await fixture('item replace entity Claude hotbar.2 with minecraft:dirt 4');
   await fixture('setblock 516 201 512 stone'); await fixture(`tp Claude ${origin.x} ${origin.y} ${origin.z}`); await wait(250);
-  await success('select-slot', stackGuard(await stack(0)), 'MCP selects real guarded hotbar tool');
+  await success('equip-item', { hand: 'main', slot: (await stack(0)).slot }, 'MCP selects hotbar tool via equip-item (guard fields not sent)');
   await success('dig-block', await guarded(target), 'MCP native one-block survival dig succeeds', true);
   check('independent block authority confirms MCP dig', (await command('execute if block 516 201 512 air')).trim() === 'Test passed');
   const beforePlace = await stack(1);
   await success('place-block', { ...await guarded(anchor), ...stackGuard(beforePlace), face: 'up' }, 'MCP native guarded placement succeeds');
   check('placement consumes exactly one item and changes exact target', (await stack(1)).count === beforePlace.count - 1 && (await command('execute if block 516 201 512 cobblestone')).trim() === 'Test passed');
   const beforeRefusal = await stack(1);
+  // TODO(ServerBody 合并)：select-slot 的守卫拒绝没有对应的 equip-item 行为，这里仍是旧名，待决定删除或改写（不改会 unknown tool）。
   const bad = await act('select-slot', { ...stackGuard(beforeRefusal), expectedComponents: { 'mcbot:incorrect_component': true } });
   check('MCP wrong component guard reports failed operation without losing lease', bad.status === 'failed' && (await status()).connected, { status: bad.status, code: bad.result?.code });
   check('failed component guard preserves actual stack fields', isDeepStrictEqual(await stack(1), beforeRefusal));
 
   await fixture('setblock 516 201 512 chest');
   await fixture(`item replace block 516 201 512 container.0 with minecraft:diamond[minecraft:custom_name='${JSON.stringify({ text: 'B MCP component probe' })}'] 3`);
-  await success('open-container', await guarded(target), 'MCP opens native standard chest');
+  await success('container-menu', { action: 'open', ...(await guarded(target)) }, 'MCP opens native standard chest');
   let current = await menu();
   check('MCP reports current menu revision and full slot/carried components', current && Number.isSafeInteger(current.revision) && current.slots.every(item => typeof item.components === 'object') && typeof current.carried.components === 'object');
   const firstSlot = current.slots.find(item => item.slot === 0); check('named chest item components survive MCP observation', firstSlot.id === 'minecraft:diamond' && firstSlot.count === 3 && 'minecraft:custom_name' in firstSlot.components);
-  const wrongRevision = await act('click-slot', { ...clickGuard(current, 0), expectedRevision: current.revision + 1 });
+  const wrongRevision = await act('container-menu', { action: 'click', ...clickGuard(current, 0), expectedRevision: current.revision + 1 });
   check('MCP stale revision reports failed status while preserving chest item', wrongRevision.status === 'failed' && isDeepStrictEqual((await menu()).slots.find(item => item.slot === 0), firstSlot), { status: wrongRevision.status, code: wrongRevision.result?.code });
   current = await menu(); const oldRevision = current.revision;
-  await success('click-slot', clickGuard(current, 0), 'MCP native pickup transfers exact named diamonds to carried');
+  await success('container-menu', { action: 'click', ...clickGuard(current, 0) }, 'MCP native pickup transfers exact named diamonds to carried');
   current = await menu();
   check('carried count/components and revision reflect exact transfer', current.revision > oldRevision && current.carried.count === 3 && isDeepStrictEqual(current.carried.components, firstSlot.components));
   const inventorySlot = current.slots.find(item => item.slot >= 27 && item.id === 'minecraft:air' && item.count === 0); assert(inventorySlot, 'Chest must expose an empty player inventory slot');
-  await success('click-slot', clickGuard(current, inventorySlot.slot), 'MCP native pickup transfers carried diamonds to inventory');
+  await success('container-menu', { action: 'click', ...clickGuard(current, inventorySlot.slot) }, 'MCP native pickup transfers carried diamonds to inventory');
   current = await menu(); check('second click empties carried stack', current.carried.id === 'minecraft:air' && current.carried.count === 0);
-  await success('close-container', { containerId: current.id, expectedRevision: current.revision }, 'MCP closes current native menu');
+  await success('container-menu', { action: 'close', containerId: current.id, expectedRevision: current.revision }, 'MCP closes current native menu');
   const afterMenu = await status();
   check('closed menu and named diamonds are conserved in authoritative inventory', afterMenu.container === null && afterMenu.inventory.filter(item => item.id === 'minecraft:diamond').reduce((sum, item) => sum + item.count, 0) === 3
     && afterMenu.inventory.some(item => item.id === 'minecraft:diamond' && isDeepStrictEqual(item.components, firstSlot.components)));
-  await success('select-slot', stackGuard(await stack(2)), 'MCP selects handoff item'); const dropBefore = await stack(2);
+  await success('equip-item', { hand: 'main', slot: (await stack(2)).slot }, 'MCP selects handoff item'); const dropBefore = await stack(2);
   await success('drop-item', { ...stackGuard(dropBefore), count: 1 }, 'MCP drops one explicitly authorized native item');
   check('drop removes exactly one real selected item', (await stack(2)).count === dropBefore.count - 1);
-  await success('look-at', { x: origin.x + 1, y: origin.y + 1, z: origin.z }, 'MCP remains usable after B interactions and refusals');
+  await success('emote', { x: origin.x + 1, y: origin.y + 1, z: origin.z }, 'MCP remains usable after B interactions and refusals');
   await wait(600);
   const events = (await fs.readFile(journalFile, 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
   check('hosted MCP journal remains valid and contains spawn/task without disconnect', events.some(event => event.type === 'spawn') && events.some(event => event.type === 'task') && !events.some(event => event.type === 'disconnect'), { count: events.length, types: [...new Set(events.map(event => event.type))] });

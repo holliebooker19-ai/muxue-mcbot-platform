@@ -81,7 +81,7 @@ const routes = [
   { name: 'valley', note: '起点在四面陡崖的山谷底，往南 120 格', from: [192, -508], to: [192, -388], expect: 'honest' },
   { name: 'hills', note: '风袭丘陵，往东 120 格', from: [1664, 256], to: [1784, 256], expect: 'arrive' },
   { name: 'long', note: '针叶林往东 400 格，路上有水', from: [160, -352], to: [560, -352], expect: 'arrive' },
-  { name: 'move-far', note: 'move-to-position 给 60 格外的点，自动改走 travel-to', from: [224, -352], to: [284, -352], move: true, expect: 'arrive' },
+  { name: 'move-far', note: 'go-to 给 60 格外的点，自动改走 travel-to', from: [224, -352], to: [284, -352], move: true, expect: 'arrive' },
 ];
 const only = flag('--only')?.split(',');
 try {
@@ -95,7 +95,7 @@ try {
   transport.stderr?.on('data', chunk => fs.appendFile(path.join(dir, 'runtime-stderr.txt'), redact(chunk)).catch(() => {}));
   await client.connect(transport);
   const names = (await client.listTools()).tools.map(t => t.name);
-  check('travel-to 已发布', names.includes('travel-to'), names);
+  check('go-to 已发布', names.includes('go-to'), names);
   for (const route of routes.filter(r => !only || only.includes(r.name))) {
     await command('time set day'); await command('effect give Claude minecraft:saturation 5 10 true');
     await fixture(`forceload add ${route.from[0]} ${route.from[1]} ${route.from[0] + 12} ${route.from[1]}`); await wait(1000);
@@ -105,14 +105,14 @@ try {
     const from = await pos('Claude'); const began = Date.now();
     let started;
     if (route.move) {
-      // move-to-position needs a y: the surface there, found by putting a marker on it
+      // go-to needs a y: the surface there, found by putting a marker on it
       await command(`forceload add ${route.to[0]} ${route.to[1]}`);
       await command(`execute positioned ${route.to[0]} 0 ${route.to[1]} positioned over motion_blocking_no_leaves run summon marker ~ ~ ~ {Tags:["travel_goal"]}`);
       const y = Number((await command('data get entity @e[type=marker,tag=travel_goal,limit=1] Pos[1]')).match(/data: ([-\d.]+)/)[1]);
       await command('kill @e[type=marker,tag=travel_goal]'); await command(`forceload remove ${route.to[0]} ${route.to[1]}`);
-      started = await tool('move-to-position', { x: route.to[0] + 0.5, y, z: route.to[1] + 0.5 });
-      check(`${route.name}：结果标明改走 travel-to`, started.value.routedVia === 'travel-to', started.value);
-    } else started = await tool('travel-to', { x: route.to[0] + 0.5, z: route.to[1] + 0.5, timeoutMs: 300000 });
+      started = await tool('go-to', { x: route.to[0] + 0.5, y, z: route.to[1] + 0.5 });
+      check(`${route.name}：结果标明改走 travel-to`, started.value.name === 'travel-to', started.value);
+    } else started = await tool('go-to', { x: route.to[0] + 0.5, z: route.to[1] + 0.5, timeoutMs: 300000 });
     const op = await settle(started, 320000);
     const at = await pos('Claude');
     const result = { note: route.note, from, at, ms: Date.now() - began, status: op.error ? 'error' : op.value.status, summary: op.value.summary ?? op.value.message, result: op.value.result ?? op.value };

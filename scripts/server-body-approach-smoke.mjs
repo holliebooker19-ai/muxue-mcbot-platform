@@ -90,7 +90,7 @@ try {
   client=new Client({name:'approach-real-smoke',version:'1'});await client.connect(transport);
   control=JSON.parse(await fs.readFile(path.join(runtime,'server-control-Claude.json'),'utf8'));
   const toolNames=(await client.listTools()).tools.map(v=>v.name);
-  check('shared task tools discoverable through real MCP',['discover-containers','container-list','container-withdraw','give-item','fetch-and-give'].every(name=>toolNames.includes(name)),{toolCount:toolNames.length});
+  check('shared task tools discoverable through real MCP',['discover-containers','container-list','container-withdraw','give-item'].every(name=>toolNames.includes(name)),{toolCount:toolNames.length});
   peer=spawn(process.execPath,[path.join(root,'scripts/server-play-test-peer.mjs'),'--commands',commands,'--events',events,'--username','C2Tester'],{cwd:root,stdio:['ignore','ignore','pipe'],windowsHide:true});
   peer.stderr?.on('data',()=>{});
   let deadline=performance.now()+20000;while(!(await peerEvents()).some(v=>v.type==='spawn')){assert(performance.now()<deadline,'Test player did not spawn');await wait(200);}
@@ -104,6 +104,7 @@ try {
   const rawTarget=rawFound.candidates.find(v=>v.position.x===820&&v.position.z===816);
   check('authority discovery has private instance-bound target token',typeof rawTarget?.targetToken==='string'&&rawTarget.targetToken.length>0&&!('targetToken' in target),{visibility:target.visibility});
   let callStart=evidence.rpc.length,started=performance.now();
+  // TODO(ServerBody 合并)：fetch-and-give 已删。下面断言合成任务的 withdrawnCount/droppedCount/pickup，拆成两步会改变测试内容，待决定。
   const delivered=await terminal('fetch-and-give',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,player:'C2Tester',say:'我去箱子取来。'});
   evidence.separatedTask={ms:performance.now()-started,operation:delivered,rpcCalls:evidence.rpc.length-callStart};
   check('different stations execute approach-container and approach-player',evidence.rpc.slice(callStart).some(v=>v.action==='approach-container')&&evidence.rpc.slice(callStart).some(v=>v.action==='approach-player'));
@@ -127,7 +128,7 @@ try {
   await fixture('item replace block 820 201 816 container.0 with minecraft:oak_log 8');
   const singleBefore=await command('data get block 820 201 816 Items');
   const replaced=await failedTask(target.containerRef);
-  check('same state new single chest rejects old ref before take',replaced.result.withdrawnCount===0&&(await command('data get block 820 201 816 Items'))===singleBefore&&(await tool('get-container',{details:true}))===null,replaced);
+  check('same state new single chest rejects old ref before take',replaced.result.withdrawnCount===0&&(await command('data get block 820 201 816 Items'))===singleBefore&&(await tool('container-menu', { action: 'read', details:true}))===null,replaced);
 
   phase='double-replacement';await resetArena();
   await fixture('setblock 820 201 816 chest[facing=north,type=left]');await fixture('setblock 821 201 816 chest[facing=north,type=right]');
@@ -136,7 +137,7 @@ try {
   await fixture('setblock 821 201 816 air');await fixture('setblock 821 201 816 chest[facing=north,type=right]');
   const doubleBefore=await command('data get block 820 201 816 Items');
   const doubleReplacement=await failedTask(target.containerRef);
-  check('other half replacement rejects old double chest ref',doubleReplacement.result.withdrawnCount===0&&(await command('data get block 820 201 816 Items'))===doubleBefore&&(await tool('get-container',{details:true}))===null,doubleReplacement);
+  check('other half replacement rejects old double chest ref',doubleReplacement.result.withdrawnCount===0&&(await command('data get block 820 201 816 Items'))===doubleBefore&&(await tool('container-menu', { action: 'read', details:true}))===null,doubleReplacement);
 
   phase='ordinary-content-change';await resetArena();target=await targetAt(820);
   await fixture('item replace block 820 201 816 container.0 with minecraft:oak_log 7');
@@ -153,25 +154,27 @@ try {
     if(obstacle==='broken-floor')await fixture('fill 816 200 806 816 200 826 air');
     target=await targetAt(820);const fields=await command('data get block 820 201 816 Items');
     const refused=await failedTask(target.containerRef);
-    check(`${obstacle} refuses route without opening or taking`,refused.result.withdrawnCount===0&&(await command('data get block 820 201 816 Items'))===fields&&(await tool('get-container',{details:true}))===null,refused);
+    check(`${obstacle} refuses route without opening or taking`,refused.result.withdrawnCount===0&&(await command('data get block 820 201 816 Items'))===fields&&(await tool('container-menu', { action: 'read', details:true}))===null,refused);
   }
 
   phase='stop-during-move';await resetArena();target=await targetAt(820);
   let held=pauseAction('approach-container','after'),index=evidence.rpc.length;
+  // TODO(ServerBody 合并)：fetch-and-give 已删，停止合成任务的测试待改写。
   const pendingMove=tool('fetch-and-give',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,player:'C2Tester'});
   await waitGate(held);await wait(200);const stopStarted=performance.now();await tool('stop-action');held.release();gate=undefined;
   const cancelledMove=await pendingMove;evidence.moveStop={ms:performance.now()-stopStarted,operation:cancelledMove};
   await wait(300);
-  check('stop during move prevents open and drop',cancelledMove.status==='cancelled'&&!evidence.rpc.slice(index).some(v=>['open-container','drop-item'].includes(v.action))&&(await tool('get-container',{details:true}))===null,cancelledMove);
+  check('stop during move prevents open and drop',cancelledMove.status==='cancelled'&&!evidence.rpc.slice(index).some(v=>['open-container','drop-item'].includes(v.action))&&(await tool('container-menu', { action: 'read', details:true}))===null,cancelledMove);
   target=await targetAt(820);const afterStop=await terminal('container-list',{containerRef:target.containerRef});
   check('first new task after movement stop succeeds',afterStop.result.items.some(v=>v.item==='minecraft:oak_log'&&v.count===8));
 
   phase='stop-after-withdrawal';await resetArena();target=await targetAt(820);
   held=pauseAction('approach-player','before');index=evidence.rpc.length;
+  // TODO(ServerBody 合并)：fetch-and-give 已删，停止合成任务的测试待改写。
   const pendingReturn=tool('fetch-and-give',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,player:'C2Tester'});
   await waitGate(held);
   const inventoryHeld=await command('data get entity Claude Inventory');
-  check('pause reached after confirmed withdrawal and closed menu',/minecraft:oak_log/.test(inventoryHeld)&&/count: 3/.test(inventoryHeld)&&(await tool('get-container',{details:true}))===null,{inventoryHeld});
+  check('pause reached after confirmed withdrawal and closed menu',/minecraft:oak_log/.test(inventoryHeld)&&/count: 3/.test(inventoryHeld)&&(await tool('container-menu', { action: 'read', details:true}))===null,{inventoryHeld});
   await tool('stop-action');held.release();gate=undefined;const cancelledReturn=await pendingReturn;
   const inventoryAfter=await command('data get entity Claude Inventory');
   check('holding stop preserves three logs and sends no drop',cancelledReturn.status==='cancelled'&&inventoryAfter===inventoryHeld&&!evidence.rpc.slice(index).some(v=>v.action==='drop-item'),cancelledReturn);

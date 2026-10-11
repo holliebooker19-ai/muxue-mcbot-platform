@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // 垫高实测：平坦隔离服高空平台上
 //   1. 一棵 9 节原木的树（顶上 4 层有树叶）：gather-resources 要 9 个原木，看它像人一样先砍掉第二、三节、站上留下的树桩往上砍，够不着再在树干那一列垫高，柱子挖回来、树桩最后砍，原木全拿到、树叶不动；
-//   2. 头顶 7 格悬空的一块石头：pillar-up 垫高、dig-block 挖掉、pillar-down 下来，泥土收回、圆石捡到；
-//   3. pillar-up 3 格再 pillar-down，回到原来的高度、方块一个不少；
+//   2. 头顶 7 格悬空的一块石头：pillar up 垫高、dig-block 挖掉、pillar down 下来，泥土收回、圆石捡到；
+//   3. pillar up 3 格再 pillar down，回到原来的高度、方块一个不少；
 //   4. 仿 10-07 试玩那棵云杉：6 节树干被密树叶包住、只有下面两节看得见，扫描带里被挡住的原木也算同一棵树，整棵砍完；
 //   5. 两棵挨着的云杉（10-07 第四轮试玩）：要一棵树的量，只砍完一棵，另一棵不动；
 //   6. 2x2 的大树（10 层高）：站在一个角垫高往上砍，或绕着树干一圈圈往上砍，随机选；重建几次直到两种都见到，每次都整棵砍完、回到地面；
@@ -78,7 +78,7 @@ try {
     args: [path.join(root, 'client-runtime/dist/main.js'), '--body', 'server', '--connection-file', path.join(serverDir, 'config/mcbot-server-control/connection.json'),
       '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()] }));
   const names = (await client.listTools()).tools.map(t => t.name);
-  check('pillar-up／pillar-down 工具已发布', names.includes('pillar-up') && names.includes('pillar-down'), names);
+  check('pillar 工具已发布', names.includes('pillar'), names);
 
   // SMOKE_FROM=6 跳过前五段，只看 2x2 和被树叶包住的树（反复调这两段时用）。
   let op;
@@ -106,40 +106,40 @@ try {
   let leaves = 0; for (let x = 3402; x <= 3406; x++) for (let z = 3402; z <= 3406; z++) for (let y = Y + 6; y <= Y + 9; y++) if (await isBlock([x, y, z], 'minecraft:oak_leaves')) leaves++;
   check('树叶没被当成目标砍掉（5x5x4 去掉树干还剩 96 片）', leaves === 96, { leaves });
 
-  // 2. 挖头顶够不着的指定方块：石头悬在头顶 7 格 (3404, 208, 3404)，pillar-up 3 格、换石镐、dig-block、pillar-down
+  // 2. 挖头顶够不着的指定方块：石头悬在头顶 7 格 (3404, 208, 3404)，pillar up 3 格、换石镐、dig-block、pillar down
   await ground();
   await fixture(`setblock 3404 ${Y + 8} 3404 stone`);
   await command('clear Claude'); await command('give Claude stone_pickaxe'); await command('give Claude dirt 16');
   await command(`tp Claude 3404.5 ${Y + 1} 3404.5`); await wait(1500);
-  const climbed = await tool('pillar-up', { blocks: 3 });
-  check('pillar-up 3 格垫到 y=204', !climbed.error && climbed.value.placed === 3 && Math.abs((await pos('Claude'))[1] - (Y + 4)) < 0.01, climbed.value);
-  const inv = (await tool('list-inventory')).value;
+  const climbed = await tool('pillar', { up: 3 });
+  check('pillar up 3 格垫到 y=204', !climbed.error && climbed.value.placed === 3 && Math.abs((await pos('Claude'))[1] - (Y + 4)) < 0.01, climbed.value);
+  const inv = (await tool('get-status', { include: ['inventory'] })).value.inventory;
   const pick = (Array.isArray(inv) ? inv : inv.inventory ?? []).find(item => item.id === 'minecraft:stone_pickaxe');
-  const selected = await tool('select-slot', { slot: pick.slot, expectedItem: pick.id, expectedCount: pick.count, expectedComponents: pick.components ?? {} });
+  const selected = await tool('equip-item', { hand: 'main', slot: pick.slot });
   const dug = await settle(await tool('dig-block', { x: 3404, y: Y + 8, z: 3404, expectedBlock: 'minecraft:stone', expectedProperties: {}, timeoutMs: 15000 }));
   report.runs.highDig = { selected: selected.value, dug: dug.value };
   check('站在柱子上用石镐挖掉了头顶的石头', !dug.error && dug.value.status === 'succeeded' && await isBlock([3404, Y + 8, 3404], 'minecraft:air'), dug.value);
-  const back = await tool('pillar-down');
+  const back = await tool('pillar', { down: true });
   await wait(1500);
-  // 圆石从 7 格高处落下带随机水平速度，可能落在柱子旁边一两格：没顺带碰到就用 collect-items 捡（pillar-down 只收柱子）。
+  // 圆石从 7 格高处落下带随机水平速度，可能落在柱子旁边一两格：没顺带碰到就用 collect-items 捡（pillar down 只收柱子）。
   if (await countItem('minecraft:cobblestone') === 0) report.runs.highDig.collected = (await settle(await tool('collect-items', { item: 'minecraft:cobblestone', count: 1, radius: 4 }))).value;
   await wait(500);
-  check('pillar-down 回到地面，泥土 16 个一个不少，圆石也捡到了', !back.error && back.value.recovered === 3 && Math.abs((await pos('Claude'))[1] - (Y + 1)) < 0.01 && await countItem('minecraft:dirt') === 16 && await countItem('minecraft:cobblestone') === 1,
+  check('pillar down 回到地面，泥土 16 个一个不少，圆石也捡到了', !back.error && back.value.recovered === 3 && Math.abs((await pos('Claude'))[1] - (Y + 1)) < 0.01 && await countItem('minecraft:dirt') === 16 && await countItem('minecraft:cobblestone') === 1,
     { back: back.value, dirt: await countItem('minecraft:dirt'), cobblestone: await countItem('minecraft:cobblestone'), bot: await pos('Claude'), drops: await command('execute as @e[type=item,x=3404,y=204,z=3404,distance=..12] run data get entity @s Pos'), items: await command('execute as @e[type=item,x=3404,y=204,z=3404,distance=..12] run data get entity @s Item.id') });
 
   // 3. 手动垫高 3 格再下来
   await ground();
   await command('clear Claude'); await command('give Claude dirt 8');
   await command(`tp Claude 3404.5 ${Y + 1} 3404.5`); await wait(1500);
-  const up = await tool('pillar-up', { blocks: 3 });
+  const up = await tool('pillar', { up: 3 });
   const high = await pos('Claude');
-  check('pillar-up 3 格：站到 y=204、用掉 3 个泥土', !up.error && up.value.placed === 3 && Math.abs(high[1] - (Y + 4)) < 0.01 && await countItem('minecraft:dirt') === 5, { up: up.value, high });
-  const down = await tool('pillar-down');
+  check('pillar up 3 格：站到 y=204、用掉 3 个泥土', !up.error && up.value.placed === 3 && Math.abs(high[1] - (Y + 4)) < 0.01 && await countItem('minecraft:dirt') === 5, { up: up.value, high });
+  const down = await tool('pillar', { down: true });
   const low = await pos('Claude');
   await wait(1000);
-  check('pillar-down 回到 y=201，3 个泥土收回', !down.error && down.value.recovered === 3 && Math.abs(low[1] - (Y + 1)) < 0.01 && await countItem('minecraft:dirt') === 8, { down: down.value, low, dirt: await countItem('minecraft:dirt') });
-  const again = await tool('pillar-down');
-  check('没有自己搭的柱子时 pillar-down 拒绝，不往下挖', again.error || /NOT_FOUND|没有记着/.test(JSON.stringify(again.value)), again.value);
+  check('pillar down 回到 y=201，3 个泥土收回', !down.error && down.value.recovered === 3 && Math.abs(low[1] - (Y + 1)) < 0.01 && await countItem('minecraft:dirt') === 8, { down: down.value, low, dirt: await countItem('minecraft:dirt') });
+  const again = await tool('pillar', { down: true });
+  check('没有自己搭的柱子时 pillar down 拒绝，不往下挖', again.error || /NOT_FOUND|没有记着/.test(JSON.stringify(again.value)), again.value);
 
   // 4. 云杉：树干 (3404, 201..206, 3404)，树叶从 203 起层层包住树干（下面两节看得见，上面四节被挡住），顶上 207、208；Bot 站在西边 3 格
   await ground();

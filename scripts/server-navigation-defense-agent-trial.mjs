@@ -99,7 +99,7 @@ function consumeMessage(message) {
     const names = message.tools.map(tool => typeof tool === 'string' ? tool : tool.name);
     assert(names.every(name => typeof name === 'string' && name.startsWith('mcp__minecraft__')), 'CLI exposed an unexpected built-in/other-server tool');
     assert.equal(names.length, 39, 'This batch requires the full 39 Minecraft MCP tools');
-    assert(names.includes('mcp__minecraft__defend-self') && names.includes('mcp__minecraft__get-survival-state'));
+    assert(names.includes('mcp__minecraft__defend-self') && names.includes('mcp__minecraft__get-status'));
     report.liveInitTools = names;
   }
   for (const block of message.message?.content ?? []) if (block.type === 'tool_result') {
@@ -192,15 +192,15 @@ try {
     catch (error) { decodeFailure = error; }
   });
   const context = '这是隔离服固定评测输入，不是玩家游戏聊天。只使用Minecraft MCP，只操作明确列出的夹具和目标。不挖放、不追击。running不是完成，必须get-operation查询终态；failed/unknown立即停止报告，不自动重试。';
-  await phase('query-threats-and-disable-reflexes', context + '先get-survival-state读取紧凑威胁、危险和有效policy revision；再set-reflexes使用expectedRevision设置autoEat:false、autoDefend:false、armed:false、maxAttacks:1、defenseTimeoutMs:3000、excludedEntityIds:[]。不要移动或攻击。', ['get-survival-state', 'set-reflexes'], async row => {
-    assert(row.responses.some(response => response.name === 'get-survival-state' && response.value?.threats && response.value?.dangers && response.value.policy?.defenseSupported === true), 'Missing native threat/danger state and supported defense');
+  await phase('query-threats-and-disable-reflexes', context + '先get-status(include:["survival"])读取紧凑威胁、危险和有效policy revision；再set-reflexes使用expectedRevision设置autoEat:false、autoDefend:false、armed:false、maxAttacks:1、defenseTimeoutMs:3000、excludedEntityIds:[]。不要移动或攻击。', ['get-status', 'set-reflexes'], async row => {
+    assert(row.responses.some(response => response.name === 'get-status' && response.value?.survival?.threats && response.value?.survival?.dangers && response.value.survival.policy?.defenseSupported === true), 'Missing native threat/danger state and supported defense');
     const policy = row.responses.find(response => response.name === 'set-reflexes' && response.value?.autoEat === false && response.value.autoDefend === false && response.value.armed === false && response.value.maxAttacks === 1);
     assert(policy, 'No effective disabled-reflex policy receipt');
     assert.equal(report.liveInitTools?.length, 39, 'Missing verified restricted 39-tool init');
   });
   const beforeMoveHealth = nativeHealth(await command('data get entity Claude Health'));
-  await phase('native-height-navigation', context + '用move-to-position走到x:2611.5,y:202,z:2614.5，tolerance:0.35、timeoutMs:20000；只能原生走跳，通过一格高台。查询至succeeded后get-position核对，不做其他动作。', ['move-to-position', 'get-position'], async row => {
-    assert(row.responses.some(response => ['move-to-position', 'get-operation'].includes(response.name) && response.value?.name === 'move-to-position' && response.value.status === 'succeeded'), 'Missing native navigation successful terminal receipt');
+  await phase('native-height-navigation', context + '用go-to走到x:2611.5,y:202,z:2614.5，tolerance:0.35、timeoutMs:20000；只能原生走跳，通过一格高台。查询至succeeded后get-status核对，不做其他动作。', ['go-to', 'get-status'], async row => {
+    assert(row.responses.some(response => ['go-to', 'get-operation'].includes(response.name) && response.value?.name === 'move-to-position' && response.value.status === 'succeeded'), 'Missing native navigation successful terminal receipt');
     row.independentPosition = nativePosition(await command('data get entity Claude Pos'));
     assert(Math.hypot(row.independentPosition.x - 2611.5, row.independentPosition.y - 202, row.independentPosition.z - 2614.5) < 0.7, 'Independent native position did not reach the raised goal');
     row.healthBefore = beforeMoveHealth; row.healthAfter = nativeHealth(await command('data get entity Claude Health'));
@@ -210,8 +210,8 @@ try {
   await fixture('item replace entity Claude inventory.1 with minecraft:diamond_axe');
   await fixture(`summon minecraft:husk 2613.5 202 2614.5 {Tags:["${fixtureTag}"],PersistenceRequired:1b,NoAI:1b,Silent:1b}`);
   const enemyHealthBefore = nativeHealth(await command(`data get entity ${ownEnemy} Health`));
-  await phase('native-finite-defense', context + '先get-survival-state读取附近唯一minecraft:husk的entityId和明确敌对来源，再defend-self指定该UUID。钻石斧在主背包slot:10，任务会复用prepare-item准备；最多一次原生攻击，不追击。确认succeeded且confirmedHits>=1、confirmedDamage>0、damageConfirmation:native_damage_event；必要时get-operation查询。', ['get-survival-state', 'defend-self'], async row => {
-    const threat = row.responses.flatMap(response => response.name === 'get-survival-state' ? response.value?.threats?.nearby ?? [] : []).find(value => value.type === 'minecraft:husk' && value.defenseEligible === true && value.hostilitySource === 'vanilla_hostile_allowlist');
+  await phase('native-finite-defense', context + '先get-status(include:["survival"])读取附近唯一minecraft:husk的entityId和明确敌对来源，再defend-self指定该UUID。钻石斧在主背包slot:10，任务会复用prepare-item准备；最多一次原生攻击，不追击。确认succeeded且confirmedHits>=1、confirmedDamage>0、damageConfirmation:native_damage_event；必要时get-operation查询。', ['get-status', 'defend-self'], async row => {
+    const threat = row.responses.flatMap(response => response.name === 'get-status' ? response.value?.survival?.threats?.nearby ?? [] : []).find(value => value.type === 'minecraft:husk' && value.defenseEligible === true && value.hostilitySource === 'vanilla_hostile_allowlist');
     assert(threat, 'Model did not obtain an explicitly hostile native husk UUID'); targetId = threat.entityId; row.entityId = targetId;
     const receipt = row.responses.map(response => response.value).find(value => value?.name === 'defend-self' && value.status === 'succeeded' && value.result?.confirmedHits >= 1 && value.result.confirmedDamage > 0 && value.result.damageConfirmation === 'native_damage_event' && value.result.sideEffects === 'confirmed');
     assert(receipt, 'No native damage-event-confirmed finite defense terminal receipt');
@@ -223,16 +223,16 @@ try {
   // Return the still-living fixture inside defense range while autoDefend remains false.
   await fixture(`tp ${ownEnemy} 2613.5 202 2614.5`);
   const exclusionHealth = await command(`data get entity ${ownEnemy} Health`);
-  await phase('revisioned-target-exclusion', context + `先get-survival-state读取最新policy revision；set-reflexes使用expectedRevision，设置autoEat:false、autoDefend:true、armed:true、excludedEntityIds:["${targetId}"]。再get-survival-state确认排除UUID和有效revision，不主动攻击被排除目标。`, ['get-survival-state', 'set-reflexes'], async row => {
+  await phase('revisioned-target-exclusion', context + `先get-status(include:["survival"])读取最新policy revision；set-reflexes使用expectedRevision，设置autoEat:false、autoDefend:true、armed:true、excludedEntityIds:["${targetId}"]。再get-status(include:["survival"])确认排除UUID和有效revision，不主动攻击被排除目标。`, ['get-status', 'set-reflexes'], async row => {
     const change = row.responses.find(response => response.name === 'set-reflexes' && response.value?.autoDefend === true && response.value.armed === true && response.value.excludedEntityIds?.includes(targetId));
     assert(change, 'Missing accepted revisioned entity-exclusion policy');
-    assert(row.responses.some(response => response.name === 'get-survival-state' && response.value?.policy?.autoDefend === true && response.value.policy.excludedEntityIds?.includes(targetId) && response.value.policy.revision === change.value.revision), 'Missing effective exclusion state read after revisioned policy update');
+    assert(row.responses.some(response => response.name === 'get-status' && response.value?.survival?.policy?.autoDefend === true && response.value.survival.policy.excludedEntityIds?.includes(targetId) && response.value.policy.revision === change.value.revision), 'Missing effective exclusion state read after revisioned policy update');
     await wait(900); assert.equal(await command(`data get entity ${ownEnemy} Health`), exclusionHealth, 'Excluded hostile target was attacked automatically');
     row.independentHealthUnchanged = true;
   });
-  await phase('completion-marker-and-hard-stop', context + '用send-chat发送精确文本NAVDEF_AGENT_DONE，然后stop-action硬停止，最后get-survival-state确认policy.armed:false。结束本轮，不能复活旧移动或防卫。', ['send-chat', 'stop-action', 'get-survival-state'], async row => {
+  await phase('completion-marker-and-hard-stop', context + '用send-chat发送精确文本NAVDEF_AGENT_DONE，然后stop-action硬停止，最后get-status(include:["survival"])确认policy.armed:false。结束本轮，不能复活旧移动或防卫。', ['send-chat', 'stop-action', 'get-status'], async row => {
     assert(row.responses.some(response => response.name === 'stop-action' && response.value?.stopped === true), 'No hard-stop confirmation');
-    assert(row.responses.some(response => response.name === 'get-survival-state' && response.value?.policy?.armed === false), 'Missing final disarmed state');
+    assert(row.responses.some(response => response.name === 'get-status' && response.value?.survival?.policy?.armed === false), 'Missing final disarmed state');
     await until(async () => (await peerEvents()).some(event => event.type === 'chat' && event.username === 'Claude' && event.message === 'NAVDEF_AGENT_DONE' && Date.parse(event.time) >= row.start), 'independent in-game completion marker', 3000);
     row.independentGameChatObserved = true; await wait(700);
     assert.equal(await command(`data get entity ${ownEnemy} Health`), exclusionHealth, 'Hard stop allowed a delayed attack');

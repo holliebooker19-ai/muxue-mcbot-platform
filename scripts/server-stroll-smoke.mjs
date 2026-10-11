@@ -74,7 +74,7 @@ try {
   const started = Date.now();
   while (Date.now() - started < 50000) {
     await wait(1000);
-    const bot = await posOf('Claude'); const mode = (await tool('get-companion-mode')).value; const text = JSON.stringify(mode);
+    const bot = await posOf('Claude'); const mode = (await tool('get-status')).value.companionMode; const text = JSON.stringify(mode);
     const sample = { t: Math.round((Date.now() - started) / 1000), bot, toPlayer: Math.round(flat(bot, player) * 10) / 10, state: mode?.state };
     report.samples.push(sample);
     if (text.includes('BLOCKED') || text.includes('failed')) { bad = sample; break; }

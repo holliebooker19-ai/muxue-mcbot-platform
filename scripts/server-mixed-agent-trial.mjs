@@ -224,6 +224,7 @@ async function stopWhileBusy() {
   const offset = (await driverText()).length;
   const phase = beginPhase('stop-during-container-task', '小克，去东边六格内的箱子里拿48个橡木原木给我，先回应一句。');
   await send({ type: 'chat', message: phase.message });
+  // TODO(ServerBody 合并)：fetch-and-give 已删，这里的等待待改写。
   await until(async () => /· fetch-and-give /.test((await driverText()).slice(offset)) && distance(await position(), { x: 2410.5, y: 201, z: 2422.5 }) > 0.35,
     'Finite task never entered observable movement', 45000);
   phase.busyObservedMs = Date.now() - phase.start;
@@ -274,7 +275,7 @@ try {
   await until(async () => /本轮结束/.test(await driverText()), 'Agent startup did not finish', 45000);
   report.startupMs = Date.now() - startedAt;
   await request('query-before-actions', '小克，查询你现在的状态和背包，告诉我你有多少钻石，先不要移动。', phase => {
-    assert(phase.tools.some(tool => ['get-status', 'list-inventory'].includes(tool)), 'No actual game query');
+    assert(phase.tools.some(tool => ['get-status'].includes(tool)), 'No actual game query');
     assert(/5|五/.test(phase.replies.map(value => value.message).join(' ')), 'Expected five fixture diamonds');
   });
   const follow = await request('follow-authorized-pickup-and-chat', '小克，持续跟着C2Tester，到两格半左右等我，只顺手捡我四格内的圆石掉落，不挖方块。先回应一句。',
@@ -304,6 +305,7 @@ try {
   await fixture('tp Claude 2410.5 201 2422.5'); await fixture('tp C2Tester 2413 201 2422.5');
   await fixture('setblock 2411 201 2420 chest[facing=south]');
   await fixture('item replace block 2411 201 2420 container.0 with minecraft:oak_log 6');
+    // TODO(ServerBody 合并)：fetch-and-give 已删，这个阶段待改写。
   await finite('container-fetch-return', '小克，把附近唯一箱子里的3个橡木原木拿给C2Tester，先回应一句。', 'fetch-and-give', async phase => {
     await until(async () => (await itemCount('C2Tester', 'minecraft:oak_log')) === 3, 'Native player did not receive three logs', 10000);
     phase.recipientInventoryAuthority = await command('data get entity C2Tester Inventory');
