@@ -397,7 +397,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 - 服务端声明 `beside-follow` 后，`select-slot`、`equip-item` 可以在 `follow-companion` 运行时执行：跟随不停、不重发，运行端也不让开。两个动作都在服务端同步完成（`begin` 返回时已不是 running）；它们不移动身体，不改跟随的 `active`。
 - 放行条件：当前正在 running 的非聊天动作全部是 `follow-companion`。运行端的 exclusive 槽和共享任务锁在这种情况下对这两个动作同样放行。
-- 其余照旧：别的动作（如 `dig-block`、`build`）在跟随旁边仍返回 `BUSY`；`emote`、`look-at` 等仍让开跟随。万一服务端没有同步完成，回执按 `failed`（`INTERNAL`）处理。
+- 其余照旧：别的动作（如 `dig-block`、`build`）在跟随旁边仍返回 `BUSY`。（之后的写法：`look-at` 不再让开，内置 `emote` 只停住、不挂起，见陪伴姿态一节的「不让姿态挂起的操作」。）万一服务端没有同步完成，回执按 `failed`（`INTERNAL`）处理。
 
 ### 死后原地复活、死因、断开前的陪伴状态（能力 last-death，2026-10-11 试玩反馈）
 
@@ -487,7 +487,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 | `waiting` | 原地等（`action:"wait"`） |
 | `seated` | 坐在座位上 |
 | `guarding` | 常驻保护占着身体在打；打完回到原来的状态 |
-| `suspended` | 有操作在跑，姿态让给它：`suspendedFor`是操作名。操作结束后，身体空闲满`RESUME_AFTER_MS`（3000）才接上，期间`resumeInMs`是剩余毫秒；中间来了新操作就重新计时。带附加动画的 `emote` 操作本身马上结束，但动画（`BodyEmotes`，`seconds` 秒）还在播时也算占着身体，`suspendedFor` 是 `emote`，播完再等 3 秒（2026-10-11） |
+| `suspended` | 有操作在跑，姿态让给它：`suspendedFor`是操作名。操作结束后，身体空闲满`RESUME_AFTER_MS`（3000）才接上，期间`resumeInMs`是剩余毫秒；中间来了新操作就重新计时。带附加动画的 `emote` 操作本身马上结束，但动画（`BodyEmotes`，`seconds` 秒）还在播时也算占着身体，`suspendedFor` 是 `emote`，播完再等 3 秒（2026-10-11）。内置手势（`emote` 不带 `source`）不挂起姿态，只停住，见下文「不让姿态挂起的操作」 |
 | `away` | 跟的人下线、死了、换了维度，或离开 32 格（`GuardDuty.PLAYER_RANGE`，保护判断玩家在不在也用它）；回来自动接上。`reason`为`PLAYER_AWAY` |
 | `blocked` | 走不到玩家身边；每隔 3 秒（`FollowCompanion.UNREACHABLE_RETRY_MS`），或玩家挪开 2 格（`UNREACHABLE_SHIFT`）就再试。`reason`是导航给的码：`NO_PATH`，或此刻不能走路时的`BLOCKED`（在岩浆里、骑着东西等）；某一刻内部出错时为`INTERNAL`，下一刻照常再试 |
 
@@ -496,9 +496,11 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 2. 正在跑的操作；
 3. 姿态。
 
-不让姿态挂起的操作：`send-chat`、`select-slot`、`equip-item`。这些操作不移动身体，也不重新计时，相当于原来`beside-follow`的名单。名单只在服务端存一份（`Posture.KEEPS`），第三步再加`look-at`、`emote`。坐着时能用的操作（见`stand-up`那一行）不会让`seated`挂起；不能用的照旧报`SEATED`。
+不让姿态挂起的操作（`Posture.KEEPS`）：`send-chat`、`select-slot`、`equip-item`、`look-at`。这些操作不移动身体，也不重新计时，相当于原来`beside-follow`的名单。`look-at` 只转头：走着的跟随下一刻就把头转回走路方向，站着、等着时由 gaze hold 保持住朝向。坐着时能用的操作（见`stand-up`那一行）不会让`seated`挂起；不能用的照旧报`SEATED`。
 
-“有操作在跑”看的是会话里状态为 running 的操作（`ControlSession.running()`），所以进食、自卫这类生存动作也会让姿态挂起。`select-slot`、`equip-item`不再有特殊放行：别的操作在跑时它们照常报`BUSY`；没有操作在跑时，跟随不是操作，本来就不挡它们。实现补定：任何一次`stop`（包括操作结束时的收尾）之后，姿态也要等`RESUME_AFTER_MS`才再动；这段时间跟随显示`suspended`，等待和坐着本来就不动，`state`不变。
+停住但不挂起的操作（`Posture.HOLDS`，目前只有内置手势 `emote`：`wave`、`nod`、`shake`、`crouch`、`jump`、`spin`）：手势播放期间跟随停下（只停一次），`state` 保持 `following`，没有 `suspendedFor`，也不设 `resumeInMs`；手势自然结束后，下一刻姿态就继续驱动，不等 `RESUME_AFTER_MS`。等待时这段什么也不变。坐着时不适用，坐着的姿态照旧（不挂起，停止时仍等 3 秒）。附加动画（`emote` 带 `source`）不在这个名单里：操作马上结束，但动画还在播时姿态仍挂起（`suspendedFor` 是 `emote`），播完再等 3 秒，和原来一样（2026-10-11）。
+
+“有操作在跑”看的是会话里状态为 running 的操作（`ControlSession.running()`），所以进食、自卫这类生存动作也会让姿态挂起。`select-slot`、`equip-item`不再有特殊放行：别的操作在跑时它们照常报`BUSY`；没有操作在跑时，跟随不是操作，本来就不挡它们。实现补定：任何一次`stop`（包括操作结束时的收尾）之后，姿态也要等`RESUME_AFTER_MS`才再动；这段时间跟随显示`suspended`，等待和坐着本来就不动，`state`不变。例外（2026-10-11，第三步）：KEEPS 和 HOLDS 操作正常结束（`ServerController.finish` 经 `Posture.endsQuietly` 判断）时不做这段等待，所以内置手势一结束就继续跟随。坐着时仍按 stop 处理。显式 `stop`／`stop-action`、取消、别的操作（如 `move-to-position`）结束照旧等 3 秒。
 
 **跟随失败不再结束跟随**：
 - 跟随中挨打不再报`BLOCKED`：没开保护时由运行端的近身自卫处理；
