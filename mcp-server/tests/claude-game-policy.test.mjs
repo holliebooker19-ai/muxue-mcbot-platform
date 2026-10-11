@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import * as protocols from '../../scripts/agents/process-protocols.mjs';
 import * as host from '../../scripts/companion.mjs';
+import { SERVER_GAME_INSTRUCTIONS } from '../../scripts/agents/game-instructions.mjs';
 
 const value = (argv, name) => argv[argv.indexOf(name) + 1];
 
@@ -20,8 +21,11 @@ test('ServerBody Claude removes built-in tools and cannot grant host permissions
   assert.ok(!a.includes('--disable-slash-commands'), 'the host compacts with /compact; with no tools the model cannot run a skill');
   assert.deepEqual(a.slice(a.indexOf('--allowedTools') + 1), ['mcp__minecraft']);
   assert.deepEqual(JSON.parse(value(a, '--settings')), { disableAllHooks: true, autoMemoryEnabled: false });
-  assert.equal(value(a, '--append-system-prompt'), '仅作为测试身份，无文件工具。');
+  // The same game rules as Codex and dsh, then the persona; kept through compaction (docs/prompt_slimming_plan.md).
+  assert.equal(value(a, '--append-system-prompt'), `${SERVER_GAME_INSTRUCTIONS}\n\n仅作为测试身份，无文件工具。`);
   assert.ok(!a.includes('acceptEdits'));
+  const plain = protocols.getAgentProtocol('claude').command({ body: 'server', hostedConfigFile: 'G:/test root/mcp.json' }).a;
+  assert.equal(value(plain, '--append-system-prompt'), SERVER_GAME_INSTRUCTIONS, 'the game rules even without a persona');
 });
 
 test('Claude turns are never commands; only the host compaction is, and its boundary is read back', () => {
@@ -31,7 +35,8 @@ test('Claude turns are never commands; only the host compaction is, and its boun
   assert.equal(claude.compactTurn('保留任务').message.content, '/compact 保留任务');
   assert.deepEqual(claude.decodeMessage({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual', pre_tokens: 203000, post_tokens: 9000 } }),
     [{ type: 'compacted', preTokens: 203000, postTokens: 9000 }]);
-  for (const name of ['codex', 'dsh']) assert.equal(protocols.getAgentProtocol(name).compactTurn, undefined, `${name}: not wired yet, falls back to a new session`);
+  // Codex compacts through its connection (thread/compact/start), dsh by itself at the host's limit: neither has a /compact turn.
+  for (const name of ['codex', 'dsh']) assert.equal(protocols.getAgentProtocol(name).compactTurn, undefined, name);
 });
 
 test('ServerBody MCP config exposes only the selected game server without mutating source', () => {

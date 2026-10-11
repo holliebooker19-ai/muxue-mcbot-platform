@@ -6,7 +6,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ClientBody, readConnection } from './client-body.js';
 import { ServerBody, readServerConnection, type ServerLease } from './server-body.js';
 import { EventJournal } from './events.js';
-import { acquireRuntimeLock, RuntimeMonitor, hostedHeartbeatFresh } from './lifecycle.js';
+import { acquireRuntimeLock, RuntimeMonitor, hostedHeartbeatFresh, hostedCompactions } from './lifecycle.js';
+import { GuideBook, GUIDES } from './guides.js';
 import { createMcpServer } from './mcp.js';
 import { CompanionMode, hasCompanionMode } from './companion-mode.js';
 import { GatherTasks } from './gather-tasks.js';
@@ -118,6 +119,8 @@ async function main(): Promise<void> {
     events.useHome(() => places.home());
     // Items a player throws to the body wake the model (gift-receipts); without it receipts carry no thrower.
     if (body.hello.capabilities.includes('gift-receipts')) events.useGifts();
+    // Hosted ServerBody: play guides come with the first use instead of the startup prompt, and again after the driver compacts.
+    if (values.hosted && body.hello.backend === 'server') events.useGuides(new GuideBook(GUIDES, () => hostedCompactions(heartbeatFile)));
     const first = await body.observe(); events.ingest(first);
     // Furnaces loaded and left: tracked per world, checked when due, a machine event when done (8b).
     const machines = body.hello.capabilities.includes('smelt-item') ? new MachineWatch(new MachineBook(runtimeDir, values['world-id']), body, events) : undefined;

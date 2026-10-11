@@ -405,7 +405,7 @@ textarea:focus{border-color:var(--primary);background:var(--glass-strong);box-sh
 <div class="fields four" style="margin-top:14px">
   <div class="f"><label for="c-idleMinutes">空闲提醒（分钟）</label><input id="c-idleMinutes" type="number" min="0" max="1440" placeholder="0（关闭）"></div>
   <div class="f"><label for="c-resumeWindowMin">沿用旧会话（分钟）</label><input id="c-resumeWindowMin" type="number" min="0" max="1440" placeholder="50"></div>
-  <div class="f"><label for="c-rotateTokens">切换新会话（tokens）</label><input id="c-rotateTokens" type="number" min="0" max="2000000" step="1000" placeholder="200000"></div>
+  <div class="f"><label for="c-rotateTokens" title="上下文超过此值时压缩对话：Claude、Codex 由托管发起压缩，dsh 在此值自动压缩；无法压缩时切换新会话；0 表示不限制">压缩阈值（tokens）</label><input id="c-rotateTokens" type="number" min="0" max="2000000" step="1000" placeholder="200000"></div>
   <div class="f"><label for="c-maxRestarts">最多重启（次）</label><input id="c-maxRestarts" type="number" min="0" max="100" placeholder="10"></div>
 </div>
 </div>

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { Observation, Operation, PickupReceipt } from './body.js';
 import { summarizeOperation } from './model-view.js';
 import type { Place } from './places.js';
+import type { GuideBook } from './guides.js';
 
 export interface GameEvent { session: string; seq: number; timestamp: number; type: string; text: string; operationId?: string }
 /** Items a player threw to the body, collected for a short window and told as one gift event. */
@@ -51,6 +52,7 @@ export class EventJournal {
   private giftHandler?: GiftHandler;
   private giftHandlerTimeoutMs = 8000;
   private gifts?: { windowMs: number; instance?: string; cursor?: number; pending: Map<string, PendingGift> };
+  private guideBook?: GuideBook;
   constructor(runtimeDir?: string, private readonly username?: string, private readonly botPlayers: string[] = [], private readonly attachmentChatCursor?: number) {
     if (!runtimeDir || !username) return;
     fs.mkdirSync(runtimeDir, { recursive: true });
@@ -64,7 +66,12 @@ export class EventJournal {
     fs.writeFileSync(this.consumedFile, '');
     this.writeTaskReceipts();
   }
+  /** Play guides (guides.ts): the first event of a kind in a session carries what to do with it. Hosted only; tests opt in. */
+  useGuides(book: GuideBook): void { this.guideBook = book; }
+  get guides(): GuideBook | undefined { return this.guideBook; }
   add(type: string, text: string, operationId?: string): GameEvent {
+    const guide = this.guideBook?.forEvent(type, text);
+    if (guide) text = `${text}\n${guide}`;
     const record = { session: this.session, seq: ++this.seq, timestamp: Date.now(), type, text, ...(operationId ? { operationId } : {}) };
     this.records.push(record);
     if (this.records.length > 200) this.records.shift();

@@ -60,9 +60,12 @@ function finish(text) {
     emit({type:'result',is_error:false});
   } else if(kind==='dsh') {
     emit({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'收到'}}}});
-    emit({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'usage_update',used:10,size:1000}}});
+    emit({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'usage_update',used:Number(process.env.FAKE_AGENT_TOKENS)||10,size:1000000}}});
     emit({jsonrpc:'2.0',id:promptId,result:{stopReason:'end_turn'}});
-  } else emit({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed',items:[],error:null}}});
+  } else {
+    emit({method:'thread/tokenUsage/updated',params:{threadId,turnId,tokenUsage:{last:{totalTokens:compacted?10:Number(process.env.FAKE_AGENT_TOKENS)||10}}}});
+    emit({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed',items:[],error:null}}});
+  }
 }
 record({kind:'start',argv:process.argv.slice(2),toolSearch:process.env.ENABLE_TOOL_SEARCH});
 if(kind==='claude') {
@@ -85,12 +88,22 @@ rl.on('line',async line=>{
   if(method==='thread/start'||method==='thread/resume') {
     await connect(params.config.mcp_servers.minecraft);
     threadId=`server-fake-${process.pid}`;
+    record({kind:'thread',compactPrompt:params.config.compact_prompt});
     return reply({thread:{id:threadId,turns:[]},model:'fake',modelProvider:'openai',reasoningEffort:'low'});
   }
   if(method==='turn/start') {
     turnId=`turn-${++turn}`;
     reply({turn:{id:turnId,status:'inProgress',items:[]}});
     finish(params.input.map(x=>x.text||'').join('\n'));
+    return;
+  }
+  // thread/compact/start（FAKE_AGENT_COMPACT=fail：旧版本没有这个方法）：回 {}，压缩作为一轮跑完。
+  if(method==='thread/compact/start') {
+    if(process.env.FAKE_AGENT_COMPACT==='fail') return emit({id,error:{code:-32601,message:'unknown method thread/compact/start'}});
+    reply({}); compacted=true; turnId=`compact-${++turn}`;
+    emit({method:'turn/started',params:{threadId,turn:{id:turnId,status:'inProgress',items:[]}}});
+    emit({method:'item/completed',params:{threadId,turnId,item:{type:'contextCompaction',id:'c'}}});
+    emit({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed',items:[],error:null}}});
     return;
   }
   if(method==='turn/interrupt') {

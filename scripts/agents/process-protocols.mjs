@@ -8,14 +8,17 @@
 //   systemInstructions  ServerBody 托管时，宿主是否把人设和游戏规则放进系统提示
 //   hostedMcpConfig 是否用驱动器生成的托管 MCP 配置（agy 只能用全局配置）
 //   environment(env, { body })  启动 Agent 前对环境变量的调整
+//   上下文超过上限（--rotate-tokens）时：compactTurn(keep)（无状态的，Claude 的 /compact）或 compacts（有状态的，connection.compact()）
+//   原地压缩；compactsItself 是 Agent 自己按这个上限自动压缩（dsh），宿主不压也不换会话；都没有的整理记忆后换会话
 // 两种接法：无状态的 encodeTurn/decodeMessage（一行进一行出），或有状态的 createConnection
-// （start / sendTurn / handleMessage / interrupt / dispose，可选 stopActions）。
-// 统一事件：session、request_started、request_completed、usage、text、tool、completed。
+// （start / sendTurn / handleMessage / interrupt / dispose，可选 stopActions、compact）。
+// 统一事件：session、request_started、request_completed、usage（contextTokens，可带 contextWindow）、compacted、text、tool、completed。
 // completed 只表示 Agent 本轮结束，不表示其中每个游戏动作成功。
 import os from 'node:os';
 import path from 'node:path';
 import { codexCommand, createCodexConnection } from './codex-app-server.mjs';
 import { dshCommand, createDshConnection, writeDshPatch } from './dsh-acp.mjs';
+import { SERVER_GAME_INSTRUCTIONS } from './game-instructions.mjs';
 
 export function claudeContextTokens(usage) {
   if (!usage) return 0;
@@ -50,7 +53,8 @@ const claude = Object.freeze({
       // and only a message that starts with "/" is a command, which encodeTurn never sends.
       a.push('--tools', '', '--restricted',
         '--settings', JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }));
-      if (gameInstructions) a.push('--append-system-prompt', gameInstructions);
+      // The same game rules as Codex and dsh get, then the persona (they were missing here until 10-12).
+      a.push('--append-system-prompt', [SERVER_GAME_INSTRUCTIONS, gameInstructions].filter(Boolean).join('\n\n'));
     }
     if (effort) a.push('--effort', effort);
     if (model) a.push('--model', model);
@@ -153,6 +157,8 @@ const codex = Object.freeze({
   defaultEffort: 'low',
   command: () => codexCommand(),
   createConnection: createCodexConnection,
+  // The host compacts the thread in place past its limit (connection.compact, thread/compact/start), as Claude's /compact.
+  compacts: true,
 });
 
 // DeepSeek Harness：ACP（标准 stdio JSON-RPC）。账号目录就是 DSH_HOME，默认放在仓库的 runtime/dsh/home，
@@ -167,11 +173,13 @@ const dsh = Object.freeze({
   // 没指定账号目录也不落到用户的 ~/.dsh。桌面版的 Electron 要 ELECTRON_RUN_AS_NODE 才当 Node 用，对普通 Node 没影响。
   environment: (env, { root }) => ({ ...env, DSH_HOME: env.DSH_HOME || path.join(root, 'runtime', 'dsh', 'home'), ELECTRON_RUN_AS_NODE: '1' }),
   defaultEffort: 'low',
-  command({ root, hostedConfigFile, gameInstructions }) {
-    const patchFile = writeDshPatch(hostedConfigFile.replace(/\.json$/i, '') + '.dsh-patch.yml', gameInstructions);
+  command({ root, hostedConfigFile, gameInstructions, rotateTokens, contextWindow }) {
+    const patchFile = writeDshPatch(hostedConfigFile.replace(/\.json$/i, '') + '.dsh-patch.yml', gameInstructions, { rotateTokens, contextWindow });
     return dshCommand({ root, patchFile });
   },
   createConnection: createDshConnection,
+  // ACP has no commands (no /compact): dsh's own automatic compaction is set to the host's limit in the patch (dshCompaction).
+  compactsItself: true,
 });
 
 const protocols = new Map([['claude', claude], ['gemini', antigravity], ['codex', codex], ['dsh', dsh]]);

@@ -10,6 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {parseArgs,bodySessionScope,runtimeFiles,startupPrompt,readSessionState,completeServerChat,captureBodyArtifacts,cleanupBodyArtifacts,taskAlreadyDelivered,isWakeEvent,busyAck,deathNote} from '../../scripts/companion.mjs';
 import {createServerBodyControl,respawnIfDead,lastDeath} from '../../scripts/server-body-control.mjs';
 import {CODEX_SERVER_TOOLS,codexThreadConfig} from '../../scripts/agents/codex-app-server.mjs';
+import {SERVER_GAME_INSTRUCTIONS} from '../../scripts/agents/game-instructions.mjs';
 const HERE=path.dirname(fileURLToPath(import.meta.url));
 const ROOT=path.resolve(HERE,'../..');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -67,9 +68,10 @@ test('ServerBody 参数、提示与工具不继承旧进服/记忆路径',()=>{
   for(const agent of ['claude','codex','dsh']){
     const args=parseArgs(['--agent',agent,'--body','server','--server-check-seconds','1']);assert.equal(args.serverCheckSeconds,0);
     assert.match(startupPrompt(args,true),/ServerBody/);assert.doesNotMatch(startupPrompt(args,true),/调用 memory-context 读记忆|会自动进服|会被自动下线/);
-    assert.match(startupPrompt(args,true),/components/);assert.match(startupPrompt(args,true),/revision/);assert.match(startupPrompt(args,true),/死亡后控制就结束了，不自己重接；下次启动托管时会自动重生/);
-    assert.match(startupPrompt(args,true),/discover-containers → container-withdraw → give-item/);assert.match(startupPrompt(args,true),/wholeTree:true/);assert.match(startupPrompt(args,true),/details:true/);
-    assert.doesNotMatch(startupPrompt(args,true),/每轮先查询当前状态|完整复制状态与 components/);
+    // 规则在系统提示（SERVER_GAME_INSTRUCTIONS）、工具说明和第一次用到时的玩法说明里；启动这一轮只说是谁、现在做什么（docs/prompt_slimming_plan.md）。
+    assert.ok(startupPrompt(args,true).length<200,startupPrompt(args,true));assert.doesNotMatch(startupPrompt(args,true),/^- /m);
+    assert.match(SERVER_GAME_INSTRUCTIONS,/不复制 components/);assert.match(SERVER_GAME_INSTRUCTIONS,/死亡后控制就结束了，不自己重接/);assert.match(SERVER_GAME_INSTRUCTIONS,/go-to 带 meet/);
+    assert.doesNotMatch(SERVER_GAME_INSTRUCTIONS,/每轮先查询当前状态|完整复制状态与 components/);
     assert.equal(bodySessionScope(args,['--world-id','a','--connection-file','x']).body,'server');
   }
   assert.throws(()=>parseArgs(['--agent','gemini','--body','server']),/仅接通 Claude、Codex、dsh/);
@@ -93,13 +95,13 @@ test('ServerBody 参数、提示与工具不继承旧进服/记忆路径',()=>{
 test('持续陪伴只为受阻通知唤醒，普通状态变化不产生空闲回合',()=>{
   assert.equal(isWakeEvent({type:'companion',text:'跟随受阻，等待明确继续'}),true);
   assert.equal(isWakeEvent({type:'companion_state',text:'following -> waiting'}),false);
-  const prompt=startupPrompt(parseArgs(['--agent','claude','--body','server']),false);
+  // 跟随的细节（pause／resume、受阻）在第一次 follow 的玩法说明里（client-runtime 的 guides.ts，运行端测试）；常驻规则只留一句。
+  const prompt=SERVER_GAME_INSTRUCTIONS;
   assert.match(prompt,/不为聊天停止跟随/);
-  assert.match(prompt,/不自动 resume/);
   assert.equal(isWakeEvent({type:'bedtime',text:'天黑了，你在家附近'}),true,'bedtime 要叫醒模型去睡觉');
   assert.equal(isWakeEvent({type:'machine',text:'furnace (1, 64, 2) 烧好了'}),true,'炉子烧好了要叫醒模型回去取');
   assert.equal(isWakeEvent({type:'gift',text:'muxue 丢给你：minecraft:netherite_sword ×1（已进背包）'}),true,'玩家丢来的东西要叫醒模型回应');
-  assert.match(prompt,/收到 gift/,'启动提示说明收到 gift 时简短回应');
+  assert.doesNotMatch(startupPrompt(parseArgs(['--agent','claude','--body','server']),false),/gift/,'收到 gift 怎么回应跟着第一个 gift 事件给');
 });
 
 test('startupPrompt 的 new-task 阶段去掉启动限制，其余内容不变',()=>{

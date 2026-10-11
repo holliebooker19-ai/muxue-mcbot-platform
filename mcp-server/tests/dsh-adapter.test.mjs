@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DSH_DISABLED_ROWS, acpMcpServer, createDshConnection, dshCommand, dshEffort, dshPatch, pickModel } from '../../scripts/agents/dsh-acp.mjs';
+import { DSH_DEFAULTS, DSH_DISABLED_ROWS, acpMcpServer, createDshConnection, dshCommand, dshCompaction, dshEffort, dshPatch, pickModel } from '../../scripts/agents/dsh-acp.mjs';
 import { SERVER_GAME_INSTRUCTIONS } from '../../scripts/agents/game-instructions.mjs';
 import { agentConfigDir, getAgentProtocol } from '../../scripts/agents/process-protocols.mjs';
 import { parseArgs, resolveMemory, startupPrompt, bodySessionScope } from '../../scripts/companion.mjs';
@@ -58,6 +58,21 @@ test('托管补丁关掉命令行、文件、联网和子代理，只留游戏�
   assert.match(persona, /【本人基础人设】\{ \{会被当成占位符\} \}/, '花括号不能变成 dsh 的模板占位');
   assert.match(patch, /personaSuffix: ""/, '去掉「你的工作目录是…」');
   assert.doesNotMatch(patch, /coding agent/);
+});
+
+test('dsh 自己的自动压缩按宿主的上限触发：比例 = 上限 ÷ 窗口，保留按 dsh 默认比例缩小；上限为 0 或不低于默认触发点就不改', () => {
+  assert.deepEqual(dshCompaction(200000, 1000000), { thresholdRatio: 0.2, retainRatio: 0.04 });
+  assert.deepEqual(dshCompaction(200000, 0), dshCompaction(200000, DSH_DEFAULTS.contextWindow), '还不知道窗口时用 DeepSeek 的默认窗口');
+  assert.deepEqual(dshCompaction(64000, 128000), { thresholdRatio: 0.5, retainRatio: 0.1 }, '用 dsh 报过的窗口');
+  for (const { thresholdRatio, retainRatio } of [dshCompaction(1000, 1000000), dshCompaction(500000, 1000000)]) assert.ok(retainRatio < thresholdRatio, 'dsh 要求保留比例低于触发比例');
+  assert.equal(dshCompaction(0, 1000000), null);
+  assert.equal(dshCompaction(900000, 1000000), null, '比 dsh 默认的触发点还晚就用 dsh 自己的');
+  const patch = dshPatch('人设', { rotateTokens: 200000, contextWindow: 1000000 });
+  assert.match(patch, /- id: compaction-basic\n  config:\n    thresholdRatio: 0\.2\n    retainRatio: 0\.04/);
+  assert.doesNotMatch(dshPatch('人设'), /compaction-basic/, '没给上限不改');
+  const dsh = getAgentProtocol('dsh'), codex = getAgentProtocol('codex');
+  assert.equal(dsh.compactsItself, true); assert.equal(dsh.compacts, undefined);
+  assert.equal(codex.compacts, true); assert.equal(codex.compactsItself, undefined);
 });
 
 test('dsh 命令只用锁定安装或明确指定的 bin，找不到就说明怎么装', () => {
@@ -147,7 +162,7 @@ test('一轮对话：文字、工具、用量按统一事件发出，权限只�
   await tick();
   assert.deepEqual(h.events, [
     { type: 'tool', name: 'companion-mode', input: { action: 'follow' } }, { type: 'tool', name: 'bash', input: { command: 'dir' } },
-    { type: 'request_started' }, { type: 'text', text: '好呀', done: false }, { type: 'usage', contextTokens: 1234 },
+    { type: 'request_started' }, { type: 'text', text: '好呀', done: false }, { type: 'usage', contextTokens: 1234, contextWindow: 128000 },
     { type: 'text', text: '', done: true }, { type: 'request_completed' }, { type: 'completed', cancelled: false, error: '' }]);
   h.connection.sendTurn('下一句'); await tick();
   h.connection.handleMessage({ jsonrpc: '2.0', id: h.last('session/prompt').id, result: { stopReason: 'max_turn_requests' } }); await tick();

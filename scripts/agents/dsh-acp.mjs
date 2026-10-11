@@ -23,20 +23,39 @@ export function dshEffort(effort) {
   return EFFORTS[effort || 'low'] ?? effort;
 }
 
-/** 托管用的 profile 补丁：关掉非游戏工具，用陪玩指令替换默认的 coding agent 人设。 */
-export function dshPatch(instructions = '') {
+// dsh 自带的数（0.2.0-rc.2）：DeepSeek 模型默认的上下文窗口（dsh-llm-deepseek 的 DEFAULT_CONTEXT_WINDOW），
+// 自动压缩默认在窗口的 thresholdRatio 处触发、逐字保留 retainRatio（dsh-compaction-basic 的默认值）。
+export const DSH_DEFAULTS = Object.freeze({ contextWindow: 1_000_000, thresholdRatio: 0.8, retainRatio: 0.16 });
+
+/**
+ * ACP 发不了 /compact，只能让 dsh 自己的自动压缩在宿主的上限（--rotate-tokens）触发：触发比例 = 上限 ÷ 窗口，保留的近期对话按
+ * dsh 默认的比例一起缩小。窗口用 dsh 报过的（usage_update 的 size），还不知道时用 DeepSeek 的默认窗口。上限为 0 或不比默认触发点低时不改。
+ */
+export function dshCompaction(rotateTokens, contextWindow) {
+  const window = contextWindow > 0 ? contextWindow : DSH_DEFAULTS.contextWindow;
+  if (!(rotateTokens > 0) || rotateTokens / window >= DSH_DEFAULTS.thresholdRatio) return null;
+  // 只为写进补丁时好看（0.04 而不是 0.04000000000000001），六位有效数字远超 token 的精度。
+  const tidy = value => Number(value.toPrecision(6));
+  const thresholdRatio = rotateTokens / window;
+  return { thresholdRatio: tidy(thresholdRatio), retainRatio: tidy(thresholdRatio * DSH_DEFAULTS.retainRatio / DSH_DEFAULTS.thresholdRatio) };
+}
+
+/** 托管用的 profile 补丁：关掉非游戏工具，用陪玩指令替换默认的 coding agent 人设，自动压缩按宿主的上限触发。 */
+export function dshPatch(instructions = '', { rotateTokens = 0, contextWindow = 0 } = {}) {
   const persona = [SERVER_GAME_INSTRUCTIONS, instructions].filter(Boolean).join('\n\n')
     // dsh 用 {{...}} 做模板占位，资料里的花括号不能被当成占位符。
     .replaceAll('{{', '{ {').replaceAll('}}', '} }');
   const rows = DSH_DISABLED_ROWS.map(id => `- id: ${id}\n  disabled: true`);
   // JSON 字符串同时是合法的 YAML 双引号标量。
   rows.push(`- id: system-prompt\n  config:\n    personaPrefix: ${JSON.stringify(persona)}\n    personaSuffix: ""`);
+  const compaction = dshCompaction(rotateTokens, contextWindow);
+  if (compaction) rows.push(`- id: compaction-basic\n  config:\n    thresholdRatio: ${compaction.thresholdRatio}\n    retainRatio: ${compaction.retainRatio}`);
   return `# MCBOT 托管 dsh 时生成；只保留 minecraft MCP 工具。\n${rows.join('\n\n')}\n`;
 }
 
-export function writeDshPatch(file, instructions = '') {
+export function writeDshPatch(file, instructions = '', compaction = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, dshPatch(instructions), 'utf8');
+  fs.writeFileSync(file, dshPatch(instructions, compaction), 'utf8');
   return file;
 }
 
@@ -196,7 +215,8 @@ export function createDshConnection({ write, emit, fail, conversationId = '', ro
         if (['completed', 'failed'].includes(update.status)) emit({ type: 'request_started' });
         break;
       case 'usage_update':
-        if (Number.isFinite(update.used)) emit({ type: 'usage', contextTokens: update.used });
+        // size is the model's context window: the next start sets the compaction threshold from it (dshCompaction).
+        if (Number.isFinite(update.used)) emit({ type: 'usage', contextTokens: update.used, ...(update.size > 0 ? { contextWindow: update.size } : {}) });
         break;
     }
   }

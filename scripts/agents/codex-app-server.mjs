@@ -35,7 +35,8 @@ export function codexCommand(env = process.env, platform = process.platform) {
   throw new Error('找不到可启动的 Codex：请安装 Codex CLI，并把它加入 PATH');
 }
 
-export function codexThreadConfig(existing, server, root, body = 'mineflayer') {
+/** compactPrompt: replaces Codex's own compaction prompt (thread/compact/start takes no instructions), so it says what the summary keeps. */
+export function codexThreadConfig(existing, server, root, body = 'mineflayer', compactPrompt = '') {
   if (!server?.command || !Array.isArray(server.args)) throw new Error('Codex 需要 minecraft stdio MCP 配置（command、args）');
   // config/read 含归一化 null 字段；原样回写会在 JSON→TOML 时变为空字符串并使配置无效。
   const mcp = Object.fromEntries(Object.keys(existing?.mcp_servers ?? {}).map((name) => [name, { enabled: false }]));
@@ -50,11 +51,12 @@ export function codexThreadConfig(existing, server, root, body = 'mineflayer') {
     approval_policy: 'never', sandbox_mode: 'read-only', web_search: 'disabled',
     features: { shell_tool: false, unified_exec: false, multi_agent: false, plugins: false, apps: false, hooks: false, memories: false },
     project_doc_max_bytes: 0,
+    ...(compactPrompt ? { compact_prompt: compactPrompt } : {}),
   };
 }
 
 export function createCodexConnection({ write, emit, fail, conversationId = '', root,
-  model = '', effort = '', mcpServer, body = 'mineflayer', gameInstructions = '', requestTimeoutMs = 45000, cancelTimeoutMs = 10000 }) {
+  model = '', effort = '', mcpServer, body = 'mineflayer', gameInstructions = '', compactPrompt = '', requestTimeoutMs = 45000, cancelTimeoutMs = 10000 }) {
   let nextId = 0, threadId = '', activeTurn = '', disposed = false, stopping = false;
   let pendingTurn = null, startingTurn = false, ready, turnRequest;
   let cancelling = false, cancelPromise = null;
@@ -83,7 +85,7 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
     if (stopping || disposed) return;
     const params = {
       cwd: root, approvalPolicy: 'never', sandbox: 'read-only',
-      config: codexThreadConfig(current.config, mcpServer, root, body),
+      config: codexThreadConfig(current.config, mcpServer, root, body, compactPrompt),
       developerInstructions: body === 'server'
         ? [SERVER_GAME_INSTRUCTIONS, gameInstructions].filter(Boolean).join('\n\n')
         : LEGACY_GAME_INSTRUCTIONS,
@@ -107,7 +109,9 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
     startingTurn = true;
     let result;
     try {
-      turnRequest = request('turn/start', { threadId, input: [{ type: 'text', text: turn.text }], ...(effort ? { effort } : {}) });
+      // A compaction answers {} at once and runs as a turn of its own: turn/started gives its ID, turn/completed ends it.
+      turnRequest = turn.compact ? request('thread/compact/start', { threadId })
+        : request('turn/start', { threadId, input: [{ type: 'text', text: turn.text }], ...(effort ? { effort } : {}) });
       result = await turnRequest;
     } catch (e) {
       if (!e.rpcError) throw e;
@@ -120,6 +124,7 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
       return;
     }
     if (turn !== pendingTurn) return; // 本轮可能已在 RPC 回应前结束，并开始了排队中的下一轮。
+    if (turn.compact) return; // 还在等 turn/started（可能已经到了）；finish 时收尾。
     startingTurn = false;
     if (!result.turn?.id) throw new Error('Codex 没有返回 turn.id');
     if (!finishedTurns.has(result.turn.id)) activeTurn = result.turn.id;
@@ -146,6 +151,15 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
     if (turn.status === 'completed' && !submitted?.cancelled) emit({ type: 'request_completed' });
     emit({ type: 'completed', cancelled: !!submitted?.cancelled,
       error: submitted?.cancelled || turn.status === 'completed' ? '' : (turn.error?.message || `Codex 回合 ${turn.status}`) });
+  }
+
+  function begin(turn) {
+    if (cancelling || stopping) throw new Error('Codex 正在停止，暂不能开始新回合');
+    if (pendingTurn !== null) throw new Error('Codex 上一回合尚未结束');
+    let resolve;
+    const done = new Promise((r) => { resolve = r; });
+    pendingTurn = { ...turn, done, resolve, cancelled: false, compacted: false, earlyCompletions: new Map() };
+    runTurn(pendingTurn).catch((e) => { if (!disposed && !stopping) fail(e); });
   }
 
   async function controlTool(tool, args = {}) {
@@ -185,6 +199,13 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
       await controlTool('send-chat', { message: '已停下，旧任务已取消。' });
     })(), cancelTimeoutMs).finally(() => { cancelling = false; cancelPromise = null; });
     return cancelPromise;
+  }
+
+  /** The compaction went through (once per compaction turn); Codex does not say how big the context was before or is after. */
+  function compacted() {
+    if (!pendingTurn?.compact || pendingTurn.compacted) return;
+    pendingTurn.compacted = true;
+    emit({ type: 'compacted' });
   }
 
   function handleMessage(msg) {
@@ -228,12 +249,17 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
       case 'item/completed':
         if (p.item?.type === 'agentMessage') emit({ type: 'text', text: streamedItems.has(p.item.id) ? '' : p.item.text, done: true });
         if (p.item?.type === 'mcpToolCall') emit({ type: 'request_started' });
+        if (p.item?.type === 'contextCompaction') compacted();
         break;
+      // Older servers say it with this (deprecated) notification instead of the item.
+      case 'thread/compacted': compacted(); break;
       case 'thread/tokenUsage/updated':
         if (Number.isFinite(p.tokenUsage?.last?.totalTokens)) emit({ type: 'usage', contextTokens: p.tokenUsage.last.totalTokens });
         break;
       case 'turn/completed':
-        if (!activeTurn && startingTurn && pendingTurn && p.turn?.id) {
+        // A compaction whose turn/started never came: nothing else is running, this is its end.
+        if (!activeTurn && startingTurn && pendingTurn?.compact && p.turn?.id) { activeTurn = p.turn.id; finish(p.turn); }
+        else if (!activeTurn && startingTurn && pendingTurn && p.turn?.id) {
           if (pendingTurn.earlyCompletions.size < 8) pendingTurn.earlyCompletions.set(p.turn.id, p.turn);
         } else finish(p.turn);
         break;
@@ -242,14 +268,9 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
 
   return {
     start() { ready = start(); ready.catch((e) => { if (!disposed && !stopping) fail(e); }); },
-    sendTurn(text) {
-      if (cancelling || stopping) throw new Error('Codex 正在停止，暂不能开始新回合');
-      if (pendingTurn !== null) throw new Error('Codex 上一回合尚未结束');
-      let resolve;
-      const done = new Promise((r) => { resolve = r; });
-      pendingTurn = { text, done, resolve, cancelled: false, earlyCompletions: new Map() };
-      runTurn(pendingTurn).catch((e) => { if (!disposed && !stopping) fail(e); });
-    },
+    sendTurn(text) { begin({ text }); },
+    /** Compact the thread in place (thread/compact/start); what to keep is the thread's compact_prompt. Ends like a turn, with a compacted event first when it went through. */
+    compact() { begin({ text: '', compact: true }); },
     handleMessage,
     stopActions,
     async interrupt() {

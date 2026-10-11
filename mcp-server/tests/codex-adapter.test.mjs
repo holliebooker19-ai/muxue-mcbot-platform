@@ -129,6 +129,53 @@ test('Codex 完成通知先于 RPC 回应时只完成一次；用量取 last，�
   } finally { h.connection.dispose(); }
 });
 
+test('Codex 压缩：会话配置带压缩提示；compact 发 thread/compact/start，压缩项到了报 compacted，再像一轮那样结束', async () => {
+  const h = harness({ body: 'server', compactPrompt: '交接摘要：保留没做完的任务' });
+  try {
+    await h.initialize();
+    assert.equal(h.sent('thread/start').params.config.compact_prompt, '交接摘要：保留没做完的任务');
+    assert.equal(codexThreadConfig({}, { command: 'node', args: [] }, process.cwd(), 'server').compact_prompt, undefined, '不传就用 Codex 自己的');
+    h.connection.compact(); await tick();
+    assert.deepEqual(h.sent('thread/compact/start').params, { threadId: 'thread-1' });
+    assert.equal(h.sent('turn/start'), undefined, '不是一轮对话');
+    h.reply('thread/compact/start', {}); await tick();
+    h.notify('turn/started', { turn: { id: 'compact-1' } });
+    h.notify('item/started', { turnId: 'compact-1', item: { type: 'contextCompaction', id: 'c1' } });
+    h.notify('item/completed', { turnId: 'compact-1', item: { type: 'contextCompaction', id: 'c1' } });
+    h.notify('thread/compacted', { turnId: 'compact-1' });
+    h.notify('turn/completed', { turn: { id: 'compact-1', status: 'completed' } });
+    assert.deepEqual(h.events.filter((e) => e.type === 'compacted'), [{ type: 'compacted' }], '只报一次');
+    assert.equal(h.events.at(-1).type, 'completed'); assert.equal(h.events.at(-1).error, '');
+    h.connection.sendTurn('压缩后'); await tick();
+    assert.equal(h.wire.filter((m) => m.method === 'turn/start').length, 1, '压缩结束后能接着发下一轮');
+  } finally { h.connection.dispose(); }
+});
+
+test('Codex 压缩：旧版本没有这个方法时，这一轮带错误结束，没有 compacted（驱动器改回换会话）', async () => {
+  const h = harness({ body: 'server' });
+  try {
+    await h.initialize();
+    h.connection.compact(); await tick();
+    h.connection.handleMessage({ id: h.sent('thread/compact/start').id, error: { code: -32601, message: 'unknown method' } }); await tick();
+    assert.equal(h.events.filter((e) => e.type === 'compacted').length, 0);
+    assert.equal(h.events.at(-1).type, 'completed'); assert.match(h.events.at(-1).error, /unknown method/);
+    assert.deepEqual(h.failures, []);
+  } finally { h.connection.dispose(); }
+});
+
+test('Codex 压缩：只等到 turn/completed（没收到 turn/started）也能结束', async () => {
+  const h = harness({ body: 'server' });
+  try {
+    await h.initialize();
+    h.connection.compact(); await tick();
+    h.reply('thread/compact/start', {}); await tick();
+    h.notify('item/completed', { turnId: 'compact-2', item: { type: 'contextCompaction', id: 'c2' } });
+    h.notify('turn/completed', { turn: { id: 'compact-2', status: 'completed' } });
+    assert.equal(h.events.filter((e) => e.type === 'compacted').length, 1);
+    assert.equal(h.events.filter((e) => e.type === 'completed').length, 1);
+  } finally { h.connection.dispose(); }
+});
+
 test('Codex同一读取批次的启动回执和完成通知不丢失，未匹配旧通知不解除新轮', async () => {
   const h = harness();
   try {

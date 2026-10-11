@@ -33,11 +33,16 @@ export function acquireRuntimeLock(runtimeDir: string, username: string): () => 
 }
 // The driver replaces the file every 15s; on Windows a read can land on a locked or half-written file.
 // A failed read falls back to the last value read, so only a stale timestamp or a dead pid releases the body.
-const lastHeartbeat = new Map<string, { pid: number; updatedAt: number }>();
+const lastHeartbeat = new Map<string, { pid: number; updatedAt: number; compactions?: number }>();
+/** How many times the driver has compacted the conversation, as of the last heartbeat read (play guides are given again after one). */
+export function hostedCompactions(file: string): number | undefined {
+  const count = lastHeartbeat.get(file)?.compactions;
+  return Number.isSafeInteger(count) ? count : undefined;
+}
 export function hostedHeartbeatFresh(file: string, now = Date.now(), alive = pidAlive): boolean {
-  let value: { pid: number; updatedAt: number } | undefined;
+  let value: { pid: number; updatedAt: number; compactions?: number } | undefined;
   try {
-    value = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid: number; updatedAt: number };
+    value = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid: number; updatedAt: number; compactions?: number };
     if (Number.isFinite(value.updatedAt) && Number.isSafeInteger(value.pid)) lastHeartbeat.set(file, value);
   } catch (error) {
     // A missing file means the driver removed it on exit, not a transient read failure.

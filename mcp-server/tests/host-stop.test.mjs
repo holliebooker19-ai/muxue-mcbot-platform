@@ -391,7 +391,8 @@ test('真实分类器接入watch：旧watch的叫停不能撤销新租约', asyn
   } finally { control.close(); await f.close(); }
 });
 
-for (const compact of ['ok', 'fail']) test(`宿主压缩/${compact}：上下文超过上限，${compact === 'ok' ? '同一个进程里压缩，身体控制不撤，之后照常回应' : '压缩不可用就换新会话'}`, async () => {
+// Claude（/compact）和 Codex（thread/compact/start）由宿主原地压缩，失败才换会话；dsh 自己在上限压缩（补丁里设好），宿主两样都不做。
+for (const [agent, compact] of [['claude', 'ok'], ['claude', 'fail'], ['codex', 'ok'], ['codex', 'fail'], ['dsh', 'self']]) test(`宿主压缩/${agent}/${compact}：上下文超过上限，${compact === 'ok' ? '同一个进程里压缩，身体控制不撤，之后照常回应' : compact === 'fail' ? '压缩不可用就换新会话' : 'Agent 自己压缩，宿主不压也不换会话'}`, async () => {
   const f = await fixture();
   const runtime = path.join(f.dir, 'runtime'); fs.mkdirSync(runtime);
   const config = path.join(f.dir, 'mcp.json');
@@ -399,32 +400,46 @@ for (const compact of ['ok', 'fail']) test(`宿主压缩/${compact}：上下文�
     args: ['not-executed.mjs', '--body', 'server', '--connection-file', f.scope.connectionFile, '--world-id', f.scope.worldId] } } }));
   const F = runtimeFiles(runtime, f.scope.username), agentLog = path.join(f.dir, 'agent.jsonl');
   const records = () => { try { return fs.readFileSync(agentLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse); } catch { return []; } };
-  const turns = () => records().filter(r => r.kind === 'turn'), compactions = () => turns().filter(r => r.text.startsWith('/compact '));
+  const turns = () => records().filter(r => r.kind === 'turn');
+  const compactions = () => agent === 'codex' ? records().filter(r => r.kind === 'request' && r.method === 'thread/compact/start') : turns().filter(r => r.text.startsWith('/compact '));
+  const starts = () => records().filter(r => r.kind === 'start').length;
   let output = '';
-  const driver = spawn(process.execPath, [path.join(ROOT, 'scripts/companion.mjs'), '--agent', 'claude',
+  const driver = spawn(process.execPath, [path.join(ROOT, 'scripts/companion.mjs'), '--agent', agent,
     '--body', 'server', '--name', f.scope.username, '--nickname', '小克', '--mcp-config', config, '--headless', '--rotate-tokens', '1000'], {
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env,
       COMPANION_RUNTIME_DIR: runtime, COMPANION_MEMORY_DIR: path.join(f.dir, 'memory'),
       COMPANION_AGENT_CMD: JSON.stringify([process.execPath, path.join(ROOT, 'mcp-server/tests/fixtures/fake-server-agent.mjs')]),
-      FAKE_SERVER_AGENT: 'claude', FAKE_AGENT_LOG: agentLog, FAKE_AGENT_TOKENS: '5000', ...(compact === 'fail' ? { FAKE_AGENT_COMPACT: 'fail' } : {}),
+      FAKE_SERVER_AGENT: agent, FAKE_AGENT_LOG: agentLog, FAKE_AGENT_TOKENS: '5000', ...(compact === 'fail' ? { FAKE_AGENT_COMPACT: 'fail' } : {}),
     },
   });
   driver.stdout.on('data', data => { output += data; }); driver.stderr.on('data', data => { output += data; });
   const exited = new Promise((resolve, reject) => { driver.once('exit', resolve); driver.once('error', reject); });
+  const chat = () => fs.appendFileSync(F.events, JSON.stringify({ session: 'regression-journal', seq: 1, timestamp: Date.now(), type: 'chat', text: 'tester: 小克，还记得吗' }) + '\n');
   try {
+    if (compact === 'self') {
+      await waitFor(() => output.includes('本轮结束'), '启动轮（上下文 5000，超过上限 1000）');
+      chat();
+      await waitFor(() => turns().some(r => r.text.includes('还记得吗')), '之后的聊天轮');
+      assert.equal(starts(), 1, output); assert.equal(f.state.revokes, 0); assert.equal(f.state.claims, 1);
+      assert.doesNotMatch(output, /换新会话|压缩对话/);
+      return;
+    }
     await waitFor(() => compactions().length === 1, '启动轮超过上限后的压缩轮');
     const [compaction] = compactions();
-    assert.match(compaction.text, /没做完的任务/, '告诉 Agent 摘要里留什么');
+    // 告诉 Agent 摘要里留什么：Claude 跟着 /compact 说，Codex 在会话配置的压缩提示里
+    assert.match(agent === 'codex' ? records().find(r => r.kind === 'thread').compactPrompt : compaction.text, /没做完的任务/);
     if (compact === 'ok') {
       await waitFor(() => output.includes('压缩完成'), '压缩完成');
       assert.equal(f.state.revokes, 0, output); assert.equal(f.state.claims, 1);
-      fs.appendFileSync(F.events, JSON.stringify({ session: 'regression-journal', seq: 1, timestamp: Date.now(), type: 'chat', text: 'tester: 小克，还记得吗' }) + '\n');
+      // The runtime gives the play guides again once it sees the count change in the heartbeat.
+      assert.equal(JSON.parse(fs.readFileSync(F.heartbeat, 'utf8')).compactions, 1);
+      chat();
       await waitFor(() => turns().some(r => r.text.includes('还记得吗')), '压缩后的聊天轮');
       assert.equal(turns().find(r => r.text.includes('还记得吗')).pid, compaction.pid, '同一个 Agent 进程');
-      assert.equal(records().filter(r => r.kind === 'start').length, 1);
+      assert.equal(starts(), 1);
       assert.equal(compactions().length, 1, '压缩后上下文降下来了，不再压缩');
     } else {
-      await waitFor(() => records().filter(r => r.kind === 'start').length === 2, '换新会话');
+      await waitFor(() => starts() === 2, '换新会话');
       assert.match(output, /压缩没成功/);
     }
   } finally {
