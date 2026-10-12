@@ -508,6 +508,18 @@ final class GuardCombat {
         if(entity instanceof Leashable leashed&&leashed.isLeashed())return true;
         return entity.hasCustomName();
     }
+    /** A golem the village spawned: not built by a player, not named, not leashed. The only golem a hunt may be asked to kill. */
+    static boolean wildGolem(boolean playerCreated,boolean named,boolean leashed){return !playerCreated&&!named&&!leashed;}
+    static boolean wildGolem(Entity entity){return entity instanceof net.minecraft.world.entity.animal.IronGolem golem&&wildGolem(golem.isPlayerCreated(),golem.hasCustomName(),golem.isLeashed());}
+    /** protectedEntity minus the village's own golem: what the hunt task refuses to pick as a target. */
+    static boolean huntProtected(Entity entity){return protectedEntity(entity)&&!wildGolem(entity);}
+    /** The golem a hunt is swinging at this very moment (set around that one swing, null otherwise). */
+    private static volatile UUID huntSwing;
+    static void huntSwing(UUID golem){huntSwing=golem;}
+    /** Whether the one swing in flight may hurt this protected victim: only the hunted wild golem. */
+    static boolean huntLicensed(boolean wildGolem,UUID victim,UUID swinging){return wildGolem&&victim.equals(swinging);}
+    /** protectedEntity for damage from the body (the friendly-fire cancel): the same, except the wild golem a hunt is swinging at. */
+    static boolean protectedFromBody(Entity entity){return protectedEntity(entity)&&!huntLicensed(wildGolem(entity),entity.getUUID(),huntSwing);}
     /** Loaded on first item check only: the component registry needs a bootstrapped game. */
     private static final class Known {
         static final Set<DataComponentType<?>> WEAPON=Set.of(DataComponents.DAMAGE,DataComponents.CUSTOM_NAME,DataComponents.LORE,DataComponents.REPAIR_COST,DataComponents.ENCHANTMENTS);

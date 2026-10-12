@@ -184,7 +184,7 @@ export interface ActionArguments {
   'machine-items': Position & { mode: 'list' | 'insert' | 'extract'; side?: 'up' | 'down' | 'north' | 'south' | 'east' | 'west'; item?: string; count?: number; slot?: number; expectedBlock?: string };
   'emote': { name: string; source?: string; player?: string; seconds?: number };
   'set-appearance': { source: string; choice: string };
-  'hunt': { type: string; count?: number; survey?: boolean; player?: string; center?: Position; radius?: number; lowHealth?: number; timeoutMs?: number };
+  'hunt': { type: string; count?: number; pillar?: boolean; survey?: boolean; player?: string; center?: Position; radius?: number; lowHealth?: number; timeoutMs?: number };
   'breed-animals': { animal: string; survey?: boolean; player?: string; center?: Position; radius?: number; food?: string; pairs?: number; timeoutMs?: number };
 }
 export type ActionName = keyof ActionArguments;

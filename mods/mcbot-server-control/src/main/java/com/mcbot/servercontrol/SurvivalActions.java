@@ -147,7 +147,7 @@ final class SurvivalActions {
             throw error("STALE_BLOCK","Block ID or properties changed");
         return state;
     }
-    private static JsonObject properties(BlockState state) {
+    static JsonObject properties(BlockState state) {
         JsonObject properties=new JsonObject(); state.getValues().forEach((property,value)->properties.addProperty(property.getName(),value.toString())); return properties;
     }
     private JsonObject blockSnapshot(BlockPos position) {
