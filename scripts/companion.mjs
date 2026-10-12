@@ -48,16 +48,19 @@ import readline from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createServerBodyControl, respawnIfDead, lastDeath } from './server-body-control.mjs';
-import { rcon, tellrawCommand } from './rcon.mjs';
-import { getAgentProtocol, claudeContextTokens, AGENT_NAMES, agentsFor, agentConfigDir } from './agents/process-protocols.mjs';
+import { getAgentProtocol, claudeContextTokens, agentConfigDir } from './agents/process-protocols.mjs';
 import { ROOT, parseArgs, runtimeDirOf, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
-import { stripAnsi, pidAlive, readJson, writeFileAtomic, jsonLines } from './driver/files.mjs';
+import { pidAlive, readJson, writeFileAtomic, jsonLines } from './driver/files.mjs';
 import { resolveMemory, readMcpConfig, writeHostedMcpConfig, writeMemoryMcpConfig } from './driver/mcp-config.mjs';
+import { acquireLock, releaseLock, removeIfOwn, createHeartbeat } from './driver/lock.mjs';
+import { rotateLog, createLog, createNotifier } from './driver/log.mjs';
 
 // 测试和夹具脚本从这里 import 的名字（实现已经搬到 scripts/driver/）
 export { parseArgs, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
 export { stripAnsi, pidAlive } from './driver/files.mjs';
 export { resolveMemory, hostedMcpConfig, readMcpConfig, writeHostedMcpConfig } from './driver/mcp-config.mjs';
+export { writeHeartbeat, lockHolder, acquireLock, releaseLock, removeIfOwn } from './driver/lock.mjs';
+export { rotateLog, createRateLimiter } from './driver/log.mjs';
 
 
 // 需要叫醒 agent 的事件；reflex（自动进食/反击）、presence（上下线说明）等只在下次一起带上
@@ -76,11 +79,7 @@ const BATCH_DELAY_MS = 1500;
 const SERVER_CHAT_QUIET_MS = 120;
 const SERVER_CHAT_MAX_MS = 350;
 const LONG_TURN_WARN_MS = 8 * 60 * 1000;
-const HEARTBEAT_MS = 15000;
-const HEARTBEAT_FRESH_MS = 60000;
-const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
 const MAX_PENDING_EVENTS = 100;
-const NOTIFY_INTERVAL_MS = 5 * 60 * 1000;
 const QUOTA_PAUSE_MS = Number(process.env.COMPANION_QUOTA_PAUSE_MS) || 5 * 60 * 1000;
 const BOT_LOCK_WAIT_MS = 20000;
 // --reconnect 时身体断开的退出码：外层 start-server-play.mjs --wait 看到它就回去等世界、复活后重新接管
@@ -174,51 +173,6 @@ export function completeServerChat(e, { name, nickname }) {
     || /[?？]$/.test(body) || /^(?:你好|嗨|hello|hi|在吗)[\s!！。.,，]*$/i.test(body);
 }
 
-// extra 是给 WebUI 看的状态（昵称、身体、是否正在推理），锁判断只用 pid 和 updatedAt
-export function writeHeartbeat(file, agent, now = Date.now(), extra = {}) {
-  writeFileAtomic(file, JSON.stringify({ pid: process.pid, agent, updatedAt: now, ...extra }));
-}
-
-// 锁被别人持有的条件：pid 还活着，并且（心跳新鲜，或者锁是刚拿的）。
-// 加上心跳这一条，是为了防 Windows 上 pid 被别的进程复用时误判成"还在跑"。
-export function lockHolder(lockFile, heartbeatFile, now = Date.now()) {
-  const lock = readJson(lockFile);
-  if (!lock || lock.pid === process.pid || !pidAlive(lock.pid)) return null;
-  const hb = readJson(heartbeatFile);
-  const hbFresh = hb && hb.pid === lock.pid && now - hb.updatedAt < HEARTBEAT_FRESH_MS;
-  const young = now - (lock.since ?? 0) < HEARTBEAT_FRESH_MS;
-  return hbFresh || young ? lock : null;
-}
-
-// 拿单实例锁：成功返回 { ok: true, tookOver }，被占用返回 { ok: false, holder }
-export function acquireLock(lockFile, heartbeatFile, info = {}, now = Date.now()) {
-  const content = JSON.stringify({ pid: process.pid, since: now, ...info });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      fs.writeFileSync(lockFile, content, { flag: 'wx' });
-      return { ok: true, tookOver: attempt > 0 };
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-    }
-    const holder = lockHolder(lockFile, heartbeatFile, now);
-    if (holder) return { ok: false, holder };
-    // 死锁：删掉再抢一次（两个进程同时接管时只有一个能 wx 成功）
-    try { fs.rmSync(lockFile, { force: true }); } catch { /* 忽略 */ }
-  }
-  const holder = readJson(lockFile);
-  return { ok: false, holder };
-}
-
-export function releaseLock(lockFile) {
-  const lock = readJson(lockFile);
-  if (lock && lock.pid === process.pid) fs.rmSync(lockFile, { force: true });
-}
-
-export function removeIfOwn(file) {
-  const data = readJson(file);
-  if (data && data.pid === process.pid) fs.rmSync(file, { force: true });
-}
-
 export function taskAlreadyDelivered(event, receipt) {
   return ['task', 'companion'].includes(event.type) && typeof event.operationId === 'string' && event.session === receipt?.session
     && Array.isArray(receipt.operationIds) && receipt.operationIds.includes(event.operationId);
@@ -255,29 +209,6 @@ export function cleanupBodyArtifacts(snapshot, alive = pidAlive) {
     fs.unlinkSync(snapshot.lockFile);
     return true;
   } catch { return false; }
-}
-
-export function rotateLog(file, maxBytes = LOG_ROTATE_BYTES) {
-  try {
-    if (fs.statSync(file).size > maxBytes) {
-      fs.rmSync(`${file}.1`, { force: true });
-      fs.renameSync(file, `${file}.1`);
-      return true;
-    }
-  } catch {
-    // 文件不存在就不用轮转
-  }
-  return false;
-}
-
-// 同一类提示在 intervalMs 内只发一次
-export function createRateLimiter(intervalMs = NOTIFY_INTERVAL_MS) {
-  const last = new Map();
-  return (key, now = Date.now()) => {
-    if (now - (last.get(key) ?? -Infinity) < intervalMs) return false;
-    last.set(key, now);
-    return true;
-  };
 }
 
 // 一轮还没做完时玩家又说话：等这一轮跑满 minMs 后，每轮只回一次“收到，正在忙”，不挡住后面的正常送达
@@ -744,58 +675,13 @@ function main() {
   let resumeNote = '';
   // 换会话时正在退出的旧 agent；驱动器退出时也要等它们（连同 MCP 服务端）结束
   const exitingProcs = new Set();
-  const canNotify = createRateLimiter();
 
   // ---------------- 日志 ----------------
 
   fs.mkdirSync(RUNTIME, { recursive: true });
+  const { out, activity, info } = createLog({ logFile: F.log, activityFile: F.activity });
+  const notifyGame = createNotifier({ args, agentProtocol, info, serverControl: () => serverControl });
 
-  function ts() {
-    return new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  }
-
-  function logFileLine(line) {
-    const d = new Date();
-    const stamp = `${d.toLocaleDateString('sv-SE')} ${d.toLocaleTimeString('zh-CN', { hour12: false })}`;
-    try {
-      fs.appendFileSync(F.log, `${stamp} ${stripAnsi(line)}\n`);
-    } catch {
-      // 日志写不了不影响运行
-    }
-  }
-
-  // 所有输出都经过这里：打到控制台，同时写进日志文件
-  function out(line) {
-    console.log(line);
-    logFileLine(line);
-  }
-
-  // 给 WebUI 看的结构化记录（每行一个 JSON），和文本日志内容一致，只是分好了类
-  function activity(kind, data) {
-    try {
-      fs.appendFileSync(F.activity, JSON.stringify({ t: Date.now(), kind, ...data }) + '\n');
-    } catch {
-      // 写不了不影响运行
-    }
-  }
-
-  function info(msg, kind = 'info', data = {}) {
-    out(`\x1b[90m[${ts()}] ${msg}\x1b[0m`);
-    activity(kind, { text: msg, ...data });
-  }
-
-  // 在游戏里用灰字告诉玩家（同类限频）；RCON 连不上就只写日志
-  function notifyGame(kind, text, { force = false } = {}) {
-    if (!force && !canNotify(kind)) return;
-    const msg = `[${args.nickname}托管] ${text}`;
-    const viaRcon = agentProtocol.identity === 'xiaoke' && args.body === 'mineflayer';
-    info(`${viaRcon ? '游戏内提示' : '托管提示'}：${msg}`);
-    // 新身体走宿主的 notice（服务端广播灰斜体）；通道内部吞掉所有错误，这里只是保险
-    if (args.body === 'server' && serverControl) serverControl.notice(msg.length > 120 ? `${msg.slice(0, 119)}…` : msg).catch(() => {});
-    // 独立试玩身份允许连接外部服，不借用本机正式服的 RCON 发通知；新身体也不走 RCON。
-    if (!viaRcon) return;
-    rcon([tellrawCommand(msg)], { timeoutMs: 3000 }).catch((e) => info(`RCON 发送失败（${e.message}），只记在日志里`));
-  }
 
   // ---------------- agent 进程 ----------------
 
@@ -1013,7 +899,7 @@ function main() {
     flush();
   }
 
-  function noteCompaction() { compactions += 1; beat(); }
+  function noteCompaction() { compactions += 1; heartbeat.beat(); }
 
   // 压缩只用在服务端身体（还没接长期记忆，换会话会丢掉一切、还要撤控制）；旧身体照旧整理记忆后换会话
   function canCompact() {
@@ -1758,15 +1644,10 @@ function main() {
     shutdown('内部错误');
   });
 
-  const beat = () => {
-    try {
-      writeHeartbeat(F.heartbeat, args.agent, Date.now(), { name: args.name, nickname: args.nickname, body: args.body, busy, compactions });
-    } catch (e) {
-      info(`写心跳失败：${e.message}`);
-    }
-  };
-  beat();
-  setInterval(beat, HEARTBEAT_MS);
+  const heartbeat = createHeartbeat({ file: F.heartbeat, agent: args.agent,
+    status: () => ({ name: args.name, nickname: args.nickname, body: args.body, busy, compactions }),
+    onError: (e) => info(`写心跳失败：${e.message}`) });
+  heartbeat.start();
 
   info(`托管 ${args.nickname}（${args.name}）${args.headless ? '【免 CLI】' : ''}，pid ${process.pid}，监听 ${path.relative(ROOT, F.events)}`);
   if (args.headless) {
