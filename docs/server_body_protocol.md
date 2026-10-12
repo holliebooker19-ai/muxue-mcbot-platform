@@ -87,7 +87,7 @@ NBT 类型为 end／byte／short／int／long／float／double／byte_array／st
 
 | 动作 | args／确认边界 |
 | --- | --- |
-| dig-block | `{x,y,z,expectedBlock,expectedProperties,timeoutMs?,targetToken?}`；仅一格，使用当前选中主手的原版挖掘时间／耐久。资源任务携targetToken，额外核验资源目录／区域安全、引用位置与当前工具可获得掉落；旧原子调用不强加资源目录。执行期间核对方块与主手；停止／失效清理原生延迟挖掘，不延迟破坏 |
+| dig-block | `{x,y,z,expectedBlock,expectedProperties,timeoutMs?,targetToken?}`；仅一格，使用当前选中主手的原版挖掘时间／耐久。资源任务携targetToken，额外核验资源目录／区域安全、引用位置与当前工具可获得掉落；旧原子调用不强加资源目录。执行期间核对方块与主手；停止／失效清理原生延迟挖掘，不延迟破坏。可选`buildingCheck:true`（模型自己调dig-block时由运行端带上，任务从不带）：方块可能是建筑就不挖，以failed结束，result为`{code:"MAYBE_BUILDING",maybeBuilding:{reason},block}`；可选`home`（见下）|
 | place-block | `{x,y,z,face,slot,expectedBlock,expectedProperties,expectedItem,expectedCount,expectedComponents,timeoutMs?}`；坐标是支撑格，目标是其 face 相邻格。slot 0–8；检查支撑状态、当前完整栈、空目标和原生放置／真实消耗。当前拒绝门、床、双格植物等多格放置，拒绝以菜单方块为支撑 |
 | open-container | `{x,y,z,expectedBlock,expectedProperties,timeoutMs?}`；普通距离／视线下原生交互，要求至少一个空快捷栏槽以避免物品使用回退 |
 | approach-container | `{targetToken,timeoutMs?}`；仅走到当前实例绑定容器的原版可触及／可见站位，不打开菜单。MCP用本地`containerRef`转换，模型不传私有token。running须查询，取消复用控制代次 |
@@ -170,13 +170,30 @@ Observation新增`groundItems`：`[{entityId,position,stack:{id,count,components
 
 pickup-item成功result为`{entityId,pickedUpCount,pickup:"confirmed",requestedCount,remainingCount,stack}`；部分原生拾取也只报告真实片段。失败保留真实已获得量和`code`，没有Post时为`pickup:"unconfirmed"`，不猜消失实体的剩余量。其它玩家拾取为PICKUP_TAKEN，未知消失为PICKUP_UNKNOWN；被原版合并进附近同物品掉落（实体被丢弃、1.5 格内有同物品同组件的掉落）为PICKUP_MERGED（普通失败，没捡到任何东西，客户端重新观察后去捡合并后的那个实体），变体或上限变化为STALE_ITEM；危险／掉血／无进展为BLOCKED，移动过远为TARGET_MOVED，原生延迟／拒绝等未确认在有限时限内停止。收据也覆盖dig／walk期间的自然拾取；Node按seq累计一次，不再把pickup-item返回量重复相加。
 
-2026-10-07（第 8a 步）起资源按方块标签认，模组的也算：原木是 `#minecraft:logs`（不含去皮原木和 `_wood`／`_hyphae` 六面树皮木），矿石是 `#c:ores`，石料是 `#c:stones` 加上原版 `minecraft:stone`／`deepslate`／`granite`／`diorite`／`andesite`；带方块实体的不算。blockIds 可以是方块 ID（必须属于上面三类，否则 UNSUPPORTED），也可以是标签（`#c:ores/iron`），标签只用来缩小范围。每个候选多带 `kind`（`log|ore|stone`）和 `drops`：服务器用顶级镐（原木用斧）不带时运、分别带和不带精准采集，各按掉落表掷 12 次算出的 `{item,preference,least}`，preference 是 `any|silk_touch|no_silk_touch`，least 是这几次里每块最少的数量（偶然掉落为 0）；矿石只报普通产物，不报精准采集掉的矿石块。实际数量仍以原生拾取回执为准。陪挖的拾取授权按目标矿石的同一份掉落表核对。原木要算树（2026-10-12）：相连的原木里至少有一节的某个面贴着树叶（下界巨型菌是疣块或菌光体），整棵树和普通扫描都不要没有树冠的原木（村民房子的墙、栅栏、树桩），普通扫描在 `budget.builtLogs` 记排除了几节、运行端回给模型 `builtLogs`；玩家自己放的树叶也算树冠。除此之外不能区分玩家建筑与天然地形。明确用户请求／授权区域仍由Agent判断，发现不等于破坏授权。
+2026-10-07（第 8a 步）起资源按方块标签认，模组的也算：原木是 `#minecraft:logs`（不含去皮原木和 `_wood`／`_hyphae` 六面树皮木），矿石是 `#c:ores`，石料是 `#c:stones` 加上原版 `minecraft:stone`／`deepslate`／`granite`／`diorite`／`andesite`；带方块实体的不算。blockIds 可以是方块 ID（必须属于上面三类，否则 UNSUPPORTED），也可以是标签（`#c:ores/iron`），标签只用来缩小范围。每个候选多带 `kind`（`log|ore|stone`）和 `drops`：服务器用顶级镐（原木用斧）不带时运、分别带和不带精准采集，各按掉落表掷 12 次算出的 `{item,preference,least}`，preference 是 `any|silk_touch|no_silk_touch`，least 是这几次里每块最少的数量（偶然掉落为 0）；矿石只报普通产物，不报精准采集掉的矿石块。实际数量仍以原生拾取回执为准。陪挖的拾取授权按目标矿石的同一份掉落表核对。原木要算树（2026-10-12）：相连的原木里至少有一节的某个面贴着树叶（下界巨型菌是疣块或菌光体），整棵树和普通扫描都不要没有树冠的原木（村民房子的墙、栅栏、树桩），普通扫描在 `budget.builtLogs` 记排除了几节、运行端回给模型 `builtLogs`；玩家自己放的树叶也算树冠。建筑（2026-10-13）：服务端认得出一部分建筑，见下面“可能是建筑”一节；认不出的仍不能区分玩家建筑与天然地形（例如玩家在野外随手放的一块圆石、一堵没有床门箱子的石墙）。明确用户请求／授权区域仍由Agent判断，发现不等于破坏授权。
 
 有限任务先筛选与目标产物匹配的冻结候选，矿石须完整工具评估／准备能力、已知掉落效果与非精准工具；服务端资源引用挖掘仍在执行前核验实际主手及原生位置相关采掘资格。首批不支持精准矿石块，不按工具名称写等级表，不保证数据包或Mod未改变掉落。目标数量按原生新拾取回执累计；铜的多产物、时运等可导致一次真实拾取超过目标，以`overage`如实记录，到量后不再开挖新候选。实际掉落不匹配、无工具、未知或部分完成均保留真实结果，不扩大区域或自动重试。
 
 nearby-resources按固定center的水平圆形半径、y 从中心下 2 格到上 4 格扫描（半径最多 16），最多150000次地形读取；只用已加载区块，不隐式加载未知区域。发现与后续approach／dig一致禁止`pos.y<floor(Bot.y)`、方块实体、玩家身体或任何附近玩家脚底支撑、液体／危险邻居及上方重力方块。候选只返回当前Bot视线通过者：`{position,id,properties,targetToken,distance,visible:true,requiresCorrectTool,suitableToolSlots,recommendedToolSlot?}`；工具槽仅0–8，由真实采掘工具适用性／速度提供，不凭物品名字猜。候选截断／预算耗尽通过truncated与budget明示。原木例外（10-07）：视线只被树叶挡住的原木也算候选并标`visible:false`（被树冠整棵包住的云杉），approach-resource对原木目标接受“去掉树叶后有视线”的站位；dig-block仍按真实视线判定，挡路的树叶由Node采集任务先敲掉（不当作资源）。整棵树（10-07）：nearby-resources可带`wholeTree:true`（center可离Bot最多16格），只返回离center最近的那一整棵树的原木（最多256节，不受maxResults限制），回复带`wholeTree:true`。原木候选都带`tree`编号：挨着的原木（含斜对角）连成一段，底下踩着地面（泥土、石头、红树根，不是原木、树叶或空气）的一段是树干，悬空的一段（隔着树叶的树枝、斜伸的金合欢／樱花枝）归到4格内最近的树干，连不到树干的不算树；两棵各自扎根的树树冠挨着也分开。gather-resources带`wholeTree:true`时不填count／stacks，目标就是这些树的全部原木，默认时限按节数算（每节4秒，120～600秒）、步数预算最多1024。`trees:1..8`（只配wholeTree）一次找离center最近的几棵、一次提交砍完；连不到任何树干的悬空原木（根已经砍掉的剩余部分）彼此4格内算一棵；整棵树扫描不按“低于脚底平面”排除原木（Bot站在比树根高的地方），走近和挖时仍按当时站的位置检查。同一任务里路过顺手捡到别的物品（树苗、木棍）只记进`unexpectedPickedUpCount`／`items`，不算目标、不中断任务。
 
 ResourceTargets随机token固定120秒、最多256个，绑定session／generation／实际维度、坐标、完整BlockState及已加载Chunk实例。普通资源方块没有BlockEntity实例，同chunk同状态替换不声称可检测。Node的一个resourceRef冻结整批候选，30秒内可提交；执行不补扫、不追加候选或目标，不挖路／垫高／下坑／搭桥／传送。
+
+### 可能是建筑（2026-10-13）
+
+服务端只判断并上报，不因此拒绝：`BuildingGuard`（纯逻辑，只用原版类）对一个方块给出 `village`、`lived_in`、`home` 三种原因之一或没有，先到先得：
+
+- `village`：方块在原版村庄结构的某个部件范围内（`StructureManager.getStructureWithPieceAt(pos, StructureTags.VILLAGE)`，按部件，不用整个结构外框，外框包着大片野地）。村庄的路也是部件，路下面的石头同样算。
+- `lived_in`：方块本身，或者玩家够得着的距离内，有床（`BlockTags.BEDS`）、门（`BlockTags.DOORS`）或带物品栏的方块实体（`Container`：箱子、木桶、熔炉、潜影盒、漏斗、发射器、酿造台等，按方块实体判断，不列方块ID）。自然生成的战利品箱（地牢、遗迹）旁也会算。
+- `home`：方块在运行端传来的家的位置够得着的距离内。运行端把记下的家（`PlaceBook.home()`，名字 home／家）作为 `home:{dimension,x,y,z}` 放进 `nearby-resources` 和带 `buildingCheck` 的 `dig-block`；服务端只在同一维度才用，距离只在服务端算。
+
+“够得着的距离”就是身体自己的方块交互距离（`blockInteractionRange()`，原版默认 4.5，挖、放、开容器本来就限在这个距离内），三条用同一个半径，没有另起数字。
+
+身体自己在这次托管里放下的方块（`pillar-up` 垫的柱子、`place-block` 放的）记在内存里（`OwnBlocks`），不算建筑：垫高打怪下来时能挖自己的柱子。挖掉就忘记；托管结束或服务器重启就没了；重生后保留。`build` 任务放的方块（包括脚手架）不记，也不走 dig-block。
+
+- `nearby-resources`：默认把这样的候选排除，`budget.maybeBuilding` 记排除了几个（陪挖也一样，家附近的矿洞会被挡下）；可选 `includeBuildings:true` 不排除（陪挖不能带）。运行端 `discover-resources` 把数量以 `maybeBuilding`、说明 `maybeBuildingNote` 回给模型，`includeBuildings` 只在玩家明确说可以拆时由模型带上。采集和陪挖任务只用已发现的候选，自己的 `dig-block` 不带 `buildingCheck`、也不带 `playerAsked`。
+- `dig-block`：只有带 `buildingCheck:true` 时才检查，结果是上面的 failed + `MAYBE_BUILDING`，不是错误码拒绝。运行端的 MCP 工具 `dig-block` 默认带上它（一次往返：检查和挖是同一个请求），回给模型“没有挖，可能是建筑（原因），由你判断”；模型带 `playerAsked`（玩家在聊天里怎么说的，只在玩家明确要求拆这一块时填）时运行端不带 `buildingCheck`，照常挖；`playerAsked` 不发给服务端。`pillar` 下来挖柱子、陪挖等运行端内部的挖方块不检查。
+- 认不出的：玩家在野外随手放的方块、没有床门箱子的石墙、没有记过的家、村庄部件范围之外的玩家扩建。这些仍靠模型和玩家的话判断。
+- 实现上，村庄查询只对已加载区块的方块调用；`lived_in` 先按候选的外框一次查出范围内的床、门、容器，再逐个候选比距离。
 
 ### 可选陪伴拾取保护（2026-10-03已验证首批）
 

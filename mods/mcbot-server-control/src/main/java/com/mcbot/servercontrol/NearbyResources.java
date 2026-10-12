@@ -17,7 +17,7 @@ final class NearbyResources {
     // Whole trees: logs connected to a log in the scan band are followed up to TREE_ABOVE above the centre
     // (at most TREE_LIMIT more), so gathering can climb a trunk for the rest. Leaves are never candidates.
     static final int TREE_ABOVE=24,TREE_LIMIT=64,TREE_SPREAD=4;
-    record Options(Set<String> blockIds,int radius,int maxResults,Vec3 center,boolean wholeTree,int trees) {}
+    record Options(Set<String> blockIds,int radius,int maxResults,Vec3 center,boolean wholeTree,int trees,boolean includeBuildings) {}
     static Options options(JsonObject args,Vec3 body) {
         var mining=args.has("companionMiningGuard")?CompanionMiningGuard.options(object(args,"companionMiningGuard")):null;
         if(mining!=null&&args.has("center"))throw error("INVALID_ARGUMENT","Companion mining scan center is always the live bound player position");
@@ -36,14 +36,16 @@ final class NearbyResources {
         // A whole tree may be named by where it stands (a player's coordinates); gathering walks to it.
         if(center.distanceTo(body)>(wholeTree?16:8)) throw error("INVALID_ARGUMENT","Resource scan center must remain within eight blocks of the body (sixteen for a whole tree)");
         int trees=wholeTree?integer(args,"trees",1,1,8):1;
-        return new Options(Set.copyOf(ids),radius,limit,center,wholeTree,trees);
+        boolean includeBuildings=args.has("includeBuildings")&&args.get("includeBuildings").isJsonPrimitive()&&args.get("includeBuildings").getAsBoolean();
+        if(includeBuildings&&mining!=null)throw error("INVALID_ARGUMENT","includeBuildings is not for companion mining");
+        return new Options(Set.copyOf(ids),radius,limit,center,wholeTree,trees,includeBuildings);
     }
     private static int integer(JsonObject args,String key,int fallback,int min,int max) {double value=bounded(args,key,fallback,min,max);if(value!=Math.rint(value))throw error("INVALID_ARGUMENT",key+" must be an integer");return (int)value;}
     record Candidate(BlockPos position,BlockState state,double distance) {}
-    static JsonObject discover(ServerPlayer body,JsonObject args,ResourceTargets targets) {
+    static JsonObject discover(ServerPlayer body,JsonObject args,ResourceTargets targets,java.util.function.Predicate<BlockPos> own) {
         Options options=options(args,body.position());
         CompanionMiningGuard mining=args.has("companionMiningGuard")?CompanionMiningGuard.create(body,object(args,"companionMiningGuard")):null;
-        if(mining!=null){mining.validateBody();options=new Options(options.blockIds(),options.radius(),options.maxResults(),mining.center(),false,1);}
+        if(mining!=null){mining.validateBody();options=new Options(options.blockIds(),options.radius(),options.maxResults(),mining.center(),false,1,false);}
         var selection=ResourceCatalog.select(options.blockIds());
         BlockPos origin=BlockPos.containing(options.center());
         List<Candidate> matches=new ArrayList<>(),found=new ArrayList<>();int visited=0,unloaded=0,rejected=0;boolean exhausted=false;
@@ -71,6 +73,14 @@ final class NearbyResources {
         }
         if(whole==null) matches.sort(Comparator.comparingDouble(Candidate::distance).thenComparingInt(c->c.position().getX()).thenComparingInt(c->c.position().getY()).thenComparingInt(c->c.position().getZ()));
         Set<BlockPos> tree=new HashSet<>(mining==null&&whole==null?treeAbove(body,origin,options,selection,matches):Set.of());
+        // Blocks that may belong to a building (a village, a bed, door or chest nearby, the remembered home) are left out and counted,
+        // unless the caller says the player allowed it (BuildingGuard; the body's own placed blocks never count).
+        int maybeBuilding=0;
+        if(!options.includeBuildings()) {
+            var level=body.serverLevel();String dimension=level.dimension().location().toString();
+            maybeBuilding=BuildingGuard.leaveOut(matches,Candidate::position,new BuildingGuard.Live(level),body.blockInteractionRange(),BuildingGuard.home(args,dimension),own);
+            if(maybeBuilding>0){Set<BlockPos> left=new HashSet<>();for(Candidate c:matches)left.add(c.position());tree.retainAll(left);}
+        }
         // Safety and line-of-sight checks cost terrain reads: run them nearest first, one past the limit to report truncation.
         List<Candidate> hidden=new ArrayList<>();
         for(Candidate match:matches) {
@@ -113,7 +123,7 @@ final class NearbyResources {
             candidates.add(value);
         }
         return obj("dimension",body.serverLevel().dimension().location().toString(),"center",position(options.center()),"candidates",candidates,
-            "truncated",found.size()>options.maxResults()||exhausted||whole!=null&&whole.truncated(),"wholeTree",whole!=null,"budget",obj("radius",options.radius(),"below",BELOW,"above",ABOVE,"treeAbove",TREE_ABOVE,"treeLogs",tree.size(),"builtLogs",builtLogs,"matches",matches.size(),"visited",visited,"maxVisited",MAX_VISITED,"unloaded",unloaded,"rejected",rejected,"loadedOnly",true,"blockReads",geometry.reads(),"maxBlockReads",FlatApproach.MAX_READS));
+            "truncated",found.size()>options.maxResults()||exhausted||whole!=null&&whole.truncated(),"wholeTree",whole!=null,"budget",obj("radius",options.radius(),"below",BELOW,"above",ABOVE,"treeAbove",TREE_ABOVE,"treeLogs",tree.size(),"builtLogs",builtLogs,"maybeBuilding",maybeBuilding,"matches",matches.size(),"visited",visited,"maxVisited",MAX_VISITED,"unloaded",unloaded,"rejected",rejected,"loadedOnly",true,"blockReads",geometry.reads(),"maxBlockReads",FlatApproach.MAX_READS));
     }
     /**
      * Logs above the scan band connected (26-neighbourhood) to a requested log found in it, appended to the

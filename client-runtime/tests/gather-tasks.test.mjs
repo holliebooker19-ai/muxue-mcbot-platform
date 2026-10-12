@@ -88,6 +88,7 @@ test('gather mines then picks through the fixed token set without rescanning, wi
   const result = await f.done(op); assert.equal(result.status, 'succeeded'); assert.equal(result.result.pickedUpCount, 3); assert.equal(result.result.minedBlocks, 3);
   assert.equal(f.calls.filter(call => call.name === 'discover').length, 1); assert.equal(f.calls.filter(call => call.name === 'dig-block').length, 3);
   assert.ok(f.calls.filter(call => call.name === 'dig-block').every(call => f.candidates.some(candidate => candidate.targetToken === call.args.targetToken)));
+  assert.ok(f.calls.filter(call => call.name === 'dig-block').every(call => !('buildingCheck' in call.args) && !('playerAsked' in call.args)), 'a gathering task never asks for the building check and never carries playerAsked');
   assert.equal(f.calls[1].name, 'send-chat'); assert.equal(f.events.since(0, ['task']).length, 1);
 });
 
