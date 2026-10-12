@@ -38,6 +38,7 @@ test('real HTTP approach contract preserves target tokens and forwards complete 
   const cases = [
     ['approach-container', { targetToken: token, timeoutMs: 20000 }],
     ['approach-player', { player: 'Alex', expectedEntityId: playerId, distance: 1.3, timeoutMs: 20000 }],
+    ['approach-player', { player: 'Alex', expectedEntityId: playerId, distance: 1.3, timeoutMs: 20000, track: true }],
     ['open-container', { x: 6, y: 64, z: 0, expectedBlock: 'minecraft:chest', expectedProperties: { type: 'single', facing: 'north', waterlogged: 'false' }, targetToken: token }],
     ['drop-item', { slot: 0, expectedItem: 'example:custom_block', expectedCount: 2, expectedComponents: {}, count: 1, recipient: 'Alex', expectedEntityId: playerId }],
   ];
@@ -51,6 +52,7 @@ test('real HTTP approach contract preserves target tokens and forwards complete 
     ['approach-player', { player: 'Alex', distance: 2 }],
     ['approach-player', { player: 'Alex', expectedEntityId: 'wrong-id' }],
     ['approach-player', { player: 'Alex', timeoutMs: 200000 }],
+    ['approach-player', { player: 'Alex', track: 'yes' }],
     ['drop-item', { slot: 0, expectedItem: 'example:custom_block', expectedCount: 2, expectedComponents: {}, count: 1, recipient: 'Alex' }],
   ]) await assert.rejects(body.act(name, args), { code: 'INVALID_ARGUMENT' });
   assert.equal(mock.calls.filter(call => call.method === 'act').length, before);

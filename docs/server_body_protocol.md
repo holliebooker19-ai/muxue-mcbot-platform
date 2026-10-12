@@ -91,7 +91,7 @@ NBT 类型为 end／byte／short／int／long／float／double／byte_array／st
 | place-block | `{x,y,z,face,slot,expectedBlock,expectedProperties,expectedItem,expectedCount,expectedComponents,timeoutMs?}`；坐标是支撑格，目标是其 face 相邻格。slot 0–8；检查支撑状态、当前完整栈、空目标和原生放置／真实消耗。当前拒绝门、床、双格植物等多格放置，拒绝以菜单方块为支撑 |
 | open-container | `{x,y,z,expectedBlock,expectedProperties,timeoutMs?}`；普通距离／视线下原生交互，要求至少一个空快捷栏槽以避免物品使用回退 |
 | approach-container | `{targetToken,timeoutMs?}`；仅走到当前实例绑定容器的原版可触及／可见站位，不打开菜单。MCP用本地`containerRef`转换，模型不传私有token。running须查询，取消复用控制代次 |
-| approach-player | `{player,expectedEntityId?,distance?,timeoutMs?}`；distance默认1.3，范围1–1.5；同维度真实玩家，任务内部必带UUID。行走中目标位移超过0.5格返回TARGET_MOVED；到达后由任务重新核验 |
+| approach-player | `{player,expectedEntityId?,distance?,timeoutMs?,track?}`；distance默认1.3，范围1–1.5；同维度真实玩家，任务内部必带UUID。默认行走中目标位移超过0.5格返回TARGET_MOVED（`go-to` 走向玩家用这个）；`track:true`（10-12 起 give-item 用）时不做这个检查，每刻朝玩家当前位置走，超过 `timeoutMs` 没追上返回 TIMEOUT（说明写“追不上”），玩家离开32格返回 OUT_OF_REACH，离线或换维度仍是 STALE_TARGET；到达后由任务重新核验 |
 | approach-resource | `{targetToken,timeoutMs?}`；仅走向引用资源的原版block reach／LOS站位，不挖掘。开始时目标距Bot最多16格，默认15秒、timeoutMs 500–120000；复用已加载安全高差路线与资源引用／支撑保护 |
 | pickup-item | `{entityId,expectedItem,expectedCount,expectedComponents,expectedMaxStackSize?,timeoutMs?,companionGuard?}`；完整UUID必需、expectedCount为正整数。绑定真实ItemEntity实例与完整栈，距Bot须保持8格内；相对开始位置移动超过0.75格停止；统一导航行走无进展3秒进入有限重规划，预算耗尽停止。默认15秒、timeoutMs 500–30000。可选companionGuard另限制实时玩家范围，未携带时保持原有限拾取语义。普通物理碰撞拾取，不调用虚拟touch、塞库存或传送；原生Post才确认获得量，详见下节 |
 | follow-companion | **已删（8m 第二步，由 `posture` 方法取代，能力名也不再声明）**。原来：`{player,expectedEntityId,distance?}`；UUID必需，distance默认2.5、范围1.5–6。持续运行，无总时长自然结束；距离及LOS满足时waiting，玩家离开站位后following。绑定真实玩家实例／UUID／维度，已加载安全高差地形内有界重规划；受阻、离线、受伤等失败后不自动恢复。原follow-player有限语义不变 |
@@ -138,7 +138,7 @@ Bot 不会踩坏耕地：ServerBody 取消 Bot 自己触发的 `FarmlandTrampleE
 
 挂在台阶边上（2026-10-12）：往上跳一格时身体侧面挂住方块棱角、贴着它跳了 0.7 秒还没上去，就先不跳、走回起跳那格的中心，再按原来的方式正对着台阶走过去跳；每级台阶最多这样调两次，还不行才按原来的 2 秒没进展重新算路。回执 navigation 里 `ledges` 是这样调整的次数，build 的 trace 里记一行“caught on the step up…”。离线编译和隔离服建房回归通过，挂边本身还没在测试里复现过。
 
-drop-item携expectedMaxStackSize时，每次原生DROP_ITEM前均再核验；数量上限不因实际栈大于64而扩大。Node的give-item可以把一个真实足量栈的最多256个目标分成每批最多64个丢出；容器取物仍要求一个足量源栈和空快捷栏，不跨栈凑数，目标不能超过实际源／目标栈有效上限。
+drop-item携expectedMaxStackSize时，每次原生DROP_ITEM前均再核验；数量上限不因实际栈大于64而扩大。Node的give-item可以把一个真实足量栈的最多256个目标分成每批最多64个丢出；交物前先带 `track:true` 走向接收者（玩家在走也跟着，20秒内追上就给；追不上报 CANNOT_CATCH_UP；到了身边对方又走远会在剩余时间内再走一次）；没给 `slot` 且快捷栏没有足量的栈、背包主栏（9～35格）有时，先把主栏那一整栈换到快捷栏空格（swap-inventory）再给，快捷栏没空格仍报 INVENTORY_FULL 提示先用 equip-item，同ID有不同组件变体仍报 AMBIGUOUS_ITEM；容器取物仍要求一个足量源栈和空快捷栏，不跨栈凑数，目标不能超过实际源／目标栈有效上限。
 
 Observation 另带 `sitting`（Bot 是否骑着已安装座位适配认定的座位实体，hello 的 `seatAdapters` 列出已安装的适配）、`sleeping`（Bot 是否躺在床上）和 `time:{dayTime,canSleep}`（一天里的时刻 0–23999；canSleep 是当前维度能用床且不是白天），附近玩家的 entities 条目带 `sleeping`。客户端运行端据此发两种唤醒事件：附近玩家上床 `player_sleep`（接管时已经在睡的不算），Bot 自己起床 `woke`。
 

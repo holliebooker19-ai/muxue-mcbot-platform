@@ -548,7 +548,7 @@ export class ServerBody implements Body {
         // Only a mined ore's drop (resourceTargetToken) is picked up past the plain companion pickup range.
         .refine(args => !args.companionGuard || args.resourceTargetToken !== undefined || args.companionGuard.maxDistance <= COMPANION_PICKUP_RANGE.max),
       'approach-container': z.object({ targetToken: z.string().uuid(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
-      'approach-player': z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid().optional(), distance: z.number().finite().min(1).max(1.5).optional(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
+      'approach-player': z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid().optional(), distance: z.number().finite().min(1).max(1.5).optional(), timeoutMs: z.number().int().min(500).max(120000).optional(), track: z.boolean().optional() }),
       'dig-block': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }), 'open-container': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }),
       'place-block': z.object({ ...guardedBlock, ...guardedStack, face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']) }),
       'click-slot': z.object({ containerId: identifier, expectedRevision: generation, slot: z.number().int().nonnegative(), expectedItem: identifier, expectedCount: z.number().int().nonnegative(), expectedComponents: components,
