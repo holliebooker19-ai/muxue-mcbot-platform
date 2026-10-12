@@ -431,8 +431,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     });
   }
   if (serverObserved && body.hello.capabilities.includes('hunt')) {
-    register('hunt', 'Only when the player asks: kill count (default 1) grown mobs of one type nearby with your best sword or axe (never players, villagers, pets, named or baby animals; no creepers). Stops at lowHealth. Pick up leftover drops with collect-items. survey:true only counts them.', {
-      type: registryId.describe('e.g. minecraft:sheep'), count: z.number().int().min(1).max(16).optional(), survey: z.boolean().optional(), ...area,
+    register('hunt', 'Only when the player asks: kill count (default 1) grown mobs of one type nearby with your best sword or axe (never players, villagers, pets, named or baby animals; no creepers). Iron golems: only a village\'s own (not player-built, not named), and only when the player clearly asks; it stands on a pillar of spare blocks 1-8 high beside the golem and fights from there, so the pack needs plain full blocks (dirt, cobblestone, planks). pillar:true does the same for a ground melee mob that is chasing you or hurts a lot (zombie, vindicator); useless against ranged mobs, spiders and endermen (refused). Stops at lowHealth. Pick up leftover drops with collect-items. survey:true only counts them.', {
+      type: registryId.describe('e.g. minecraft:sheep'), count: z.number().int().min(1).max(16).optional(), pillar: z.boolean().optional().describe('Fight from a pillar beside the target (always so for iron golems)'), survey: z.boolean().optional(), ...area,
       lowHealth: z.number().min(2).max(18).optional(), say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(5000).max(180000).optional(),
     }, async ({ say, ...args }) => {
       if (args.survey) return operationResult(await body.act('hunt', args));

@@ -144,7 +144,7 @@ final class ServerController implements ControlSession.Game {
     }
     /** The body never tramples farmland: a companion walking the player's field must not turn it back to dirt. */
     /** Whatever the body does (a swing, an arrow, a guard fight), it never hurts a player, a pet, a villager or anything named. */
-    private void guardFriendlyFire(net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent event){if(GuardCombat.blocksFriendlyFire(player!=null&&event.getSource().getEntity()==player,event.getSource().getDirectEntity()!=null&&event.getSource().getDirectEntity().getTags().contains(GuardCombat.BODY_PROJECTILE_TAG),event.getEntity()==player,GuardCombat.protectedEntity(event.getEntity())))event.setCanceled(true);}
+    private void guardFriendlyFire(net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent event){if(GuardCombat.blocksFriendlyFire(player!=null&&event.getSource().getEntity()==player,event.getSource().getDirectEntity()!=null&&event.getSource().getDirectEntity().getTags().contains(GuardCombat.BODY_PROJECTILE_TAG),event.getEntity()==player,GuardCombat.protectedFromBody(event.getEntity())))event.setCanceled(true);}
     /** An arrow the body loosed keeps its mark after the body is gone (or its owner reference is), so the guard still knows whose it is. */
     private void markBodyProjectile(net.neoforged.neoforge.event.entity.EntityJoinLevelEvent event){if(player!=null&&!event.getLevel().isClientSide()&&event.getEntity() instanceof net.minecraft.world.entity.projectile.Projectile projectile&&projectile.getOwner()==player)projectile.addTag(GuardCombat.BODY_PROJECTILE_TAG);}
     private void guardFarmland(net.neoforged.neoforge.event.level.BlockEvent.FarmlandTrampleEvent event){if(player!=null&&event.getEntity()==player)event.setCanceled(true);}
@@ -633,7 +633,7 @@ final class ServerController implements ControlSession.Game {
                 requireWalkable();farm.start();
                 if(operation.status.equals("running")){task=farm;active=operation;}
             } else if(operation.name.equals("hunt")) {
-                HuntTask hunt=new HuntTask(operation,player,session,center);
+                HuntTask hunt=new HuntTask(operation,player,session,center,survival);
                 if(survey){operation.finish("succeeded","Hunt survey",hunt.survey());return;}
                 requireWalkable();hunt.start();
                 if(operation.status.equals("running")){task=hunt;active=operation;}
