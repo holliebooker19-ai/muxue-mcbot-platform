@@ -15,7 +15,7 @@ export function registerMemoryTools(factory: ToolFactory, memory: MemoryStore, o
 
   factory.registerTool(
     "memory-note",
-    "Write one line into today's journal: something subjective worth remembering (\"小雪夸我可爱\", \"答应小雪明天去挖矿\"). Chat, deaths, joins, sleep, tasks etc. are logged automatically — don't repeat them. Tags: `bond` = consider keeping it long-term at consolidation, `todo-dev` = a tool problem to fix later in dev mode",
+    "Write one line into today's journal: something subjective worth remembering (\"玩家夸我可爱\", \"答应玩家明天去挖矿\"). Chat, deaths, joins, sleep, tasks etc. are logged automatically — don't repeat them. Tags: `bond` = consider keeping it long-term at consolidation, `todo-dev` = a tool problem to fix later in dev mode",
     {
       text: z.string().min(1).max(300),
       tags: z.array(z.enum(['bond', 'todo-dev', 'goal', 'world'])).optional()

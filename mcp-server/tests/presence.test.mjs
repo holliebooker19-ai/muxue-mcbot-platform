@@ -271,7 +271,7 @@ test('启动：只有 Bot 在线 → 停放 no_players；有真人 → 拿锁进
   assert.equal(JSON.parse(fs.readFileSync(s2.lockFile, 'utf8')).pid, process.pid);
 });
 
-test('--owner-players：只有朋友在线不进服；小雪走了、朋友还在也照样下线，spawn 名单列出所有真人', async (t) => {
+test('--owner-players：只有朋友在线不进服；玩家走了、朋友还在也照样下线，spawn 名单列出所有真人', async (t) => {
   let sample = ['friend'];
   const s = setup({ owners: ['muxue'], heartbeat: () => true, ping: async () => ({ online: sample.length, sample }) });
   t.after(() => s.presence.stop());
@@ -295,7 +295,7 @@ test('--owner-players：只有朋友在线不进服；小雪走了、朋友还�
   assert.equal(s.conn.connects, 1);
   assert.match(s.events.since(0, ['spawn'])[0].text, /在线真人玩家：muxue、friend|在线真人玩家：friend、muxue/);
 
-  // 假 Bot 不触发 spawn，先跑一次检查记下“看到小雪”的时间
+  // 假 Bot 不触发 spawn，先跑一次检查记下“看到玩家”的时间
   await s.presence.tick();
   delete s.conn.bot.players.muxue;
   s.clock.t += 10_000;

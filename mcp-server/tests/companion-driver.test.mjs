@@ -726,7 +726,7 @@ test('冒烟：躺上床触发整理（有没整理的日志才整理，30 分�
     assert.match(d.output(), /不用整理记忆（sleep/);
     appendEvent(s.F, 'presence', 'Claude不在线（no_players：没有真人玩家在线，没有 muxue 在线满 2 分钟）。');
     const t3 = await waitFor(() => s.turns()[3], 10000, '下线整理轮');
-    assert.match(t3.text, /^【整理记忆】（小雪下线了/);
+    assert.match(t3.text, /^【整理记忆】（玩家都下线了/);
   } finally {
     d.p.kill();
     await mc.close();

@@ -1,4 +1,4 @@
-// 按需视觉：player-view（小雪的游戏窗口）与 look（Bot 视角的简化渲染）
+// 按需视觉：player-view（玩家的游戏窗口）与 look（Bot 视角的简化渲染）
 import { z } from "zod";
 import type { Bot } from 'mineflayer';
 import { ToolFactory, MAX_IMAGE_BYTES } from '../tool-factory.js';
@@ -18,7 +18,7 @@ export function registerVisionTools(factory: ToolFactory, getBot: () => Bot, wor
       const sel = selectedWindow();
       if (!windows.length) return factory.createResponse(`没找到像 Minecraft 的窗口（另有 ${hidden} 个其他窗口，未列出）`);
       const lines = windows.map((w) => `- handle ${w.handle}：「${w.title}」（${w.process}，${w.width}x${w.height}${w.minimized ? '，最小化' : ''}）${sel?.handle === w.handle ? ' ← 已选定' : ''}`);
-      return factory.createResponse(`${lines.join('\n')}\n（另有 ${hidden} 个其他窗口，未列出）请小雪确认是哪个，再 select-game-window`);
+      return factory.createResponse(`${lines.join('\n')}\n（另有 ${hidden} 个其他窗口，未列出）请玩家确认是哪个，再 select-game-window`);
     }
   );
 
@@ -27,7 +27,7 @@ export function registerVisionTools(factory: ToolFactory, getBot: () => Bot, wor
     "Select the player's Minecraft window for player-view. Only call this after the player confirmed which window it is",
     {
       handle: z.coerce.number().int().describe("handle from list-game-windows"),
-      confirmedBy: z.string().min(1).max(100).describe("How the player confirmed, e.g. 小雪说是第一个")
+      confirmedBy: z.string().min(1).max(100).describe("How the player confirmed, e.g. 玩家说是第一个")
     },
     async ({ handle, confirmedBy }) => {
       const sel = await selectWindow(handle, confirmedBy);
@@ -47,9 +47,9 @@ export function registerVisionTools(factory: ToolFactory, getBot: () => Bot, wor
         if (result.png.length <= MAX_IMAGE_BYTES || w >= result.width) break;
         result = await capturePlayerView(w);
       }
-      const caption = `[${time(result.at)}] 小雪的游戏画面（玩家视角，窗口「${result.title}」），${result.width}x${result.height}` +
+      const caption = `[${time(result.at)}] 玩家的游戏画面（玩家视角，窗口「${result.title}」），${result.width}x${result.height}` +
         `${result.width !== result.sourceWidth ? `（原始 ${result.sourceWidth}x${result.sourceHeight}，已缩小）` : ''}。` +
-        '画面里的远景是小雪客户端渲染的，不代表我这边已经加载或确认过';
+        '画面里的远景是玩家客户端渲染的，不代表我这边已经加载或确认过';
       return factory.createImageResponse(result.png, 'image/png', caption);
     }
   );
@@ -67,7 +67,7 @@ export function registerVisionTools(factory: ToolFactory, getBot: () => Bot, wor
       const bot = getBot();
       const r = await captureLook(bot, { width, height, format, timeoutMs: timeoutSeconds * 1000 });
       const pitchDeg = Math.round(r.pose.pitch * 180 / Math.PI);
-      const caption = `[${time(r.at)}] Bot 视角的简化渲染（不是小雪的画面，没有光影和材质包）：位置 (${Math.floor(r.pose.x)}, ${Math.floor(r.pose.y)}, ${Math.floor(r.pose.z)})，` +
+      const caption = `[${time(r.at)}] Bot 视角的简化渲染（不是玩家的画面，没有光影和材质包）：位置 (${Math.floor(r.pose.x)}, ${Math.floor(r.pose.y)}, ${Math.floor(r.pose.z)})，` +
         `面朝${compassOfYaw(r.pose.yaw)}，${pitchDeg > 5 ? `抬头 ${pitchDeg}°` : pitchDeg < -5 ? `低头 ${-pitchDeg}°` : '平视'}；世界 ${worldId || '（未配置 world-id）'} / ${r.dimension}；` +
         `已发送 ${r.chunks} 个区块，${r.ready ? '画面已稳定' : `等了 ${Math.round(r.waitedMs / 1000)} 秒仍未完全稳定，可能缺块`}；只渲染附近区块，更远处是空的`;
       return factory.createImageResponse(r.image, r.mimeType, caption);

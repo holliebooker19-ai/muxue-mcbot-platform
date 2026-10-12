@@ -92,7 +92,7 @@ export class RegionStore {
   upsert(input: { name: string; kind: RegionKind; dimension: string; from: Point3; to: Point3; note?: string; source: string }): Region {
     if (!this.configured) throw new Error('没有配置 --world-id，不能登记区域（服务器地址不能用来区分存档）');
     if (!NAME_RE.test(input.name)) throw new Error('区域名只能用文字、数字、下划线和连字符，最长 40 个字');
-    if (!input.source.trim()) throw new Error('请写明来源（例如：小雪在聊天里要求）');
+    if (!input.source.trim()) throw new Error('请写明来源（例如：玩家在聊天里要求）');
     for (const v of [input.from, input.to]) {
       for (const n of [v.x, v.y, v.z]) {
         if (!Number.isFinite(n)) throw new Error('坐标必须是有限数字');

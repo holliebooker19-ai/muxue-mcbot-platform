@@ -158,10 +158,10 @@ test('player-view：只列出 Minecraft 窗口、不泄露其他窗口标题；�
     assert.match(text(none), /还没有选定窗口/);
     assert.match(text(await h.call('select-game-window', { handle: 22, confirmedBy: 't' })), /不在 Minecraft 候选列表里/);
 
-    assert.match(text(await h.call('select-game-window', { handle: 11, confirmedBy: '小雪说是这个' })), /选定了「Minecraft/);
+    assert.match(text(await h.call('select-game-window', { handle: 11, confirmedBy: '玩家说是这个' })), /选定了「Minecraft/);
     const r = await h.call('player-view');
     assert.equal(r.isError, undefined, text(r));
-    assert.match(text(r), /小雪的游戏画面（玩家视角.*1280x640（原始 2000x1000，已缩小）/);
+    assert.match(text(r), /玩家的游戏画面（玩家视角.*1280x640（原始 2000x1000，已缩小）/);
     const png = PNG.sync.read(Buffer.from(r.content[1].data, 'base64'));
     assert.deepEqual([png.width, png.height], [1280, 640]);
     assert.deepEqual(pixel(png, 100, 300), [200, 30, 30], 'BGRA 应正确转换成 RGB');

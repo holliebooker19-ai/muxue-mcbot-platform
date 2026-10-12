@@ -30,12 +30,12 @@ function farmWorld() {
 async function setup({ inventory = [['wheat_seeds', 2], ['wheat', 5], ['dirt', 3]], world = farmWorld(), seedChest = true } = {}) {
   const bot = createFakeBot(world, { inventory });
   const h = createHarness(bot, { regionFile: path.join(dir, 'regions.json') });
-  await h.call('register-region', { name: 'wheat-field', kind: 'farm', from: { x: 2, y: 63, z: -2 }, to: { x: 6, y: 64, z: 2 }, source: '测试：小雪的麦田' });
+  await h.call('register-region', { name: 'wheat-field', kind: 'farm', from: { x: 2, y: 63, z: -2 }, to: { x: 6, y: 64, z: 2 }, source: '测试：玩家的麦田' });
   const reg = await h.call('register-farm', {
     name: 'wheat', region: 'wheat-field', crops: ['wheat'],
     ...(seedChest ? { seedChest: { x: 0, y: 64, z: -3 } } : {}),
     outputChest: { x: 0, y: 64, z: 3 },
-    source: '测试：小雪让我照看',
+    source: '测试：玩家让我照看',
   });
   return { w: world, bot, h, reg };
 }
@@ -131,7 +131,7 @@ test('掉落物被玩家捡走或凭空消失：不算作自己捡到，如实�
   const realSpawn = bot.spawnDrop;
   bot.spawnDrop = (name, count, pos) => {
     const e = realSpawn(name, count, pos);
-    // (6,64,2) 的掉落物一出现就被小雪捡走；(6,64,-2) 的小麦凭空消失
+    // (6,64,2) 的掉落物一出现就被玩家捡走；(6,64,-2) 的小麦凭空消失
     if (Math.floor(pos.x) === 6 && Math.floor(pos.z) === 2) setImmediate(() => bot.pickedByOther(e, muxue));
     if (Math.floor(pos.x) === 6 && Math.floor(pos.z) === -2 && name === 'wheat') setImmediate(() => bot.vanish(e));
     return e;

@@ -29,7 +29,7 @@ test('survey-site：建议地板高度、要挖的列、树和水、登记区域
   w.set(1, 64, 2, 'dirt');
   const bot = createFakeBot(w);
   const h = createHarness(bot, { regionFile: path.join(tempDir('mcbot-regions-'), 'regions.json') });
-  assert.match(text(await h.call('register-region', { name: '小雪的菜地', kind: 'farm', from: { x: -3, y: 64, z: 3 }, to: { x: -3, y: 66, z: 4 }, source: '测试' })), /小雪的菜地/);
+  assert.match(text(await h.call('register-region', { name: '玩家的菜地', kind: 'farm', from: { x: -3, y: 64, z: 3 }, to: { x: -3, y: 66, z: 4 }, source: '测试' })), /玩家的菜地/);
 
   const r = text(await h.call('survey-site', { from: { x: -4, y: 64, z: -4 }, to: { x: 4, y: 64, z: 4 }, margin: 1 }));
   assert.match(r, /范围 x -4~4，z -4~4（9×9）/);
@@ -39,7 +39,7 @@ test('survey-site：建议地板高度、要挖的列、树和水、登记区域
   assert.match(r, /树 \d+ 列/);
   assert.match(r, /水 1 列/);
   assert.match(r, /先用 mine-blocks 砍掉原木/);
-  assert.match(r, /和登记的区域重叠：「小雪的菜地」/);
+  assert.match(r, /和登记的区域重叠：「玩家的菜地」/);
   const map = r.split('\n').slice(-11);
   assert.equal(map.length, 11);
   assert.ok(map.every((row) => row.length === 11), map.join('\n'));

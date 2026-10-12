@@ -38,7 +38,7 @@ export function memoryTools(memory: MemoryStore, mode: MemoryMode): MemoryTool[]
     return lines.join('\n') + (total > hits.length ? `\n（共 ${total} 条，只显示 ${hits.length} 条；加 limit 或缩小范围）` : '');
   } };
   if (mode === 'play') return [
-    { name: 'memory-note', description: 'Write one line into today\'s journal: something subjective worth remembering ("小雪说她最喜欢樱花", "答应小雪明天去挖矿"). Chat, tasks, deaths, players coming and going, sleep are journaled by the program: don\'t repeat them. Tags: bond = worth keeping long-term, goal = a promise or something you want to do, world = about this world, todo-dev = a tool problem for the developers.',
+    { name: 'memory-note', description: 'Write one line into today\'s journal: something subjective worth remembering ("玩家说最喜欢樱花", "答应玩家明天去挖矿"). Chat, tasks, deaths, players coming and going, sleep are journaled by the program: don\'t repeat them. Tags: bond = worth keeping long-term, goal = a promise or something you want to do, world = about this world, todo-dev = a tool problem for the developers.',
       schema: { text: z.string().min(1).max(300), tags: z.array(z.enum(['bond', 'todo-dev', 'goal', 'world'])).optional() },
       handler: async ({ text, tags }) => `已记下：${memory.note(text, tags ?? [])}` },
     recall,

@@ -1,4 +1,4 @@
-// 共同关注目标：记住小雪正在说的是哪面墙、哪个房间。只存在内存里，
+// 共同关注目标：记住玩家正在说的是哪面墙、哪个房间。只存在内存里，
 // 断线、换维度、超时、或目标方块全部消失时自动失效
 import type { Bot } from 'mineflayer';
 import { boxOf, type Point3 } from './regions.js';

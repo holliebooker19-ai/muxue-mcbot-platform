@@ -441,7 +441,7 @@ export async function tendFarm(bot: Bot, farm: Farm, opts: TendOptions): Promise
   const baseline = new Map<string, number>();
   for (const item of bot.inventory.items()) baseline.set(item.name, (baseline.get(item.name) ?? 0) + item.count);
 
-  // 待补种：只有自己收过的位置（上次没补完的）。原本就空着的耕地可能是小雪故意留的，默认不种
+  // 待补种：只有自己收过的位置（上次没补完的）。原本就空着的耕地可能是玩家故意留的，默认不种
   const pending = new Map<string, PendingReplant>();
   for (const p of farm.pending) pending.set(posKey(p), p);
   const emptyCells = scan.emptyFarmland.filter((c) => !pending.has(posKey(c)));

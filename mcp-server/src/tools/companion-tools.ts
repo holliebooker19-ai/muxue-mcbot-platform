@@ -23,7 +23,7 @@ export function registerCompanionTools(factory: ToolFactory, getBot: () => Bot, 
       insideHint: point.optional().describe("Any point inside the house, if no region"),
       inside: point.optional().describe("For a doorway without a door: the standing cell right inside it"),
       note: z.string().max(200).optional(),
-      source: z.string().min(1).max(200).describe("Who showed you the door, e.g. 小雪说正门在这")
+      source: z.string().min(1).max(200).describe("Who showed you the door, e.g. 玩家说正门在这")
     },
     async ({ name, door, region, insideHint, inside, note, source }) => {
       const bot = getBot();

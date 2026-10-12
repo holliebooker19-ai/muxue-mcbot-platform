@@ -23,7 +23,7 @@ export function registerFarmTools(factory: ToolFactory, getBot: () => Bot): void
       seedChest: point.optional().describe("Chest/barrel to take seeds from when short"),
       outputChest: point.optional().describe("Chest/barrel to put the harvest in"),
       note: z.string().max(200).optional(),
-      source: z.string().min(1).max(200).describe("Who asked, e.g. 小雪让我照看这块麦田")
+      source: z.string().min(1).max(200).describe("Who asked, e.g. 玩家让我照看这块麦田")
     },
     async ({ name, region, crops, seedChest, outputChest, note, source }) => {
       const bot = getBot();

@@ -16,7 +16,7 @@ export function registerOutdoorTools(factory: ToolFactory, getBot: () => Bot): v
       kind: z.enum(PLACE_KINDS),
       pos: point.optional(),
       note: z.string().max(200).optional(),
-      source: z.string().min(1).max(200).describe("Who/what it came from, e.g. 小雪说这是矿洞口 / 我自己发现的")
+      source: z.string().min(1).max(200).describe("Who/what it came from, e.g. 玩家说这是矿洞口 / 我自己发现的")
     },
     async ({ name, kind, pos, note, source }) => {
       const bot = getBot();

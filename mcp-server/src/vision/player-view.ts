@@ -1,4 +1,4 @@
-// player-view：截小雪的 Minecraft 窗口（含光影、远景），只截明确选定的那个窗口的客户区。
+// player-view：截玩家的 Minecraft 窗口（含光影、远景），只截明确选定的那个窗口的客户区。
 // 找不到窗口、窗口被关、最小化、黑帧时返回原因，绝不改成截整个屏幕。
 // 只在显式调用时截一张，不录屏。只把像 Minecraft 的窗口告诉模型，其他窗口标题不外传
 import fs from 'node:fs';
@@ -144,7 +144,7 @@ const ERRORS: Record<string, string> = {
 
 export async function capturePlayerView(maxWidth: number): Promise<CaptureResult> {
   const sel = selected;
-  if (!sel) throw new Error('还没有选定窗口：先 list-game-windows，请小雪确认是哪个，再 select-game-window');
+  if (!sel) throw new Error('还没有选定窗口：先 list-game-windows，请玩家确认是哪个，再 select-game-window');
   const { windows } = await listGameWindows();
   const w = windows.find((x) => x.handle === sel.handle);
   if (!w || w.pid !== sel.pid) {

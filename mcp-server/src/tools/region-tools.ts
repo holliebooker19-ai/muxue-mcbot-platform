@@ -34,12 +34,12 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => Bot): vo
       from: point.describe("One corner (inclusive)"),
       to: point.describe("Opposite corner (inclusive); include walls, roof and floor"),
       note: z.string().max(200).optional(),
-      source: z.string().min(1).max(200).describe("Who asked for it and how, e.g. 小雪在聊天里说这是我们的家")
+      source: z.string().min(1).max(200).describe("Who asked for it and how, e.g. 玩家在聊天里说这是我们的家")
     },
     async ({ name, kind, from, to, note, source }) => {
       const store = regionStore();
       if (!store.configured) {
-        return factory.createErrorResponse('服务端没有配置 --world-id，不能保存区域。请小雪在 .mcp.json 里加上 --world-id');
+        return factory.createErrorResponse('服务端没有配置 --world-id，不能保存区域。请玩家在 .mcp.json 里加上 --world-id');
       }
       const bot = getBot();
       const region = store.upsert({ name, kind, dimension: bot.game.dimension, from, to, note, source });
@@ -78,7 +78,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => Bot): vo
     "Stop protecting a registered area. Only do this when the player explicitly asks; the record is kept as inactive",
     {
       name: z.string(),
-      source: z.string().min(1).max(200).describe("Who asked to remove it, e.g. 小雪说家已经拆了")
+      source: z.string().min(1).max(200).describe("Who asked to remove it, e.g. 玩家说家已经拆了")
     },
     async ({ name, source }) => {
       const region = regionStore().deactivate(name, source);

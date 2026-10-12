@@ -94,7 +94,7 @@ test('登记的保护区域：默认不挖不放；unlockRegions 只放开列出
   w.set(1, 64, 3, 'dirt');
   const bot = createFakeBot(w, { inventory: TOOLS });
   const h = createHarness(bot, { regionFile });
-  const reg = await h.call('register-region', { name: 'home', kind: 'home', from: { x: 2, y: 63, z: -1 }, to: { x: 2, y: 66, z: 1 }, source: '测试：小雪指定' });
+  const reg = await h.call('register-region', { name: 'home', kind: 'home', from: { x: 2, y: 63, z: -1 }, to: { x: 2, y: 66, z: 1 }, source: '测试：玩家指定' });
   assert.match(text(reg), /已登记保护区域/);
   const saved = JSON.parse(fs.readFileSync(regionFile, 'utf8'));
   assert.deepEqual(saved.regions.map((r) => [r.name, r.worldId, r.dimension, r.active]), [['home', 'test-world', 'overworld', true]]);
@@ -115,7 +115,7 @@ test('登记的保护区域：默认不挖不放；unlockRegions 只放开列出
 
   const list = await h.call('list-regions', {});
   assert.match(text(list), /home（home，overworld）\(2,63,-1\)~\(2,66,1\)/);
-  await h.call('remove-region', { name: 'home', source: '测试：小雪说不用保护了' });
+  await h.call('remove-region', { name: 'home', source: '测试：玩家说不用保护了' });
   assert.match(text(await h.call('check-action', { action: 'dig', x: 2, y: 64, z: 0 })), /可以挖/);
 });
 

@@ -340,7 +340,7 @@ export function entranceHint(bot: Bot, target: Point3): string {
     if (doors.length) {
       return `（目标和你一个在「${r.name}」里一个在外面，可以先用 use-entrance ${doors.map((d) => d.name).join(' / ')} 进出）`;
     }
-    return `（目标和你一个在「${r.name}」里一个在外面，但还没登记门口，可以请小雪指一下门在哪）`;
+    return `（目标和你一个在「${r.name}」里一个在外面，但还没登记门口，可以请玩家指一下门在哪）`;
   }
   return '';
 }

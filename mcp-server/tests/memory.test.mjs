@@ -15,7 +15,7 @@ function setup(clock = { t: new Date(2026, 8, 28, 14, 3) }) {
   fs.mkdirSync(path.join(root, 'shared', 'players'), { recursive: true });
   fs.writeFileSync(path.join(root, 'xiaoke', 'persona.md'), '# 人设\n甜美随和\n');
   fs.writeFileSync(path.join(root, 'xiaoke', 'bonds.md'), '- 2026-09-17：一起盖了家\n');
-  fs.writeFileSync(path.join(root, 'shared', 'players', 'muxue.md'), '# muxue\n叫她小雪\n');
+  fs.writeFileSync(path.join(root, 'shared', 'players', 'muxue.md'), '# muxue\n叫她小木\n');
   fs.writeFileSync(path.join(root, 'shared', 'players', 'friend1.md'), '# friend1\n');
   return { root, backups, mem, clock };
 }
@@ -24,11 +24,11 @@ test('日志按本地日期分文件，一行一条，带时间', () => {
   const { root, mem, clock } = setup();
   mem.append('muxue: 你好');
   clock.t = new Date(2026, 8, 29, 0, 5);
-  mem.note('小雪夸我可爱', ['bond']);
+  mem.note('玩家夸我可爱', ['bond']);
   const day1 = fs.readFileSync(path.join(root, 'xiaoke', 'journal', '2026-09-28.md'), 'utf8');
   const day2 = fs.readFileSync(path.join(root, 'xiaoke', 'journal', '2026-09-29.md'), 'utf8');
   assert.match(day1, /^# 2026-09-28\n\n- 14:03 muxue: 你好\n$/);
-  assert.match(day2, /- 00:05 \[记\] 小雪夸我可爱 #bond\n$/);
+  assert.match(day2, /- 00:05 \[记\] 玩家夸我可爱 #bond\n$/);
 });
 
 test('多行压成一行；300 字以内的笔记和标签完整保存，超长直接拒绝', () => {
@@ -54,10 +54,10 @@ test('开局上下文：默认只给变化快的几段，stable 才带人设、�
   assert.match(ctx, /## 最近几天（xiaoke\/digest\.md）\n（空）/);
   assert.match(ctx, /还没整理的日志（还没整理过，共 1 条）\n2026-09-28\n- 14:03 muxue: 晚上好/);
   assert.match(ctx, /## 其他玩家档案\nfriend1/);
-  assert.doesNotMatch(ctx, /甜美随和|一起盖了家|叫她小雪/);
+  assert.doesNotMatch(ctx, /甜美随和|一起盖了家|叫她小木/);
   const full = mem.context({ stable: true, owners: ['muxue'] });
-  assert.ok(full.indexOf('甜美随和') < full.indexOf('叫她小雪'));
-  assert.ok(full.indexOf('叫她小雪') < full.indexOf('一起盖了家'));
+  assert.ok(full.indexOf('甜美随和') < full.indexOf('叫她小木'));
+  assert.ok(full.indexOf('叫她小木') < full.indexOf('一起盖了家'));
   assert.ok(full.indexOf('一起盖了家') < full.indexOf('家在河边'));
 });
 

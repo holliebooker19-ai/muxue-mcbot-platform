@@ -37,8 +37,8 @@ async function homeSetup(worldOpts) {
   const w = houseWorld(worldOpts);
   const bot = createFakeBot(w, { inventory: [['stone_axe', 1], ['oak_planks', 8]] });
   const h = createHarness(bot, { regionFile });
-  await h.call('register-region', { name: 'home', kind: 'home', from: { x: 4, y: 63, z: -2 }, to: { x: 8, y: 67, z: 2 }, source: '测试：小雪指定的家' });
-  const reg = await h.call('register-entrance', { name: 'front', door: { x: 4, y: 65, z: 0 }, region: 'home', source: '测试：小雪说正门在这' });
+  await h.call('register-region', { name: 'home', kind: 'home', from: { x: 4, y: 63, z: -2 }, to: { x: 8, y: 67, z: 2 }, source: '测试：玩家指定的家' });
+  const reg = await h.call('register-entrance', { name: 'front', door: { x: 4, y: 65, z: 0 }, region: 'home', source: '测试：玩家说正门在这' });
   return { w, bot, h, reg };
 }
 
@@ -103,8 +103,8 @@ test('门本来开着：直接穿过，过去后也把门关上', async () => {
   assert.deepEqual(doorOpen(w), [false, false]);
 });
 
-// 2026-09-26 19:18：小雪在屋外叫小克，门被她开着；出门时 openedByMe=false，旧代码直接跳过关门，门一直开着
-test('复现：小雪开着门在门外等，出门后门要关上并说出来', async () => {
+// 2026-09-26 19:18：玩家在屋外叫小克，门被她开着；出门时 openedByMe=false，旧代码直接跳过关门，门一直开着
+test('复现：玩家开着门在门外等，出门后门要关上并说出来', async () => {
   const { w, bot, h } = await homeSetup();
   await withKinematics(bot, () => h.call('use-entrance', { name: 'front', direction: 'in' }));
   w.set(4, 64, 0, 'oak_door', { facing: 'east', half: 'lower', open: true });
@@ -170,7 +170,7 @@ test('铁门、有人站在门口、门口被堵：停下说明，不动手', as
     assert.equal(callsOf(bot, 'activateBlock').length, 0);
     assert.deepEqual(house(w), before);
   }
-  // 小雪站在门里
+  // 玩家站在门里
   {
     const { bot, h } = await homeSetup();
     bot.entities[7] = { id: 7, type: 'player', username: 'muxue', position: new Vec3(5.5, 64, 0.5), height: 1.8 };
