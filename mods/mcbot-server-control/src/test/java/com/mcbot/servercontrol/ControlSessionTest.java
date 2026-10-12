@@ -352,6 +352,6 @@ public final class ControlSessionTest {
         NavigationTest.run();SurfaceRouteTest.run();BuildTaskTest.run();ActionMethodsTest.run();IdleGazeTest.run();LookAroundTest.run();
         DefenseAlphaTest.run();GuardCombatTest.run();GuardDutyTest.run();GuardLifecycleTest.run();
         ItemInteractionsTest.run();HostingRulesTest.run();ModAdaptersTest.run();WorkstationCoreTest.run();GenericItemSlotsTest.run();EquipmentViewTest.run();ArmourChoiceTest.run();OffhandEquipTest.run();SeatTest.run();
-        HuntPillarTest.run();
+        HuntPillarTest.run();BuildingGuardTest.run();
     }
 }

@@ -106,7 +106,7 @@ final class NativePillar implements BodyTask {
         body.connection.handleUseItemOn(new ServerboundUseItemOnPacket(InteractionHand.MAIN_HAND,hit,++sequence));
         BlockState now=body.serverLevel().getBlockState(feet);
         ItemStack after=body.getInventory().getItem(slot);
-        if(now.is(block)&&after.getCount()==before-1)placed=true;
+        if(now.is(block)&&after.getCount()==before-1){placed=true;survival.own.add(body.serverLevel().dimension().location().toString(),feet);}
         else if(!now.isAir()&&!now.canBeReplaced()||after.getCount()!=before){body.stopInput();operation.finish("unknown","Pillar placement produced a different authoritative state; do not replay",result());}
     }
     private JsonObject result() {

@@ -38,6 +38,8 @@ final class SurvivalActions {
     private final ControlSession session;
     private final TargetTokens targets;
     private final ResourceTargets resources;
+    /** Blocks this body placed itself: never reported as a building (BuildingGuard). */
+    final OwnBlocks own=new OwnBlocks();
     private String guardedToken;
     private TargetTokens.Target guardedTarget;
     private AbstractContainerMenu guardedMenu;
@@ -260,6 +262,14 @@ final class SurvivalActions {
             requireOrdinaryOreTool(state,position);
         }
         if(state.isAir()||state.getDestroySpeed(player.serverLevel(),position)<0) throw error("NOT_DIGGABLE","Block cannot be dug");
+        // Only when the caller asks (the model's own dig-block): a possible building is reported and not dug. Tasks never ask.
+        if(args.has("buildingCheck")&&args.get("buildingCheck").isJsonPrimitive()&&args.get("buildingCheck").getAsBoolean()) {
+            BuildingGuard.Reason reason=buildingReason(args,position);
+            if(reason!=null) {
+                operation.finish("failed","MAYBE_BUILDING: "+reason.wire+"; not dug",obj("code","MAYBE_BUILDING","maybeBuilding",obj("reason",reason.wire),"block",blockSnapshot(position)));
+                return;
+            }
+        }
         BlockHitResult hit=hit(position,null);look(hit.getLocation());guard(operation);
         digging=operation;digPosition=position;digFace=hit.getDirection();digState=state;digSlot=player.getInventory().selected;
         deadline=now()+(long)bounded(args,"timeoutMs",15_000,500,120_000);lastDigTick=Integer.MIN_VALUE;
@@ -270,6 +280,13 @@ final class SurvivalActions {
         if(!mining().mcbot$isDestroyingBlock()) { nativeEffects.confirmed();abortDig();throw error("FORBIDDEN","Native mining start was refused"); }
         nativeEffects.confirmed(); // START was accepted, but the authoritative block is still unchanged.
     }
+    /** Why this block may be somebody's building, or null (BuildingGuard); the home comes in the request. */
+    private BuildingGuard.Reason buildingReason(JsonObject args,BlockPos position) {
+        var level=player.serverLevel();String dimension=level.dimension().location().toString();
+        return BuildingGuard.around(new BuildingGuard.Live(level),player.blockInteractionRange(),BuildingGuard.home(args,dimension),ownIn(dimension),position,position).reason(position);
+    }
+    /** The blocks this body placed itself, as a test for one dimension. */
+    java.util.function.Predicate<BlockPos> ownIn(String dimension){return p->own.has(dimension,p);}
     void tick() {
         if(defense!=null&&lastDefenseTick!=player.getServer().getTickCount()) {
             lastDefenseTick=player.getServer().getTickCount();NativeDefenseUse current=defense;current.tick();
@@ -327,6 +344,7 @@ final class SurvivalActions {
         JsonObject result=obj("block",blockSnapshot(digPosition),"inventory",inventory());
         BlockState actual=player.serverLevel().getBlockState(digPosition);
         boolean removed=actual.isAir()||(!actual.getFluidState().isEmpty()&&actual.getCollisionShape(player.serverLevel(),digPosition).isEmpty());
+        if(removed)own.remove(player.serverLevel().dimension().location().toString(),digPosition);
         abortDig();operation.finish(removed?"succeeded":"unknown",removed?"Native mining removed the authoritative block":"Mining replaced the block with another state; inspect before continuing",result);
     }
     private void abortDig() {
@@ -359,7 +377,7 @@ final class SurvivalActions {
         ItemStack after=player.getInventory().getItem(slot);BlockState actual=player.serverLevel().getBlockState(target);
         JsonObject result=obj("block",blockSnapshot(target),"inventory",inventory(),"consumedCount",before-after.getCount());
         boolean remainingMatches=after.isEmpty()?before==1:itemId(after).equals(string(args,"expectedItem"))&&components(after).equals(object(args,"expectedComponents"));
-        if(actual.is(item.getBlock())&&after.getCount()==before-1&&remainingMatches) operation.finish("succeeded","Native placement and item consumption confirmed",result);
+        if(actual.is(item.getBlock())&&after.getCount()==before-1&&remainingMatches) {own.add(player.serverLevel().dimension().location().toString(),target);operation.finish("succeeded","Native placement and item consumption confirmed",result);}
         else if(actual.equals(previous)&&after.getCount()==before&&itemId(after).equals(string(args,"expectedItem"))&&components(after).equals(object(args,"expectedComponents"))) operation.finish("failed","FORBIDDEN: Native placement refused without block or inventory change",obj("code","FORBIDDEN","block",blockSnapshot(target),"inventory",inventory()));
         else operation.finish("unknown","Placement produced a different authoritative state; do not replay",result);
     }

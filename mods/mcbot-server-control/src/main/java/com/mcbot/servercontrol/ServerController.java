@@ -215,7 +215,9 @@ final class ServerController implements ControlSession.Game {
             try { ensureBody(); } catch(Protocol.Error failure) { if(!failure.code.equals("DEAD_BODY")) throw failure; }
         }
         if(survival!=null) survival.stop();
+        SurvivalActions before=survival;
         player=NativeRespawn.perform(player);survival=new SurvivalActions(player,session,targets,resources);
+        if(before!=null)survival.own.adopt(before.own); // the pillar it left standing is still its own
         player.stopInput();player.pumpLocalTransport();wasConnected=connected();lastDimension=player.serverLevel().dimension().location().toString();
     }
     @Override public JsonObject hello() {
@@ -289,7 +291,7 @@ final class ServerController implements ControlSession.Game {
         }
         return NearbyBlocks.discover(player,center,options,targets);
     }
-    @Override public JsonObject nearbyResources(JsonObject params) {return NearbyResources.discover(player,params,resources);}
+    @Override public JsonObject nearbyResources(JsonObject params) {return NearbyResources.discover(player,params,resources,survival==null?p->false:survival.ownIn(player.serverLevel().dimension().location().toString()));}
     @Override public JsonObject lookAround(JsonObject params) {return LookAround.summarize(player,params);}
     @Override public JsonObject survivalState(JsonObject params) {return survival.survivalState(params);}
     @Override public JsonObject assessTool(JsonObject params) {return ToolAssessment.assess(player,params);}
