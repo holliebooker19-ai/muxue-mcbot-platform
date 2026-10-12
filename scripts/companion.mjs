@@ -39,29 +39,29 @@
 // 注意：同一个 Bot 只能有一个会话在控制。用驱动器时，不要再同时开交互式的 agy / claude 会话。
 // 测试用：环境变量 COMPANION_AGENT_CMD（JSON 数组，比如 ["node","fake-agent.mjs"]）替换 agent 命令，原参数接在后面。
 
-import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import net from 'node:net';
 import path from 'node:path';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import net from 'node:net';
 import { createServerBodyControl, respawnIfDead, lastDeath } from './server-body-control.mjs';
 import { getAgentProtocol } from './agents/process-protocols.mjs';
 import { ROOT, parseArgs, runtimeDirOf, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
-import { pidAlive, readJson } from './driver/files.mjs';
 import { resolveMemory, readMcpConfig, writeHostedMcpConfig } from './driver/mcp-config.mjs';
 import { acquireLock, releaseLock, removeIfOwn, createHeartbeat } from './driver/lock.mjs';
 import { rotateLog, createLog, createNotifier } from './driver/log.mjs';
-import { QUOTA_PAUSE_MS, classifyError, quotaResetAt, createPause } from './driver/errors.mjs';
+import { createPause } from './driver/errors.mjs';
 import { createSession, providerOf, effectiveConfigDir } from './driver/session.mjs';
-import { worldMemoryDir, CONSOLIDATE_MAX_DEFER_MS } from './driver/memory.mjs';
-import { buildHandoff } from './driver/handoff.mjs';
-import { COMPACT_KEEP, COMPACT_PROMPT, deathNote, consolidationPrompt, startupPrompt, serverClaudeInstructions, newTaskNote, newTaskTurn, idleNudge } from './driver/prompts.mjs';
+import { worldMemoryDir } from './driver/memory.mjs';
+import { createServerHandoff } from './driver/handoff.mjs';
+import { deathNote, startupPrompt, serverClaudeInstructions, newTaskNote, newTaskTurn } from './driver/prompts.mjs';
 import { createConsolidation } from './driver/consolidation.mjs';
 import { createEventReader, createEventHandler } from './driver/events.mjs';
 import { createInbox } from './driver/inbox.mjs';
 import { STOP_CONFIRM_MS, isAddressedStop, stopFollowup, captureBodyArtifacts, cleanupBodyArtifacts } from './driver/stop.mjs';
+import { createAgentProcess } from './driver/agent-process.mjs';
+import { createTurns, LONG_TURN_WARN_MS } from './driver/turns.mjs';
 
 // 测试和夹具脚本从这里 import 的名字（实现已经搬到 scripts/driver/）
 export { parseArgs, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
@@ -77,8 +77,6 @@ export { COMPACT_KEEP, COMPACT_PROMPT, deathNote, SIDE_CONSOLIDATE_RULES, sideCo
 export { WAKE_TYPES, isWakeEvent, completeServerChat, taskAlreadyDelivered, busyAck } from './driver/events.mjs';
 export { isAddressedStop, stopFollowup, captureBodyArtifacts, cleanupBodyArtifacts } from './driver/stop.mjs';
 
-const LONG_TURN_WARN_MS = 8 * 60 * 1000;
-const BOT_LOCK_WAIT_MS = 20000;
 // --reconnect 时身体断开的退出码：外层 start-server-play.mjs --wait 看到它就回去等世界、复活后重新接管
 export const RECONNECT_EXIT = 75;
 
@@ -144,32 +142,21 @@ function main() {
   // 运行端按同样的条件（托管、记忆目录里有这个角色的 persona.md）写日志、给 memory-note／memory-recall（client-runtime/src/main.ts openMemory）
   const personaExists = fs.existsSync(path.join(MEMORY_AGENT_DIR, 'persona.md'));
   const memoryOn = personaExists && ((args.body === 'mineflayer' && agentProtocol.identity === 'xiaoke') || args.body === 'server');
-  // ServerBody：整理在同一 Agent、同一账号的单独一次性会话里做，正在玩的会话不停也不变长（startSideConsolidation）
+  // ServerBody：整理在同一 Agent、同一账号的单独一次性会话里做，正在玩的会话不停也不变长（consolidation.startSide）
   const serverMemory = memoryOn && args.body === 'server';
   const WORLD_ID = BODY_SCOPE?.worldId || '';
   // 日志和整理进度在哪：ServerBody 按世界放，旧路径在角色目录
   const MEMORY_WORLD_DIR = args.body === 'server' && WORLD_ID ? worldMemoryDir(MEMORY_AGENT_DIR, WORLD_ID) : MEMORY_AGENT_DIR;
   const STARTUP_PROMPT = startupPrompt(args, memoryOn);
-  // 人设、玩家档案和常驻的记忆放进系统提示；记忆整理过就会变，所以每次启动 Agent 时重新读（startAgent）
+  // 人设、玩家档案和常驻的记忆放进系统提示；记忆整理过就会变，所以每次启动 Agent 时重新读（agent.start）
   const serverInstructions = () => args.body === 'server' && agentProtocol.systemInstructions
     ? serverClaudeInstructions(ROOT, MEMORY_AGENT_DIR, { memoryOn: serverMemory, worldId: WORLD_ID }) : '';
-  let gameInstructions = serverInstructions();
   const resumeWindowMs = Math.max(0, args.resumeWindowMinutes || 0) * 60000;
   // 会话 ID 只在同一个平台、同一个账号目录里有效
   const PROVIDER = providerOf(args.agent);
   const CONFIG_DIR = effectiveConfigDir(args.agent, args.configDir);
 
-  let child = null;
-  let busy = false;
-  let turnStartedAt = 0;
-  let currentTool = '', busyAckedTurn = 0;
-  // 这一轮有没有动过工具：额度或登录报错时没动过工具就把这一轮的输入原样再送一次
-  let turnUsedTool = false;
   let playerStopTimer = null;
-  let lastActivity = Date.now();
-  let idleNudged = false;
-  let restarting = false;
-  let restartCount = 0;
   const pause = createPause();
   let shuttingDown = false;
   let cancellingActions = false;
@@ -180,31 +167,30 @@ function main() {
   let serverControl = null;
   let waitingNewServerTask = false;
   let queuedServerTasks = [];
-  let turnKind = 'normal';
-  // 上下文超了，服务端身体又支持压缩：排队压缩（{ since }），压缩轮里收到的边界（{ preTokens, postTokens }），这个会话压缩失败过就改回换会话
-  let pendingCompact = null;
-  let compactSeen = null;
-  let compactFailed = false;
-  // 换会话时正在退出的旧 agent；驱动器退出时也要等它们（连同 MCP 服务端）结束
-  const exitingProcs = new Set();
 
   // ---------------- 日志 ----------------
 
   fs.mkdirSync(RUNTIME, { recursive: true });
   const { out, activity, info } = createLog({ logFile: F.log, activityFile: F.activity });
+  const log = { out, activity, info };
   const notifyGame = createNotifier({ args, agentProtocol, info, serverControl: () => serverControl });
   // 会话：对话 ID、上次请求、上下文大小、上次叫停（session-<名字>.json）
   const conversation = createSession({ file: F.session, provider: PROVIDER, configDir: CONFIG_DIR, model: args.model, bodyScope: BODY_SCOPE, resumeWindowMs,
     keepStop: agentProtocol.identity === 'independent' || args.body === 'server', info, onCompaction: () => heartbeat.beat() });
+  // Agent 进程（连同它的 MCP 服务端）
+  const agent = createAgentProcess({ args, agentProtocol, log, notifyGame, conversation, instructions: serverInstructions,
+    hostedConfigFile: () => hostedConfigFile, hostedServer: () => hostedServer, shuttingDown: () => shuttingDown, botLockFile: F.botLock,
+    onEvent: (event) => turns.handleAgentEvent(event), onExit: (proc) => turns.onAgentExit(proc) });
   // 整理记忆的安排：旧路径在玩的会话里排一轮，ServerBody 另起整理会话
   const consolidation = createConsolidation({ args, agentProtocol, memory: MEMORY, memoryAgentDir: MEMORY_AGENT_DIR, memoryWorldDir: MEMORY_WORLD_DIR,
     worldId: WORLD_ID, runtimeDir: RUNTIME, memoryOn, serverMemory, pause, info, out,
     hostedServer: () => hostedServer, shuttingDown: () => shuttingDown, contextWindow: () => conversation.contextWindow,
-    renewSession: (reason) => renewSession(reason), scheduleFlush: () => inbox.scheduleFlush(), endProc: (proc, graceMs) => endProc(proc, graceMs), sideTimeoutMs: LONG_TURN_WARN_MS });
+    renewSession: (reason) => turns.renewSession(reason), scheduleFlush: () => inbox.scheduleFlush(), endProc: (proc, graceMs) => agent.end(proc, graceMs), sideTimeoutMs: LONG_TURN_WARN_MS });
   // 收件箱：攒着要送进下一轮的事件、输入和提示，以及下一轮开头的说明
-  const inbox = createInbox({ args, agentProtocol, flush: () => flush() });
-  // 下面几个是还没拆出去的状态的只读视图，给事件处理用
+  const inbox = createInbox({ args, agentProtocol, flush: () => turns.flush() });
+  // 下面几个是还没拆出去的状态的只读视图，给事件处理和每一轮用
   const stopView = {
+    get control() { return serverControl; },
     get waiting() { return waitingNewServerTask; },
     get cancelling() { return cancellingActions; },
     armPlayerStop: (e) => armPlayerStop(e),
@@ -215,321 +201,21 @@ function main() {
       info('运行端已原地停下，Agent 和对话照常');
     },
     independentStop: (e) => independentStop(e),
-  };
-  const turnsView = {
-    get inTurn() { return busy; },
-    get turnStartedAt() { return turnStartedAt; },
-    get busyAckedTurn() { return busyAckedTurn; },
-    get currentTool() { return currentTool; },
-    markBusyAcked() { busyAckedTurn = turnStartedAt; },
+    stopServerAgent: (reason, event, owner) => stopServerAgent(reason, event, owner),
+    startQueuedServerTask: () => startQueuedServerTask(),
   };
   const lifecycleView = { get shuttingDown() { return shuttingDown; }, shutdown: (reason, code) => shutdown(reason, code) };
   // 游戏事件：读事件文件，每条交给 onEvent
-  const onEvent = createEventHandler({ args, agentProtocol, log: { out, activity, info }, notifyGame, stop: () => stopView, turns: () => turnsView,
+  const onEvent = createEventHandler({ args, agentProtocol, log, notifyGame, stop: () => stopView, turns: () => turns,
     inbox: () => inbox, consolidation: () => consolidation, lifecycle: () => lifecycleView, reconnectExit: RECONNECT_EXIT });
   const events = createEventReader({ eventsFile: F.events, cursorFile: F.cursor, consumedFile: F.consumed, onEvent });
+  const serverHandoff = createServerHandoff({ files: F, runtimeDir: RUNTIME, name: args.name, lastStopAt: () => conversation.lastStopAt, info });
+  // 每一轮的发送和结束、压缩、换会话、Agent 崩了重启
+  const turns = createTurns({ args, agentProtocol, log, notifyGame, provider: PROVIDER, startupPrompt: STARTUP_PROMPT, serverMemory,
+    agent, conversation, consolidation, inbox, events, pause, serverHandoff, taskReceiptFile: path.join(RUNTIME, `task-delivered-${args.name}.json`),
+    stop: () => stopView, lifecycle: () => lifecycleView });
 
-
-  // ---------------- agent 进程 ----------------
-
-  function agentCommand() {
-    // 测试不要求本机安装任何 Agent CLI；有状态连接的 Agent 整个换成假的协议服务端。
-    if (process.env.COMPANION_AGENT_CMD && agentProtocol.createConnection) {
-      const override = JSON.parse(process.env.COMPANION_AGENT_CMD);
-      return { cmd: override[0], a: override.slice(1) };
-    }
-    const { cmd, a } = agentProtocol.command({ root: ROOT, hostedConfigFile, body: args.body, gameInstructions,
-      model: args.model, effort: args.effort, conversationId: conversation.conversationId, rotateTokens: args.rotateTokens, contextWindow: conversation.contextWindow });
-    if (process.env.COMPANION_AGENT_CMD) {
-      const override = JSON.parse(process.env.COMPANION_AGENT_CMD);
-      return { cmd: override[0], a: [...override.slice(1), ...a] };
-    }
-    return { cmd, a };
-  }
-
-  function startAgent() {
-    gameInstructions = serverInstructions();
-    const { cmd, a } = agentCommand();
-    info(`启动 ${cmd}${args.effort ? `（思考 ${args.effort}）` : ''}${args.configDir ? `（账号配置 ${args.configDir}）` : ''} ${conversation.conversationId ? `（接着会话 ${conversation.conversationId}）` : ''}`);
-    // 指定了配置目录就用那个目录里登录的账号（各 Agent 自己的环境变量），不影响别的会话
-    let env = args.configDir ? { ...process.env, [agentProtocol.configEnv]: args.configDir } : process.env;
-    env = agentProtocol.environment(env, { body: args.body, root: ROOT });
-    const proc = spawn(cmd, a, { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-    child = proc;
-    busy = false;
-    textBuffer = '';
-    proc.stdin.on('error', (e) => info(`写入 agent 失败：${e.message}`));
-
-    const outLines = readline.createInterface({ input: proc.stdout });
-    outLines.on('line', (line) => { if (child === proc && !proc.intentional) handleAgentLine(line, proc); });
-    const err = readline.createInterface({ input: proc.stderr });
-    err.on('line', (l) => {
-      if (/TLS handshake error/.test(l)) return;
-      out(`\x1b[33m[stderr] ${l}\x1b[0m`);
-    });
-
-    let gone = false;
-    const onGone = (why) => {
-      if (gone) return;
-      gone = true;
-      proc.connection?.dispose();
-      info(`agent 进程退出（${why}）`);
-      exitingProcs.delete(proc);
-      // 换新会话时主动结束的旧进程，不算崩溃
-      if (proc.intentional || shuttingDown) return;
-      if (args.body === 'server') {
-        void stopServerAgent('Agent 退出，等待新的明确任务');
-        return;
-      }
-      if (child === proc) {
-        child = null;
-        busy = false;
-      }
-      consolidation.agentExited(turnKind === 'consolidate');
-      turnKind = 'normal';
-      restartCount += 1;
-      if (restartCount > args.maxRestarts) {
-        info(`agent 连续 ${restartCount - 1} 次没能正常跑完一轮，不再重启`);
-        notifyGame('gave_up', `连续出错 ${restartCount - 1} 次，托管先停了。可以在 WebUI 里重新启动托管，日志在 runtime/companion-${args.name}.log`, { force: true });
-        setTimeout(() => shutdown('agent 反复崩溃'), 2000);
-        return;
-      }
-      // 接着旧会话连续失败几次，可能是会话本身坏了，换新会话
-      if (restartCount >= 3 && conversation.conversationId) {
-        info(`接着会话 ${conversation.conversationId} 重启连续失败，改为开新会话`);
-        conversation.dropConversation();
-      }
-      notifyGame('restart', '出了点问题，正在重启');
-      const delay = Math.min(60, 3 * restartCount) * 1000;
-      info(`${delay / 1000} 秒后重启（第 ${restartCount} 次）`);
-      restarting = true;
-      setTimeout(() => {
-        restarting = false;
-        if (shuttingDown) return;
-        startAgent();
-        if (!conversation.conversationId) sendTurn(STARTUP_PROMPT, 'startup');
-        else {
-          inbox.resume('agent 进程出错退出后刚重启');
-          flush();
-        }
-      }, delay);
-    };
-    proc.on('error', (e) => onGone(`启动失败：${e.message}`));
-    proc.on('exit', (code, signal) => onGone(`code ${code}${signal ? `，${signal}` : ''}`));
-    if (agentProtocol.createConnection) {
-      proc.connection = agentProtocol.createConnection({
-        root: ROOT, conversationId: conversation.conversationId, model: args.model, effort: args.effort, mcpServer: hostedServer, body: args.body, gameInstructions, compactPrompt: COMPACT_PROMPT,
-        write: (msg) => { if (!proc.stdin.destroyed) proc.stdin.write(JSON.stringify(msg) + '\n'); },
-        emit: (event) => { if (child === proc && !proc.intentional && !shuttingDown) handleAgentEvent(event); },
-        fail: (e) => {
-          if (child !== proc || proc.intentional || shuttingDown) return;
-          info(`Agent 连接失败：${e.message}`);
-          killAgentTree(proc);
-        },
-      });
-      proc.connection.start();
-    }
-  }
-
-  function sendTurn(text, kind = 'normal') {
-    if (!child) return;
-    turnKind = kind;
-    busy = true;
-    turnStartedAt = Date.now();
-    currentTool = '';
-    turnUsedTool = false;
-    if (kind !== 'normal') inbox.dropTurnInput();
-    activity('turn_start', { turnKind: kind });
-    conversation.inputSent(turnStartedAt);
-    lastActivity = Date.now();
-    idleNudged = false;
-    if (kind === 'compact') { currentTool = '整理对话'; compactSeen = null; }
-    if (child.connection) { if (kind === 'compact') child.connection.compact(); else child.connection.sendTurn(text); }
-    else child.stdin.write(JSON.stringify(kind === 'compact' ? agentProtocol.compactTurn(text) : agentProtocol.encodeTurn(text)) + '\n');
-  }
-
-  function turnFinished(summary, error) {
-    const secs = ((Date.now() - turnStartedAt) / 1000).toFixed(0);
-    info(`本轮结束（${secs} 秒）${summary ? `：${summary}` : ''}`, 'turn', { secs: Number(secs), ...(error ? { error: String(error) } : {}) });
-    busy = false;
-    lastActivity = Date.now();
-    const errorKind = error ? classifyError(error) : '';
-    if (error) {
-      out(`\x1b[31m本轮出错：${error}\x1b[0m`);
-      if (errorKind === 'quota') {
-        const resetAt = quotaResetAt(error, Date.now());
-        const clock = resetAt ? new Date(resetAt).toTimeString().slice(0, 5) : '';
-        notifyGame('quota', clock ? `额度用完了，${clock} 恢复，到时候接着回` : '额度好像用完了，暂时回不了话，过一会儿再试');
-        pause.pauseUntil(resetAt || Date.now() + QUOTA_PAUSE_MS);
-      } else if (errorKind === 'auth') {
-        notifyGame('auth', `登录好像失效了，要在电脑上检查 ${PROVIDER} 的登录`);
-        pause.pauseUntil(Date.now() + QUOTA_PAUSE_MS);
-      } else {
-        notifyGame('turn_error', '刚才这一轮出错了，没处理完');
-      }
-    } else {
-      restartCount = 0;
-    }
-    // 额度、登录问题：这一轮还没动过工具就等于没处理，暂停结束后把玩家的话原样再送一次
-    inbox.finishTurn({ requeue: (errorKind === 'quota' || errorKind === 'auth') && turnKind === 'normal' && !turnUsedTool });
-    const kind = turnKind;
-    turnKind = 'normal';
-    const consolidated = kind === 'consolidate' ? consolidation.finishTurn({ error, errorKind }) : false;
-    // 压缩被拒（旧版本没有这个方法、没收到压缩完成）：对话本身没坏，这一轮就按超过上限去换会话，不等下一轮
-    let compactRefused = false;
-    if (kind === 'compact') {
-      const seen = compactSeen;
-      compactSeen = null;
-      if (seen && !error) {
-        const before = conversation.compacted(seen);
-        info(`压缩完成：上下文 ${Math.round(before / 1000)}k → ${seen.postTokens ? `${Math.round(conversation.contextTokens / 1000)}k` : '（下一轮报）'}，进程和身体控制都没断`);
-        conversation.save();
-      } else if (errorKind === 'quota' || errorKind === 'auth') {
-        // 额度、登录问题：暂停结束后再压缩
-        pendingCompact = { since: Date.now() };
-      } else {
-        compactFailed = true; compactRefused = true;
-        info(`压缩没成功（${error || '没有收到压缩完成'}），这个会话改为换新会话`);
-      }
-    }
-    // 每一轮成功结束后都看上下文有没有超过上限（整理轮自己跨过上限也算）
-    // dsh 自己在这个上限压缩（生成的补丁里设好了），宿主不压也不换会话
-    if ((!error || compactRefused) && agentProtocol.tracksContextTokens && !agentProtocol.compactsItself && args.rotateTokens > 0 && conversation.contextTokens > args.rotateTokens && !consolidation.rotateDue && !pendingCompact) {
-      if (canCompact()) {
-        info(`会话上下文 ${conversation.contextTokens} tokens，超过 ${args.rotateTokens}：压缩对话（进程和身体控制不断，正在做的事接着做）`);
-        pendingCompact = { since: Date.now() };
-      } else {
-        info(`会话上下文 ${conversation.contextTokens} tokens，超过 ${args.rotateTokens}：整理记忆后换新会话`);
-        consolidation.markRotateDue();
-      }
-    }
-    if (consolidation.rotateDue && consolidation.idle) {
-      if (kind === 'consolidate' && consolidated) {
-        consolidation.clearRotateDue();
-        renewSession(`上一个会话上下文超过 ${args.rotateTokens} tokens，已整理记忆`);
-        return;
-      }
-      if (!error || compactRefused) consolidation.request('rotate');
-    }
-    flush();
-  }
-
-  // 压缩只用在服务端身体（还没接长期记忆，换会话会丢掉一切、还要撤控制）；旧身体照旧整理记忆后换会话
-  function canCompact() {
-    const compacts = agentProtocol.createConnection ? agentProtocol.compacts === true : typeof agentProtocol.compactTurn === 'function';
-    return args.body === 'server' && compacts && !compactFailed;
-  }
-
-  // 等旧的 MCP 服务端放开 Bot 锁（它收到 stdin 结束后最多 5 秒退出），免得新的一启动就停放成 locked
-  async function waitBotLockFree() {
-    const deadline = Date.now() + BOT_LOCK_WAIT_MS;
-    while (Date.now() < deadline && !shuttingDown) {
-      const lock = readJson(F.botLock);
-      if (!lock || !pidAlive(Number(lock.pid))) return;
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    if (shuttingDown) return;
-    const lock = readJson(F.botLock);
-    info(`Bot 锁还被 pid ${lock?.pid} 占着（可能开着交互式会话），照样启动新会话；${args.nickname}会停放成 locked，调用动作工具时再进服`);
-    notifyGame('lock_busy', `换会话时${args.nickname}被另一个会话占着，先不进服；关掉那个会话后我再回来`);
-  }
-
-  // 结束一个 agent 进程（连同它的 MCP 服务端）：先关 stdin 让它自己收尾，graceMs 后还没退就结束进程树
-  function endProc(proc, graceMs = 5000) {
-    return new Promise((resolve) => {
-      if (proc.exitCode !== null || proc.signalCode !== null) {
-        resolve();
-        return;
-      }
-      exitingProcs.add(proc);
-      let timer = null;
-      proc.once('exit', () => {
-        clearTimeout(timer);
-        exitingProcs.delete(proc);
-        resolve();
-      });
-      // app-server 先取消正在运行的轮次；终止进程仍是超时兜底。
-      if (proc.connection) {
-        Promise.race([proc.connection.interrupt().catch((e) => info(`取消 Agent：${e.message}`)),
-          new Promise((r) => setTimeout(r, 1000))]).finally(() => { try { proc.stdin.end(); } catch { /* 忽略 */ } });
-      } else { try { proc.stdin.end(); } catch { /* 忽略 */ } }
-      timer = setTimeout(() => {
-        if (proc.exitCode === null && proc.signalCode === null) {
-          info('agent 没有自己退出，结束进程树');
-          killAgentTree(proc);
-        }
-        // 结束进程树之后等一下；实在收不到 exit 也不卡住
-        setTimeout(() => {
-          exitingProcs.delete(proc);
-          resolve();
-        }, 1500);
-      }, graceMs);
-    });
-  }
-
-  // 换新会话：结束旧 agent（连同它的 MCP 服务端），等锁放开后启动新的；下一轮开头带上「新会话」说明
-  function renewSession(reason) {
-    if (restarting || shuttingDown) return;
-    info(`换新会话：${reason}`);
-    const old = child;
-    child = null;
-    busy = false;
-    conversation.reset();
-    pendingCompact = null;
-    compactFailed = false;
-    conversation.save();
-    inbox.newSession(reason);
-    restarting = true;
-    if (old) old.intentional = true;
-    (async () => {
-      if (serverControl) await serverControl.revoke().catch((e) => info(`撤销旧控制：${e.code || '失败'}`));
-      if (old) await endProc(old);
-      // ServerBody：旧会话收尾（被打断的任务的结果也记下了）后拼交接单，随新会话的第一轮送；记忆另起会话整理
-      if (args.body === 'server') {
-        const handoff = serverHandoff();
-        inbox.handoff(handoff);
-        if (handoff) info('交接单已备好，随新会话的第一轮送出', 'handoff', { text: handoff });
-        consolidation.startSide('renew');
-      }
-      await waitBotLockFree();
-      restarting = false;
-      if (shuttingDown) return;
-      if (args.body === 'server' && waitingNewServerTask) { startQueuedServerTask(); return; }
-      startAgent();
-      flush();
-    })().catch((e) => {
-      restarting = false;
-      info(`换会话出错：${e.message}`);
-    });
-  }
-
-  function serverHandoff() {
-    try {
-      return buildHandoff({ activityFile: F.activity, operationsFile: path.join(RUNTIME, `operations-${args.name}.jsonl`), postureFile: F.posture, lastStopAt: conversation.lastStopAt });
-    } catch (e) { info(`交接单没拼成：${e.message}`); return ''; }
-  }
-
-  let textBuffer = '';
-  function printText(delta, done) {
-    textBuffer += delta ?? '';
-    if (done || textBuffer.includes('\n')) {
-      const parts = textBuffer.split('\n');
-      textBuffer = done ? '' : parts.pop();
-      for (const p of parts) if (p.trim()) { out(`\x1b[36m${args.nickname}>\x1b[0m ${p}`); activity('reply', { text: p }); }
-    }
-  }
-
-  function handleAgentLine(line, proc) {
-    let msg;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      if (line.trim()) out(line);
-      return;
-    }
-    if (proc.connection) proc.connection.handleMessage(msg);
-    else for (const event of agentProtocol.decodeMessage(msg)) handleAgentEvent(event);
-  }
+  // ---------------- 叫停 ----------------
 
   // 玩家在游戏里叫停（游戏聊天经事件文件或独立聊天通道，谁先到算谁）：运行端自己会停（src/player-stop.ts），
   // 这里只等它的 player_stop 确认；STOP_CONFIRM_MS 内没等到，就当运行端停不下来，撤销控制、结束这一轮 Agent
@@ -552,10 +238,7 @@ function main() {
     waitingNewServerTask = true;
     serverControl?.capture();
     const bodyArtifacts = captureBodyArtifacts(RUNTIME, args.name, serverControl?.capture());
-    const old = child;
-    if (old) old.intentional = true;
-    child = null;
-    busy = false;
+    const old = turns.detachAgent();
     inbox.clear();
     consolidation.clear();
     inbox.cancelBatch();
@@ -573,7 +256,7 @@ function main() {
     } catch (error) {
       info(`撤销未确认：${error.code || 'CONTROL_ERROR'}；结束旧 Agent，租约到期兜底`);
     } finally {
-      if (old) await endProc(old);
+      if (old) await agent.end(old);
       cleanupBodyArtifacts(bodyArtifacts);
       cancellingActions = false;
       startQueuedServerTask();
@@ -582,7 +265,7 @@ function main() {
 
   function newServerTask(event) {
     if (shuttingDown) return false;
-    if (!waitingNewServerTask && child) {
+    if (!waitingNewServerTask && agent.child) {
       inbox.addNote(newTaskNote(event.text));
       inbox.scheduleFlush();
       return true;
@@ -594,41 +277,14 @@ function main() {
   }
 
   function startQueuedServerTask() {
-    if (!waitingNewServerTask || child || cancellingActions || restarting || shuttingDown || !queuedServerTasks.length) return;
+    if (!waitingNewServerTask || agent.child || cancellingActions || turns.restarting || shuttingDown || !queuedServerTasks.length) return;
     const tasks = queuedServerTasks;
     queuedServerTasks = [];
     waitingNewServerTask = false;
     inbox.forgetSessionNotes();
-    startAgent();
+    turns.startAgent();
     const prompt = startupPrompt(args, memoryOn, 'new-task');
-    sendTurn(newTaskTurn(prompt, tasks.map(event => event.text)), 'normal');
-  }
-
-  function handleAgentEvent(event) {
-    switch (event.type) {
-        case 'session': conversation.setConversation(event.id); break;
-        case 'request_started': conversation.requestStarted(); break;
-        case 'request_completed': conversation.requestCompleted(); break;
-        case 'usage': conversation.usage(event, { compactsItself: agentProtocol.compactsItself }); break;
-        case 'compacted': compactSeen = event; conversation.noteCompaction(); break;
-        case 'text': printText(event.text, event.done); break;
-        case 'tool': currentTool = event.name || ''; turnUsedTool = true; info(`· ${event.name} ${JSON.stringify(event.input).slice(0, 120)}`, 'tool', { name: event.name, input: JSON.stringify(event.input ?? null).slice(0, 400) }); break;
-        case 'completed': {
-          conversation.save();
-          if (event.cancelled) {
-            busy = false;
-            lastActivity = Date.now();
-            info('旧模型回合已中断');
-            break;
-          }
-          const cost = typeof event.costUsd === 'number' ? `$${event.costUsd.toFixed(3)}` : '';
-          const size = agentProtocol.tracksContextTokens
-            ? (conversation.contextTokens ? `，上下文 ${Math.round(conversation.contextTokens / 1000)}k` : '')
-            : `tokens ${event.totalTokens ?? '?'}`;
-          turnFinished(cost + size, event.error);
-          break;
-        }
-    }
+    turns.sendTurn(newTaskTurn(prompt, tasks.map(event => event.text)), 'normal');
   }
 
   // 独立试玩身份在旧身体上叫停：原地停下并中断推理（需要连接支持 stopActions），不换会话。
@@ -638,23 +294,22 @@ function main() {
     conversation.save();
     // 这些旧消息已经被宿主处理，不能让后续 wait-for-events 再派发旧任务。下轮的停止记录仍会说明旧任务已取消
     events.markDelivered(e.session, e.seq);
-    const proc = child;
-    if (proc?.connection?.stopActions && !restarting) {
+    const proc = agent.child;
+    if (proc?.connection?.stopActions && !turns.restarting) {
       if (!cancellingActions) {
         cancellingActions = true;
         info('玩家叫停：立即停止身体并中断推理，保持游戏连接');
         proc.connection.stopActions().then(() => {
-          if (child !== proc || shuttingDown) return;
-          busy = false;
-          lastActivity = Date.now();
+          if (agent.child !== proc || shuttingDown) return;
+          turns.markIdle();
           info('原地停止已确认，游戏连接保持');
         }).catch((error) => {
-          if (child !== proc || shuttingDown) return;
+          if (agent.child !== proc || shuttingDown) return;
           info(`无法确认原地停止：${error.message}；结束托管避免旧动作继续`);
           shutdown('停止确认失败');
         }).finally(() => {
           cancellingActions = false;
-          if (child === proc && !shuttingDown) flush();
+          if (agent.child === proc && !shuttingDown) turns.flush();
         });
       }
     } else {
@@ -662,56 +317,6 @@ function main() {
       conversation.reset();
       inbox.newSession('玩家要求停止，已撤销旧会话');
       conversation.save();
-    }
-  }
-
-  function flush() {
-    if (busy || restarting || shuttingDown || cancellingActions || inbox.batching) return;
-    if (pause.active()) return;
-    const hasWork = inbox.prepare({ session: events.session, consumed: events.consumedSeq(), receipt: readJson(path.join(RUNTIME, `task-delivered-${args.name}.json`)) });
-    if (!hasWork && !consolidation.pending && !pendingCompact) return;
-    // 缓存已经过期：接着旧会话要把整段历史重写一遍，不如换新会话
-    if (child && conversation.cold()) {
-      renewSession(`离上次请求超过 ${args.resumeWindowMinutes} 分钟，提示缓存已经过期`);
-      return;
-    }
-    if (!child) return;
-    // 压缩一般等没有要回应的事再做；一直有人说话就最多等 CONSOLIDATE_MAX_DEFER_MS，事件留到下一轮
-    if (pendingCompact && (!hasWork || Date.now() - pendingCompact.since > CONSOLIDATE_MAX_DEFER_MS)) {
-      pendingCompact = null;
-      sendTurn(COMPACT_KEEP, 'compact');
-      return;
-    }
-    const header = inbox.takeHeader();
-    // 整理一般等没有要回应的事再做；但排队太久（一直有人说话）就先整理，事件留到下一轮
-    const consolidateNow = consolidation.takeDue(hasWork);
-    if (consolidateNow) {
-      sendTurn([header, consolidationPrompt(consolidateNow.reason, args.rotateTokens)].filter(Boolean).join('\n\n'), 'consolidate');
-      return;
-    }
-    sendTurn(inbox.takeTurn(header, { lastStopAt: conversation.lastStopAt, session: events.session, markDelivered: events.markDelivered }));
-  }
-
-  function idleCheck() {
-    if (cancellingActions) return;
-    // 空闲到缓存过期：先换好新会话（不发消息，不花额度），下一次有事时直接用
-    if (!busy && !restarting && child && conversation.cold()) {
-      renewSession(`空闲超过 ${args.resumeWindowMinutes} 分钟，提示缓存已经过期`);
-      return;
-    }
-    if (busy) {
-      if (Date.now() - turnStartedAt > LONG_TURN_WARN_MS && Date.now() - lastActivity > LONG_TURN_WARN_MS) {
-        info(args.headless
-          ? '这一轮已经跑了很久，如果卡死可以运行 stop-companion.ps1 再 start-play.ps1'
-          : '这一轮已经跑了很久，如果卡死可以按 Ctrl+C 重启驱动器');
-        lastActivity = Date.now();
-      }
-      return;
-    }
-    if (args.idleMinutes > 0 && !idleNudged && Date.now() - lastActivity > args.idleMinutes * 60000) {
-      idleNudged = true;
-      inbox.addNote(idleNudge(args.idleMinutes));
-      flush();
     }
   }
 
@@ -742,22 +347,12 @@ function main() {
     try { releaseLock(F.lock); } catch { /* 忽略 */ }
   }
 
-  // 结束 agent：先关 stdin 让它自己收尾，5 秒还没退就连进程树（包括 MCP 服务端）一起结束
-  function killAgentTree(proc) {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    } else {
-      proc.kill();
-    }
-  }
-
   function shutdown(reason = '', exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
     info(`正在退出…${reason ? `（${reason}）` : ''}`);
     // 当前的 agent 和换会话时还没退完的旧 agent 都要结束（连同各自的 MCP 服务端），之后才删心跳和锁
-    const procs = new Set([...exitingProcs]);
-    if (child) procs.add(child);
+    const procs = agent.allProcs();
     const sideProc = consolidation.abandonSide();
     if (sideProc) procs.add(sideProc);
     serverControl?.capture();
@@ -771,7 +366,7 @@ function main() {
           .then((r) => { if (r?.left) info('角色已下线'); })
           .catch((e) => info(`退出撤销：${e.code || '失败'}`));
       }
-      await Promise.all([...procs].map((p) => endProc(p)));
+      await Promise.all([...procs].map((p) => agent.end(p)));
       // 托管真的停了（不是等重连）：跟随和保护随之结束，下次启动不再提示接上
       if (exitCode !== RECONNECT_EXIT) { try { fs.rmSync(F.posture, { force: true }); } catch { /* 忽略 */ } }
       cleanupBodyArtifacts(bodyArtifacts);
@@ -821,7 +416,7 @@ function main() {
   });
 
   const heartbeat = createHeartbeat({ file: F.heartbeat, agent: args.agent,
-    status: () => ({ name: args.name, nickname: args.nickname, body: args.body, busy, compactions: conversation.compactions }),
+    status: () => ({ name: args.name, nickname: args.nickname, body: args.body, busy: turns.inTurn, compactions: conversation.compactions }),
     onError: (e) => info(`写心跳失败：${e.message}`) });
   heartbeat.start();
 
@@ -839,8 +434,8 @@ function main() {
         return;
       }
       inbox.addUserLine(l.trim());
-      if (busy) info('agent 正忙，这条消息会在本轮结束后发送');
-      flush();
+      if (turns.inTurn) info('agent 正忙，这条消息会在本轮结束后发送');
+      turns.flush();
   });
     stdinLines.on('close', () => shutdown('输入已关闭'));
   }
@@ -859,23 +454,6 @@ function main() {
     serverControl.start();
   }
 
-  // 上次的会话缓存还没过期（同一个账号）就接着，不然开新会话并跑启动轮
-  function startSession() {
-    if (conversation.restore()) {
-      info(`接着上次的会话 ${conversation.conversationId}（${Math.round((Date.now() - conversation.lastRequestAt) / 60000)} 分钟前，上下文 ${Math.round(conversation.contextTokens / 1000)}k）`);
-      inbox.resume(args.reconnect ? '刚重新连上游戏（游戏关过、退出过世界或者你死过一次），先看看现在的状态' : '托管刚重启过（一般是开发那边更新了程序）');
-      startAgent();
-    } else {
-      // ServerBody 开新会话（上次的接不上了）：上次留下的记录拼成交接单跟启动轮一起送；上次没整理的日志另起会话整理
-      const handoff = args.body === 'server' ? serverHandoff() : '';
-      if (handoff) info('交接单已备好，随启动轮送出', 'handoff', { text: handoff });
-      startAgent();
-      sendTurn(handoff ? `${STARTUP_PROMPT}\n\n${handoff}` : STARTUP_PROMPT, 'startup');
-      if (serverMemory) consolidation.startSide('startup');
-    }
-    // 重连（死了、游戏关过）后不等玩家先开口：死因作为驱动器提示，马上给 Agent 一轮。断开前的跟随／等待／保护和死亡掉落由运行端自己读记录、自己恢复，不经过这里
-    if (inbox.respawnIntoNotes()) flush();
-  }
   // 死掉的角色接管不了（claim 会拒绝 DEAD_BODY），先走原生重生再启动 agent
   if (args.body === 'server') {
     void respawnIfDead(BODY_SCOPE).then(async (outcome) => {
@@ -885,9 +463,9 @@ function main() {
         info(`角色之前死了，已经原生重生（有床就在床边，没有就在世界出生点）${death?.message ? `：${death.message}` : ''}`);
         inbox.respawn(deathNote(death));
       } else if (outcome !== 'alive') info(`启动时没能检查角色是不是死了：${outcome}`);
-      if (!shuttingDown) startSession();
+      if (!shuttingDown) turns.startSession();
     });
-  } else startSession();
+  } else turns.startSession();
   // 跳过驱动器启动前留下的旧事件；新的 MCP 服务端启动时会清空文件，届时从头读取
   events.skipExisting();
   setInterval(() => {
@@ -905,9 +483,7 @@ function main() {
       }
     }
   }, 400);
-  setInterval(idleCheck, 15000);
-  // 暂停（额度问题）结束后，把攒下的事件发出去
-  setInterval(() => { if (pause.expire()) flush(); }, 5000);
+  turns.startTimers();
   // 整理会话碰上额度或登录问题：到了时候再试（ServerBody）
   setInterval(() => consolidation.retryTick(), 1000);
   if (args.serverWaitMinutes > 0 && args.serverCheckSeconds > 0) {

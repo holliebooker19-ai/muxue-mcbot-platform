@@ -51,3 +51,12 @@ export function buildHandoff({ activityFile, operationsFile, postureFile, lastSt
   if (!lines.length) return '';
   return `【交接单】（程序记下的确认过的事实，现在 ${handoffTime(now, now)}）\n${lines.join('\n')}\n玩家已经说过的（要什么、要多少、怎么称呼）不用再问；做完的不要重做；没做完、也没被叫停的，先查现状再接着做剩下的；标了「已取消」的不要恢复。`;
 }
+
+/** ServerBody 换会话、开新会话时拼交接单：驱动器的活动记录、运行端的操作结果（operations-<名字>.jsonl）和姿态记录。拼不成就记一句、返回空串。 */
+export function createServerHandoff({ files, runtimeDir, name, lastStopAt, info }) {
+  return () => {
+    try {
+      return buildHandoff({ activityFile: files.activity, operationsFile: path.join(runtimeDir, `operations-${name}.jsonl`), postureFile: files.posture, lastStopAt: lastStopAt() });
+    } catch (e) { info(`交接单没拼成：${e.message}`); return ''; }
+  };
+}
