@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
 import { applyPluginPolicy, pluginRefusal, type PluginPolicy } from './plugins.js';
-import { BodyError, COMPANION_MINING_RANGE, COMPANION_PICKUP_RANGE, EMOTE_SECONDS, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type PostureRequest, type PostureState, type StopOptions, type InterruptReason, type InterruptWindow, TRAVEL_TIMEOUT_MS, PICKUP_TIMEOUT_MS } from './body.js';
+import { BodyError, COMPANION_MINING_RANGE, COMPANION_PICKUP_RANGE, EMOTE_SECONDS, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type HomeSpot, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type PostureRequest, type PostureState, type StopOptions, type InterruptReason, type InterruptWindow, TRAVEL_TIMEOUT_MS, PICKUP_TIMEOUT_MS } from './body.js';
 import { serverDetail } from './claim-failure.js';
 
 const identifier = z.string().min(1);
@@ -13,6 +13,7 @@ const operationBudget = z.object({ used: generation, remaining: generation, limi
 const components = z.record(z.unknown());
 const maxStackSize = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional();
 const position = z.object({ x: z.number().finite(), y: z.number().finite(), z: z.number().finite() });
+const homeSpot = z.object({ dimension: z.string().min(1), x: z.number().finite(), y: z.number().finite(), z: z.number().finite() }).strict();
 const observedStackShape = { slot: z.number().int().nonnegative(), id: z.string(), count: z.number().int().nonnegative(), components: components.optional(), componentsComplete: z.boolean().optional(), componentError: z.string().optional(), maxStackSize, source: z.enum(['container', 'player', 'unknown']).optional(), playerSlot: z.number().int().nonnegative().optional(), active: z.boolean().optional(), mayPickup: z.boolean().optional() };
 const validComponents = (value: { componentsComplete?: boolean; components?: unknown }) => value.componentsComplete === false ? value.components === undefined : value.components !== undefined;
 const stack = z.object(observedStackShape).refine(validComponents, 'Incomplete components require an explicit unavailable marker, never an invented empty object');
@@ -134,6 +135,7 @@ const recoverable = new Set(['BUSY', 'NOT_PAUSABLE','INVALID_ARGUMENT', 'OUT_OF_
 export class ServerBody implements Body {
   hello!: BodyHello;
   private lease?: ServerLease;
+  private home?: () => HomeSpot | undefined;
   private state: 'new' | 'active' | 'lost' | 'closed' = 'new';
   private controlGeneration = 0;
   private revision = 0;
@@ -465,15 +467,18 @@ export class ServerBody implements Body {
       return value;
     } catch (error) { throw this.invalidate(error); }
   }
+  /** The remembered home, sent with resource scans and building checks so the server leaves the blocks around it alone. */
+  useHome(home: () => HomeSpot | undefined): void { this.home = home; }
   async nearbyResources(options: ResourceScanOptions): Promise<NearbyResources> {
     this.assertActive();
     if (!this.hello.capabilities.includes('nearby-resources')) throw new BodyError('UNSUPPORTED', '身体不支持有限资源观察');
     if (options.companionMiningGuard && !this.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '游戏端未声明持续陪挖的玩家保护能力');
-    const parsed = z.object({ blockIds: z.array(z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/)).min(1).max(8), radius: z.number().int().min(1).max(16), maxResults: z.number().int().min(1).max(64), center: position.optional(), wholeTree: z.boolean().optional(), trees: z.number().int().min(1).max(8).optional(),
+    const parsed = z.object({ blockIds: z.array(z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/)).min(1).max(8), radius: z.number().int().min(1).max(16), maxResults: z.number().int().min(1).max(64), center: position.optional(), wholeTree: z.boolean().optional(), trees: z.number().int().min(1).max(8).optional(), includeBuildings: z.boolean().optional(), home: homeSpot.optional(),
       companionMiningGuard: z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), maxDistance: z.number().int().min(COMPANION_MINING_RANGE.min).max(COMPANION_MINING_RANGE.max) }).strict().optional(),
     }).strict().refine(value => !value.companionMiningGuard || value.center === undefined && value.radius <= value.companionMiningGuard.maxDistance).safeParse(options);
     if (!parsed.success) throw new BodyError('INVALID_ARGUMENT', '资源扫描范围或陪挖玩家守卫无效；陪挖中心必须由服务端确定');
-    const args = parsed.data;
+    const home = parsed.data.home ?? this.home?.();
+    const args = home ? { ...parsed.data, home } : parsed.data;
     const revision = this.revision;
     try {
       const value = z.object({ instanceId: identifier, sessionId: identifier, worldId: identifier, dimension: identifier, controlGeneration: generation, center: position,
@@ -504,6 +509,8 @@ export class ServerBody implements Body {
     if (this.stopping) throw new BodyError('BUSY', '正在停止，请等待确认后发送明确新动作');
     if (name === 'send-chat' && args && 'message' in args && (args.message.startsWith('/') || /[\r\n]/.test(args.message))) throw new BodyError('INVALID_ARGUMENT', 'send-chat 只允许普通单行聊天');
     this.validateSurvivalArguments(name, args);
+    // A building check needs to know where home is; the server decides, this side only says where.
+    if (name === 'dig-block' && (args as ActionArguments['dig-block']).buildingCheck && (args as ActionArguments['dig-block']).home === undefined) { const home = this.home?.(); if (home) args = { ...args, home } as typeof args; }
     // A window's steps run beside the paused operation, which keeps its place as the one exclusive action.
     const exclusive = name !== 'send-chat' && !interrupting;
     if (exclusive && this.exclusive) throw new BodyError('BUSY', '已有身体动作运行；先查询或停止');
@@ -549,7 +556,7 @@ export class ServerBody implements Body {
         .refine(args => !args.companionGuard || args.resourceTargetToken !== undefined || args.companionGuard.maxDistance <= COMPANION_PICKUP_RANGE.max),
       'approach-container': z.object({ targetToken: z.string().uuid(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
       'approach-player': z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid().optional(), distance: z.number().finite().min(1).max(1.5).optional(), timeoutMs: z.number().int().min(500).max(120000).optional(), track: z.boolean().optional() }),
-      'dig-block': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }), 'open-container': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }),
+      'dig-block': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional(), buildingCheck: z.boolean().optional(), home: homeSpot.optional() }), 'open-container': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }),
       'place-block': z.object({ ...guardedBlock, ...guardedStack, face: z.enum(['up', 'down', 'north', 'south', 'east', 'west']) }),
       'click-slot': z.object({ containerId: identifier, expectedRevision: generation, slot: z.number().int().nonnegative(), expectedItem: identifier, expectedCount: z.number().int().nonnegative(), expectedComponents: components,
         expectedCarriedItem: identifier, expectedCarriedCount: z.number().int().nonnegative(), expectedCarriedComponents: components, button: z.union([z.literal(0), z.literal(1)]).optional() }),

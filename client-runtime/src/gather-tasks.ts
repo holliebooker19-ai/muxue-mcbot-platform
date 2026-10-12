@@ -58,7 +58,16 @@ const noWay = new Set(['NO_PATH', 'PATH_BUDGET']);
 /** ServerController.requireWalkable: a walk asked while the body is still in the air (just arrived, stepping down). */
 const AIRBORNE = /Start navigation from supported ground/;
 /** What felled trees leave besides logs, picked up once the logs are in (modded saplings are named the same way). */
-const treeByproduct = (id: string) => id === 'minecraft:apple' || /^[a-z0-9_.-]+:[a-z0-9_/]*sapling$/.test(id);
+/**
+ * Blocks the server left out of a scan because they may belong to a building (village, near a bed/door/chest, near home):
+ * how many and what to do. Nothing when none were, or when the player allowed them (includeBuildings).
+ */
+function maybeBuildingNote(scan: { budget?: unknown }, included?: boolean): { maybeBuilding?: number; maybeBuildingNote?: string } {
+  const count = (scan.budget as { maybeBuilding?: unknown } | undefined)?.maybeBuilding;
+  if (included || typeof count !== 'number' || count <= 0) return {};
+  return { maybeBuilding: count, maybeBuildingNote: `有 ${count} 个方块可能是建筑（村庄、有人住的床／门／箱子旁、你们的家附近），没有列出。玩家明确说这些可以拆时，才带 includeBuildings:true 重新 discover-resources；玩家没说就别拆，先问玩家，或换个地方。` };
+}
+const treeByproduct =(id: string) => id === 'minecraft:apple' || /^[a-z0-9_.-]+:[a-z0-9_/]*sapling$/.test(id);
 const samePosition = (a: Position, b: Position) => a.x === b.x && a.y === b.y && a.z === b.z;
 const nearest = (list: Candidate[], feet: Position) => [...list].sort((a, b) => eyeDistance(feet, a.position) - eyeDistance(feet, b.position))[0];
 /** Log candidates touching one another (also diagonally: branches, 2x2 trunks) are one tree. */
@@ -100,7 +109,7 @@ export class GatherTasks {
   cancel(): StopHandle { return this.stop = this.scheduler.cancel(); }
   /** Only release the shared write token after the independent body stop was confirmed. */
   stopped(handle = this.stop): void { if (handle) this.scheduler.stopped(handle); if (handle === this.stop) this.stop = undefined; }
-  async discover(options: { blockIds: string[]; radius: number; maxResults: number; center?: Position; wholeTree?: boolean; trees?: number }): Promise<unknown> {
+  async discover(options: { blockIds: string[]; radius: number; maxResults: number; center?: Position; wholeTree?: boolean; trees?: number; includeBuildings?: boolean }): Promise<unknown> {
     if (!this.body.nearbyResources) throw new BodyError('UNSUPPORTED', '身体不支持有限资源观察');
     const epoch = this.scheduler.epoch;
     const scan = await this.body.nearbyResources(options);
@@ -113,13 +122,13 @@ export class GatherTasks {
       const byTree = new Map<number, Candidate[]>();
       for (const log of scan.candidates) { const id = log.tree ?? 0; byTree.set(id, [...(byTree.get(id) ?? []), log]); }
       const trees = [...byTree.values()].map(logs => ({ logs: logs.length, id: logs[0].id, lowest: logs.reduce((low, log) => log.position.y < low.y ? log.position : low, logs[0].position), top: Math.max(...logs.map(log => log.position.y)) }));
-      return { resourceRef, center: scan.center, wholeTree: true, logs: scan.candidates.length, trees, drops: scan.candidates[0]?.drops, truncated: scan.truncated,
+      return { resourceRef, center: scan.center, wholeTree: true, ...maybeBuildingNote(scan, options.includeBuildings), logs: scan.candidates.length, trees, drops: scan.candidates[0]?.drops, truncated: scan.truncated,
         limitation: scan.candidates.length ? '离 center 最近的这几整棵树（斜着长的、隔着树叶的树枝都算进去，根已经砍掉、悬着的剩余部分也算一棵）。gather-resources 传 wholeTree:true、不填数量，一次提交就一棵一棵全砍完、捡完掉落。' : '附近没找到这种原木，换个 center 或范围再找，或者问玩家是哪棵。' };
     }
     // Logs the server left out as no tree (no leaves touching them: a house wall), so the model can say why it skipped them.
     const builtLogs = (scan.budget as { builtLogs?: unknown } | undefined)?.builtLogs;
-    return { resourceRef, center: scan.center, ...(typeof builtLogs === 'number' && builtLogs > 0 ? { builtLogs } : {}), candidates: scan.candidates.map(({ targetToken: _private, properties: _properties, ...item }) => item), truncated: scan.truncated,
-      limitation: '只限本次已加载、可见的原木、矿石、石料候选（按方块标签认，模组的也算：#minecraft:logs、#c:ores、#c:stones）和固定区域；drops 是按服务器掉落表算出的可能产物，矿石只取普通产物（不支持精准采集矿石块），实际数量以原生拾取回执为准。不能识别人工建筑。引用30秒内提交；不补扫扩展候选，不挖路或搭桥。' };
+    return { resourceRef, center: scan.center, ...(typeof builtLogs === 'number' && builtLogs > 0 ? { builtLogs } : {}), ...maybeBuildingNote(scan, options.includeBuildings), candidates: scan.candidates.map(({ targetToken: _private, properties: _properties, ...item }) => item), truncated: scan.truncated,
+      limitation: '只限本次已加载、可见的原木、矿石、石料候选（按方块标签认，模组的也算：#minecraft:logs、#c:ores、#c:stones）和固定区域；drops 是按服务器掉落表算出的可能产物，矿石只取普通产物（不支持精准采集矿石块），实际数量以原生拾取回执为准。认得出的建筑（村庄、床／门／箱子旁、记下的家附近）默认不列，数量在 maybeBuilding，认不出的（野外随手放的方块）不在此列。引用30秒内提交；不补扫扩展候选，不挖路或搭桥。' };
   }
   private check(task: Active): void {
     task.borrowed?.check();

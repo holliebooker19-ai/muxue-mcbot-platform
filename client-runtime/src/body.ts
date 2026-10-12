@@ -7,7 +7,10 @@ export interface ItemValue { id: string; count: number; components?: Components;
 export interface ItemStack extends ItemValue { slot: number; source?: 'container' | 'player' | 'unknown'; playerSlot?: number; active?: boolean; mayPickup?: boolean }
 export interface GroundItem { entityId: string; position: Position; stack: ItemValue; onGround?: boolean; visible?: boolean | null; visibility: 'visible' | 'occluded' | 'unknown'; /** server-posture: dropped by this body's own death (the server tags them), the ones to fetch back. */ deathDrop?: boolean }
 export interface CompanionGuard { player: string; expectedEntityId: string; maxDistance: number }
-export interface ResourceScanOptions { blockIds: string[]; radius: number; maxResults: number; center?: Position; wholeTree?: boolean; trees?: number; companionMiningGuard?: CompanionGuard }
+/** The remembered home (places.ts), sent along so the server can leave the blocks around it alone. */
+export interface HomeSpot { dimension: string; x: number; y: number; z: number }
+/** includeBuildings: the player allowed digging what may be a building (the server leaves those out and counts them, budget.maybeBuilding). home: filled in by the body from the remembered place. */
+export interface ResourceScanOptions { blockIds: string[]; radius: number; maxResults: number; center?: Position; wholeTree?: boolean; trees?: number; companionMiningGuard?: CompanionGuard; includeBuildings?: boolean; home?: HomeSpot }
 export interface PickupReceipt { seq: number; entityId: string; position: Position; stack: ItemValue; pickedUpCount: number; sessionId: string; controlGeneration: number; dimension: string; /** A carried mod storage (e.g. a backpack) took the items instead of the inventory. */ storedIn?: string; /** gift-receipts: the player (not the body) who threw the item. */ thrownBy?: string }
 /** What a resource block is, by block tags (modded ones too). */
 export type ResourceKind = 'log' | 'ore' | 'stone';
@@ -152,7 +155,8 @@ export interface ActionArguments {
   'approach-player': { player: string; expectedEntityId?: string; distance?: number; timeoutMs?: number; track?: boolean };
   'approach-resource': { targetToken: string; timeoutMs?: number };
   'pickup-item': { entityId: string; expectedItem: string; expectedCount: number; expectedComponents: Components; expectedMaxStackSize?: number; companionGuard?: CompanionGuard; resourceTargetToken?: string; timeoutMs?: number };
-  'dig-block': Position & { expectedBlock: string; expectedProperties?: Components; targetToken?: string; timeoutMs?: number };
+  /** buildingCheck: do not dig a block that may be a building, fail MAYBE_BUILDING with the reason (the model's own dig-block asks for it; tasks never do). */
+  'dig-block': Position & { expectedBlock: string; expectedProperties?: Components; targetToken?: string; timeoutMs?: number; buildingCheck?: boolean; home?: HomeSpot };
   'place-block': Position & { face: 'up' | 'down' | 'north' | 'south' | 'east' | 'west'; slot: number; expectedItem: string; expectedBlock: string; expectedProperties?: Components; expectedCount?: number; expectedComponents?: Components; timeoutMs?: number };
   'open-container': Position & { expectedBlock: string; expectedProperties?: Components; targetToken?: string; timeoutMs?: number };
   'click-slot': { containerId: string; expectedRevision?: number; slot: number; expectedItem: string; expectedCount: number; expectedComponents?: Components; expectedCarriedItem: string; expectedCarriedCount: number; expectedCarriedComponents?: Components; button?: 0 | 1 };
@@ -232,6 +236,8 @@ export interface Body {
   act<N extends ActionName>(name: N, args: ActionArguments[N], taskToken?: string): Promise<Operation>;
   nearbyBlocks?(options: { centerPlayer?: string; radius: number; maxResults: number }): Promise<NearbyBlocks>;
   nearbyResources?(options: ResourceScanOptions): Promise<NearbyResources>;
+  /** Where the remembered home is, for the scans and checks that leave a building alone. */
+  useHome?(home: () => HomeSpot | undefined): void;
   lookAround?(options?: { radius?: number }): Promise<Record<string, unknown>>;
   survivalState?(options?: { details?: boolean }): Promise<SurvivalState>;
   assessTool?(options: ToolAssessmentOptions): Promise<ToolAssessment>;
