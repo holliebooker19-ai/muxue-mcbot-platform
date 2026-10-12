@@ -98,6 +98,8 @@ export class CompanionMode {
   /** Explicit ends so far (stop with clearPosture, companion-mode stop): a death recovery that sees one move on does not set anything again. */
   private explicitStops = 0;
   private recovering = false;
+  /** Each look of the monitor at a body nothing of ours holds (DropWatch); true while it picks up, so no errand starts meanwhile. */
+  onLook?: (state: Observation) => boolean;
   /** Told each new standing posture, and null when one is explicitly ended (see Posture). */
   onPosture?: (posture: Posture | null) => void;
   private postureSaid?: string;
@@ -182,6 +184,8 @@ export class CompanionMode {
   guardFighting(): boolean { return this.dutyMode() && !!this.duty && !!this.dutyState?.covering && this.dutyState.state !== 'idle'; }
   /** The companion itself holds the body: a child pickup/mining, a protection fight, or the posture giving way to an operation. */
   busy(): boolean { return this.errands.running || this.guardFighting() || !!this.value.suspendedFor; }
+  /** Nothing has the body: no change or stop of ours under way, no child job or recovery on our lock, nothing of the model's running. */
+  free(): boolean { return !this.changing && !this.stopping && !this.stopUnconfirmed && !this.recovering && !this.errands.token && this.body.pendingOperations().length === 0 && this.body.isBusy?.() !== true; }
   /** How many explicit ends there have been; a changed count means someone ended the posture on purpose. */
   explicitStopCount(): number { return this.explicitStops; }
   read(): CompanionState { if (this.terminal) this.events.deliverOperation(this.terminal); return this.snapshot(); }
@@ -428,9 +432,13 @@ export class CompanionMode {
       if (this.intent && (!state.connected || state.health <= 0 || !isDeepStrictEqual(identityOf(state), this.intent.context))) throw new BodyError('WORLD_CHANGED', '陪伴会话改变；旧意图已废弃');
       if (this.errands.running) return;
       this.observePosture(state);
+      // The items of the last death the body sees now (DropWatch): picked up before anything else of ours.
+      if (this.onLook?.(state)) return;
       // Paused by hand or blocked: nothing of ours runs on the body and the server holds no posture.
       if (!this.intent || ['paused', 'blocked'].includes(this.value.state)) return;
-      this.errands.tick(state, epoch, this.value.state === 'waiting' && this.value.stage === 'active');
+      // Picking up waits beside the player; mining also looks on the way with them (not while giving way, nor after one out of reach).
+      const active = this.value.stage === 'active' && !this.value.away && !this.value.suspendedFor && !this.catching;
+      this.errands.tick(state, epoch, active && this.value.state === 'waiting', active && ['waiting', 'following'].includes(this.value.state));
     } catch (error) { if (epoch === this.epoch && observedEpoch === this.observationRevision) { if (this.errands.configured()) await this.block(error as Error, epoch); else this.fail(error as Error); } }
   }
   /** Translate the server's posture into state and events. Never sends anything. */
@@ -506,7 +514,7 @@ export class CompanionMode {
     if (this.catching) return true;
     const player = this.intent?.player;
     if (!player || !['travel-to', 'travel-meet', 'far-players'].every(cap => this.body.hello.capabilities.includes(cap))) return false;
-    if (this.recovering || this.changing || this.stopping || this.errands.token || this.body.pendingOperations().length > 0 || this.body.isBusy?.() === true) return false;
+    if (!this.free()) return false;
     const where = playerWhereabouts(state, player);
     if (!where || !('position' in where) || Math.hypot(where.position.x - state.position.x, where.position.z - state.position.z) > TRAVEL_MAX_BLOCKS) return false;
     const last = this.lastChase;

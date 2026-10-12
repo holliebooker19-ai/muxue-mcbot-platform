@@ -210,7 +210,7 @@ follow的可选pickup仅在companion-pickup能力存在时发布，`items`明确
 
 collect-items的授权范围是初始Bot位置为中心的radius球，冻结其中匹配物品的已观察UUID；gather-resources收取固定扫描区内的匹配地面物品及随后产生的掉落，收据位置按网格中心水平radius＋0.75格、距floor(center.y)最多3格核验，为方块内生成的掉落留边界余量，不借此增加待挖候选。拾到范围外、其它物品或不兼容变体时记录实际额外结果并停止，不能算入目标。
 
-陪挖（`companionMiningGuard`）的单块子任务另有规则（2026-10-06）：Bot位置、路线和站位只能在绑定玩家的半径内；挖出的掉落物会弹出滑动，允许离玩家半径＋1.5格（`DROP_REACH_MARGIN`，三维距离），同时必须在源矿3格内。运行端认领掉落用同一余量。站不进圈内又够不着的掉落以拾取失败回到跟随，不追出圈外。见[陪挖验收](archive/companion_mining_validation.md)。
+陪挖（`companionMiningGuard`）的单块子任务另有规则（2026-10-06）：Bot位置、路线和站位只能在绑定玩家的半径内；挖出的掉落物会弹出滑动，允许离玩家半径＋1.5格（`DROP_REACH_MARGIN`，三维距离），同时必须在源矿3格内。运行端认领掉落用同一余量。站不进圈内又够不着的掉落以拾取失败回到跟随，不追出圈外。见[陪挖验收](archive/companion_mining_validation.md)。2026-10-12 起`companionMiningGuard.maxDistance`为 3–16 的整数（上限沿用保护玩家出手的范围 `GuardDuty.ENGAGE_RANGE`：离开玩家去挖一块矿和去打一只怪是同样的短程离开），陪挖子任务捡掉落的`pickup-item`（带`resourceTargetToken`）的`companionGuard.maxDistance`可到同一上限；普通陪拾取仍是 1.5–4。
 
 count和stacks必须二选一、1–256整数，最终解析目标最多256，不静默截断。用户省略数量时由Agent自主选择合理有限count并在say中说明；`1组`用授权地面源或首次真实原生拾取栈的有效maxStackSize。初始没有实际栈时，可先在冻结授权候选内挖取并收取首份原生掉落后固定variant／上限／目标，开工时如实说明数量未解析；不使用旧背包变体或从block ID猜上限。变体／上限变化停止，不能重新换算已承诺目标。
 
@@ -557,6 +557,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - 捡装备这段路上没有姿态，常驻保护照常：玩家在 16 格内时仍会出手。
 
 **常驻保护打完以后**：
+- 2026-10-12 补：路上被普通停止打断（自卫、进食，不是玩家叫停），或者一开始身边有怪，就等到没有怪、身体空下来再去，最多再去 2 次（`MAX_RESUMES`，和任务被暂停后接着做的次数一样），再不行才按上面恢复姿态。之后到`despawnAt`为止，运行端只要在观察里看到带`deathDrop`的物品、身体又没别的事，就用任务锁把它们一次捡完（跟随这期间让开），不再走过去。
 - 姿态是`follow`时，交还给跟随，跟随重新算路线。这和原来一样，只是不再经过`follow-companion`操作；
 - 姿态是`wait`时，走回开始打之前站的地方（10-10 定的规则）；
 - 姿态是`seated`时，走回座位坐下；

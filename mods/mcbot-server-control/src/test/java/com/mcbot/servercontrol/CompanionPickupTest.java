@@ -55,7 +55,7 @@ final class CompanionPickupTest {
         World valid=new World(true);valid.guard.validate();check(valid.guard.allows(new Vec3(2.5,1,0.5))&&!valid.guard.allows(new Vec3(2.5001,1,0.5)),"inclusive live companion radius is exact rather than an eight-block pickup fallback");
         World bodyFar=new World(true);bodyFar.feet=new Vec3(3,1,0.5);Fixture farStart=new Fixture(bodyFar);farStart.fail("COMPANION_OUT_OF_RANGE");check(bodyFar.moves==0&&bodyFar.plans==0,"initial body outside guard rejects before planning or input");
         World itemFar=new World(true);itemFar.item=new Vec3(2.5001,1,0.5);Fixture farDrop=new Fixture(itemFar);farDrop.fail("COMPANION_OUT_OF_RANGE");check(itemFar.moves==0,"initial drop outside player radius rejects before input");
-        World minedDrop=new World(false);minedDrop.item=new Vec3(2,1,2.6);minedDrop.guard=new CompanionPickupGuard(args(),minedDrop,CompanionMiningGuard.DROP_REACH_MARGIN);minedDrop.guard.validate();
+        World minedDrop=new World(false);minedDrop.item=new Vec3(2,1,2.6);minedDrop.guard=new CompanionPickupGuard(args(),minedDrop,CompanionMiningGuard.DROP_REACH_MARGIN,CompanionMiningGuard.MAX_DISTANCE);minedDrop.guard.validate();
         check(minedDrop.guard.allows(new Vec3(2.5,1,0.5))&&!minedDrop.guard.allows(new Vec3(2.5001,1,0.5)),"mined-drop margin widens only where the drop rests, never the body route");
         Fixture minedReach=new Fixture(minedDrop);minedReach.pickup.tick();check(minedDrop.input!=null&&minedDrop.guard.allows(minedDrop.feet),"drop past the radius is still approached from inside it");
         minedDrop.item=new Vec3(4.0001,1,0.5);errorCode("COMPANION_OUT_OF_RANGE",minedDrop.guard::validate);
@@ -87,6 +87,9 @@ final class CompanionPickupTest {
         JsonObject shortUuid=args();shortUuid.addProperty("expectedEntityId","1-1-1-1-1");errorCode("INVALID_ARGUMENT",()->new CompanionPickupGuard(shortUuid,new World(false)));
         JsonObject invalidName=args();invalidName.addProperty("player","Alex Other");errorCode("INVALID_ARGUMENT",()->new CompanionPickupGuard(invalidName,new World(false)));
         for(double radius:new double[]{1.5,4}){JsonObject boundary=args();boundary.addProperty("maxDistance",radius);new CompanionPickupGuard(boundary,new World(false));check(true,"guard radius boundary accepted "+radius);}
+        // A mined ore's drop is picked up as far out as the ore was (the companion mining range), a plain pickup still beside the player.
+        JsonObject mined=args();mined.addProperty("maxDistance",CompanionMiningGuard.MAX_DISTANCE);new CompanionPickupGuard(mined,new World(false),CompanionMiningGuard.DROP_REACH_MARGIN,CompanionMiningGuard.MAX_DISTANCE);check(true,"a mined drop's guard takes the mining range");
+        errorCode("INVALID_ARGUMENT",()->new CompanionPickupGuard(mined,new World(false)));
         System.out.println("CompanionPickupTest: "+checks+" checks passed");
     }
 }

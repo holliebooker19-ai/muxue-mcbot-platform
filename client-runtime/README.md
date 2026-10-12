@@ -86,11 +86,11 @@ ServerBody 现在的观察／控制工具（`tool-registry.json` 里 kind 为 re
 
 RuntimeMonitor后台更新持续状态；显式模式变化记录 `companion_state`，受阻／失控只记录一次需宿主解释的 `companion` 事件。姿态让开、回来、站在玩家身边与走动之间的切换不发唤醒事件，也不产生逐tick任务回合。新增的事件只有：回座位失败、服务端结束了姿态、死后恢复结果。旧ServerBody、ClientBody和旧Mineflayer路径保持原有工具，有限 `follow-player` 继续保留。
 
-跟随拾取：只有同时声明`companion-pickup`的服务端，follow才提供`pickup:{items:[物品ID],radius?}`；1–8个明确ID，半径默认3、范围1.5–4，跟随distance不得更大。未带pickup保持普通跟随。靠近玩家（服务端 `arrived`）时，程序选择白名单掉落，借任务锁把单个UUID当普通操作处理（服务端姿态自己让开又接上，运行端不停也不重设跟随）；不能每个物品都唤醒模型。玩家走出保护半径可收尾，不自动重试该旧UUID；其他失败先收住原生动作，把姿态关掉并发布一次blocked。pause保留配置、resume显式重核；wait和stop清除配置。陪挖同理（`mining`，需要 `companion-mining`）：每一步都是普通操作，任务锁只在子任务存活期间持有。
+跟随拾取：只有同时声明`companion-pickup`的服务端，follow才提供`pickup:{items:[物品ID],radius?}`；1–8个明确ID，半径默认3、范围1.5–4，跟随distance不得更大。未带pickup保持普通跟随。靠近玩家（服务端 `arrived`）时，程序选择白名单掉落，借任务锁把单个UUID当普通操作处理（服务端姿态自己让开又接上，运行端不停也不重设跟随）；不能每个物品都唤醒模型。玩家走出保护半径可收尾，不自动重试该旧UUID；其他失败先收住原生动作，把姿态关掉并发布一次blocked。pause保留配置、resume显式重核；wait和stop清除配置。陪挖同理（`mining`，需要 `companion-mining`）：每一步都是普通操作，任务锁只在子任务存活期间持有。2026-10-12 起陪挖不再要求玩家站住：跟着走的时候也每 2 秒扫一次玩家周围 16 格内露出来、看得见的矿（范围同保护玩家），选一块交给子任务，挖完姿态自己接着跟；走不到、够不着、没合适的镐等明确失败只跳过这一块，玩家走远了这块也放下，只有玩家离开（`STALE_COMPANION`）才受阻；背包满就停掉陪挖、保留跟随。`maxBlocks`、`durationMs` 不填用上限（32 块、10 分钟），是程序的限制，不用告诉玩家。
 
 状态增加`activity:following|picking-up|switching`及`pickup:{items,radius,countStatus,pickedUpCount?,lastConfirmedPickedUpCount?,lastItem?,code?,lastCode?,totals}`。totals按实际完整组件／有效上限分变体，模型只见简要分组。外层按唯一原生游标累计活动期间收到的白名单物品，包含普通碰撞拾取；子任务只确认自己的UUID，不能再加一次数量。items仅限制主动追逐，不阻止原版顺带拾取其他物品；未知／收据缺口只报告最后确认量。拾取收据只认同一身体会话和维度（停止不再带来新的"代次"）；独立观察revision屏蔽跨切换的旧观察；迟到子任务不能释放新锁或重设姿态。
 
-死后恢复（`death-recovery.ts`，托管下）：重生后运行端先读上次留下的姿态记录（`runtime/posture-<名>.json`，超过一小时、或早于玩家最近一次叫停的不用），再看 `hello.lastDeath.drops`：掉落还在（`remaining` 不是 0）、没过 `despawnAt`、同一维度、在 `travel-to` 的距离上限内、剩余时间够最短的行走、身边没有敌对且可防卫的怪（survival-state 的 `threats`）时，先用任务锁走到死亡地点、按 `deathDrop` 标记逐个捡起（路上有叫停就取消，且不再设姿态；怪出现就停），然后把死前的跟随／等待／保护设回去；坐姿只报告不恢复。全程结果以一条 `companion` 事件（【死后恢复】）告诉模型。
+死后恢复（`death-recovery.ts`，托管下）：重生后运行端先读上次留下的姿态记录（`runtime/posture-<名>.json`，超过一小时、或早于玩家最近一次叫停的不用），再看 `hello.lastDeath.drops`：掉落还在（`remaining` 不是 0）、没过 `despawnAt`、同一维度、在 `travel-to` 的距离上限内、剩余时间够最短的行走、身边没有敌对且可防卫的怪（survival-state 的 `threats`）时，先用任务锁走到死亡地点、按 `deathDrop` 标记逐个捡起（路上有叫停就取消，且不再设姿态；怪出现就停），然后把死前的跟随／等待／保护设回去；坐姿只报告不恢复。全程结果以一条 `companion` 事件（【死后恢复】）告诉模型。2026-10-12 起：路上被打断（自卫等普通停止，不是玩家叫停）或开始时身边有怪，会等到没有怪、身体空下来再去，最多再去 `MAX_RESUMES`（2）次，和任务被进食、自卫暂停后接着做的次数一样；之后在掉落消失前由 `DropWatch` 盯着：身体看到带 `deathDrop` 标记的掉落（比如玩家把它传送过去）、又没有别的事占着身体时，用任务锁一口气全捡完，跟随这期间让开、不会捡一件被拉回去一次，捡到了发一条【死后掉落】事件。
 
 有限采集／拾取通过三个能力门控入口提供：
 

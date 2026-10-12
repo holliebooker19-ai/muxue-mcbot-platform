@@ -142,7 +142,7 @@ final class PickupItem implements BodyTask {
                 return player==null?null:new CompanionPickupGuard.Player(player,player.getUUID(),player.serverLevel(),player.position(),
                     player!=body&&player.isAlive()&&!player.isRemoved()&&player.connection!=null&&player.connection.isAcceptingMessages());
             }
-        },mining==null?0:CompanionMiningGuard.DROP_REACH_MARGIN):null;
+        },mining==null?0:CompanionMiningGuard.DROP_REACH_MARGIN,mining==null?CompanionPickupGuard.MAX_DISTANCE:CompanionMiningGuard.MAX_DISTANCE):null;
         View view=new View(){
             FlatApproach geometry;
             final NativeNavigation navigation=new NativeNavigation(body,session,operation);

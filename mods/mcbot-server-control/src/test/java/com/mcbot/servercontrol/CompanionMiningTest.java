@@ -37,7 +37,8 @@ final class CompanionMiningTest {
         check(ServerController.CAPABILITIES.contains("companion-mining")&&!ServerController.atomicAction("companion-mining"),"mining guard capability is advertised, not an alternate action/control chain");
         check(CompanionMiningGuard.options(args()).maxDistance()==4,"explicit integer4 radius is accepted");
         check(CompanionMiningGuard.options(obj("player","Alex","expectedEntityId",UUID_PLAYER.toString(),"maxDistance",3)).maxDistance()==3,"explicit integer3 radius is accepted");
-        for(double distance:new double[]{2,3.5,4.1})errorCode("INVALID_ARGUMENT",()->CompanionMiningGuard.options(obj("player","Alex","expectedEntityId",UUID_PLAYER.toString(),"maxDistance",distance)));
+        check(CompanionMiningGuard.options(obj("player","Alex","expectedEntityId",UUID_PLAYER.toString(),"maxDistance",CompanionMiningGuard.MAX_DISTANCE)).maxDistance()==CompanionMiningGuard.MAX_DISTANCE,"the protection range is accepted");
+        for(double distance:new double[]{2,3.5,CompanionMiningGuard.MAX_DISTANCE+0.5,CompanionMiningGuard.MAX_DISTANCE+1})errorCode("INVALID_ARGUMENT",()->CompanionMiningGuard.options(obj("player","Alex","expectedEntityId",UUID_PLAYER.toString(),"maxDistance",distance)));
         errorCode("INVALID_ARGUMENT",()->CompanionMiningGuard.options(obj("player","Alex","expectedEntityId","1-1-1-1-1","maxDistance",4)));
         errorCode("INVALID_ARGUMENT",()->CompanionMiningGuard.options(obj("player","Alex/other","expectedEntityId",UUID_PLAYER.toString(),"maxDistance",4)));
         errorCode("INVALID_ARGUMENT",()->CompanionMiningGuard.options(obj("player","Alex","expectedEntityId",UUID_PLAYER.toString())));

@@ -266,7 +266,8 @@ export class SurvivalReflexes {
       if (operation.status === 'failed') {
         this.lastReason = operation.summary;
         const failedOn = threat?.entityId ?? entityId;
-        if (failedOn && (operation.result as { code?: string } | undefined)?.code !== 'NO_THREAT') this.cooling.set(failedOn, Date.now() + 3000);
+        // The hand changed under it (ITEM_CHANGED): nothing about that target was wrong, so the next tick tries it again.
+        if (failedOn && !['NO_THREAT', 'ITEM_CHANGED'].includes((operation.result as { code?: string } | undefined)?.code ?? '')) this.cooling.set(failedOn, Date.now() + 3000);
       }
       else if (operation.status !== 'succeeded' && operation.status !== 'cancelled') { this.armed = false; this.revision++; this.phase = 'blocked'; this.lastReason = operation.summary; }
       return operation;

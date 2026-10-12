@@ -50,7 +50,7 @@ test('invalid player binding or scan scope cannot drop its guard or lose the exi
   const invalid = [
     { ...f.scan, center: { x: 0, y: 64, z: 0 } },
     { ...f.scan, radius: 5 },
-    ...[2, 5, 3.5].map(maxDistance => ({ ...f.scan, companionMiningGuard: { ...f.guard, maxDistance } })),
+    ...[2, 17, 3.5].map(maxDistance => ({ ...f.scan, companionMiningGuard: { ...f.guard, maxDistance } })),
     { ...f.scan, companionMiningGuard: { ...f.guard, expectedEntityId: 'not-a-uuid' } },
   ];
   for (const options of invalid) await assert.rejects(f.body.nearbyResources(options), error => error.code === 'INVALID_ARGUMENT');
@@ -88,7 +88,7 @@ test('MCP keeps the existing mode tool and passes an explicit bounded mining req
   assert(!tools.some(tool => tool.name === 'companion-mining'));
   const result = await f.client.callTool({ name: 'companion-mode', arguments: { action: 'follow', player: 'Alex', mining: miningOptions } });
   assert.equal(result.isError, undefined);
-  assert.deepEqual(f.requests[0].mining, { ...miningOptions, radius: 4, durationMs: 300000 });
+  assert.deepEqual(f.requests[0].mining, miningOptions, 'no radius or duration added: the runtime fills in its own limits');
   assert.equal(f.rearms(), 1);
 });
 
@@ -103,10 +103,10 @@ test('MCP rejects unsupported mining rather than stripping it into ordinary foll
 test('MCP invalid or conflicting mining requests do not rearm stopped reflexes', async t => {
   const f = await mcpFixture(t);
   const invalid = [
-    { action: 'follow', player: 'Alex', mining: { blockIds: ['minecraft:coal_ore'] } },
+    { action: 'follow', player: 'Alex', mining: { blockIds: ['minecraft:coal_ore'], maxBlocks: 0 } },
     { action: 'follow', player: 'Alex', mining: { ...miningOptions, blockIds: ['diamond_ore'] } },
     { action: 'follow', player: 'Alex', mining: { ...miningOptions, blockIds: ['minecraft:coal_ore', 'minecraft:coal_ore'] } },
-    { action: 'follow', player: 'Alex', distance: 5, mining: miningOptions },
+    { action: 'follow', player: 'Alex', mining: { ...miningOptions, durationMs: 5000 } },
     { action: 'wait', mining: miningOptions },
     { action: 'resume', mining: miningOptions },
     { action: 'follow', player: 'Alex', mining: miningOptions, pickup: { items: ['minecraft:coal'] } },

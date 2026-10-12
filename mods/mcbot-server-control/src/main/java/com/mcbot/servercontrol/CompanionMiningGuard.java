@@ -11,6 +11,8 @@ import static com.mcbot.servercontrol.Protocol.*;
 /** One scan binds a live player instance; later approach/dig/pickup cannot rebind by name or UUID. */
 final class CompanionMiningGuard {
     static final double PROTECTION_DISTANCE=2, PICKUP_SOURCE_DISTANCE=3;
+    /** How far from the player an ore may be: as far as protection leaves them for a fight (GuardDuty.ENGAGE_RANGE), the same short detour. */
+    static final int MIN_DISTANCE=3,MAX_DISTANCE=(int)GuardDuty.ENGAGE_RANGE;
     /** A mined drop pops and slides; it may rest past the radius while the body still reaches it from inside. */
     static final double DROP_REACH_MARGIN=1.5;
     record Player(Object identity,UUID uuid,Object dimension,Vec3 position,AABB bounds,boolean available) {}
@@ -32,7 +34,7 @@ final class CompanionMiningGuard {
         try {expected=UUID.fromString(uuid);if(!expected.toString().equalsIgnoreCase(uuid))throw new IllegalArgumentException();}
         catch(IllegalArgumentException failure){throw error("INVALID_ARGUMENT","companionMiningGuard.expectedEntityId must be a complete UUID");}
         double distance=number(args,"maxDistance");
-        if(distance!=Math.rint(distance)||distance<3||distance>4)throw error("INVALID_ARGUMENT","companionMiningGuard.maxDistance must be integer3..4");
+        if(distance!=Math.rint(distance)||distance<MIN_DISTANCE||distance>MAX_DISTANCE)throw error("INVALID_ARGUMENT","companionMiningGuard.maxDistance must be an integer "+MIN_DISTANCE+".."+MAX_DISTANCE);
         return new Options(name,expected,(int)distance);
     }
     private Player current() {

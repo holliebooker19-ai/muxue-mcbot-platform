@@ -2,7 +2,8 @@ import test from 'node:test';
 import { resourceOf } from './resource-catalog.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { BodyError } from '../dist/body.js';
+import { BodyError, COMPANION_MINING_RANGE } from '../dist/body.js';
+import { MINING_LIMITS } from '../dist/companion-errands.js';
 import { CompanionMode } from '../dist/companion-mode.js';
 import { GatherTasks } from '../dist/gather-tasks.js';
 import { SurvivalTasks } from '../dist/survival-tasks.js';
@@ -176,13 +177,62 @@ test('a failed stop with no child running still refuses new commands until it is
   assert.equal(f.posture.current.action, 'wait');
 });
 
-for (const fault of ['wrong-tool', 'full', 'unknown']) test(`${fault} blocks mining after one attempt without automatic rescan`, async t => {
-  const f = fixture(t, { full: fault === 'full' }); f.addBlock(); f.wrongTool = fault === 'wrong-tool'; f.digUnknown = fault === 'unknown'; await f.follow();
+test('an unknown dig blocks mining after one attempt without automatic rescan', async t => {
+  const f = fixture(t); f.addBlock(); f.digUnknown = true; await f.follow();
   await f.spin(() => f.mode.snapshot().state === 'blocked');
   assert.equal(f.mode.snapshot().mining.attemptedBlocks, 1); assert.equal(f.mode.snapshot().mining.minedBlocks, 0);
   const scans = f.native('scan').length; f.advance(10000); await f.tick(); assert.equal(f.native('scan').length, scans);
-  assert.equal(f.native('dig-block').length, fault === 'unknown' ? 1 : 0); assert(f.native('stop').length >= 1); assert.equal(f.posture.current, null, 'a blocked mode holds no posture on the server: nothing carries on by itself');
-  if (fault === 'unknown') assert.equal(f.mode.snapshot().mining.countStatus, 'partial-or-unknown');
+  assert.equal(f.native('dig-block').length, 1); assert(f.native('stop').length >= 1); assert.equal(f.posture.current, null, 'a blocked mode holds no posture on the server: nothing carries on by itself');
+  assert.equal(f.mode.snapshot().mining.countStatus, 'partial-or-unknown');
+});
+
+test('no fitting pickaxe for one ore: that ore is left (never retried) and the follow and mining go on', async t => {
+  const f = fixture(t); f.addBlock(); f.wrongTool = true; await f.follow();
+  await f.spin(() => f.mode.snapshot().mining.attemptedBlocks === 1 && f.mode.snapshot().activity === 'following');
+  f.advance(3000); await f.tick(); await until(() => f.mode.snapshot().activity === 'following');
+  assert.notEqual(f.mode.snapshot().state, 'blocked'); assert.equal(f.mode.snapshot().mining.active, true); assert.equal(f.mode.snapshot().mining.lastCode, 'WRONG_TOOL');
+  assert.equal(f.mode.snapshot().mining.attemptedBlocks, 1, 'the same ore is not tried again'); assert.equal(f.native('dig-block').length, 0);
+  assert.equal(f.posture.current?.action, 'follow', 'the posture stays');
+});
+
+test('a full inventory ends the mining (said once) and keeps the follow', async t => {
+  const f = fixture(t, { full: true }); f.addBlock(); await f.follow();
+  await f.spin(() => f.mode.snapshot().mining.active === false && f.mode.snapshot().activity === 'following');
+  assert.equal(f.mode.snapshot().mining.disabledReason, 'INVENTORY_FULL'); assert.notEqual(f.mode.snapshot().state, 'blocked');
+  assert.equal(f.native('dig-block').length, 0); assert.equal(f.posture.current?.action, 'follow');
+  assert.equal(f.events.since(0, ['companion']).filter(event => event.text.includes('INVENTORY_FULL')).length, 1);
+});
+
+test('mining looks while the body still walks with the player: the player need not stop', async t => {
+  const f = fixture(t); f.posture.setArrived(false); f.addBlock(); await f.follow();
+  assert.equal(f.mode.snapshot().state, 'following', 'not beside the player yet');
+  await f.spin(() => f.mode.snapshot().mining.minedBlocks === 1 && f.mode.snapshot().activity === 'following');
+  assert.equal(f.native('dig-block').length, 1);
+});
+
+test('the player walking on between the scan and the choice no longer drops the ore', async t => {
+  const f = fixture(t); f.addBlock(); f.afterScan = async () => { f.state.entities[0].position = { x: 1.5, y: 64, z: 0.5 }; };
+  await f.follow();
+  await f.spin(() => f.mode.snapshot().mining.minedBlocks === 1 && f.mode.snapshot().activity === 'following');
+});
+
+test('no walkable way to the ore: it is left and the follow goes on (a definite failure, not an unknown)', async t => {
+  const f = fixture(t); f.addBlock();
+  f.afterAct = async (name, _args, op) => { if (name === 'approach-resource') { op.status = 'failed'; op.result = { code: 'NO_PATH' }; f.operations.set(op.operationId, clone(op)); } };
+  await f.follow();
+  await f.spin(() => f.mode.snapshot().mining.attemptedBlocks === 1 && f.mode.snapshot().activity === 'following');
+  f.advance(3000); await f.tick();
+  assert.notEqual(f.mode.snapshot().state, 'blocked'); assert.equal(f.mode.snapshot().mining.lastCode, 'NO_PATH'); assert.equal(f.native('dig-block').length, 0);
+});
+
+test('without budgets the largest are used, and the scan reaches as far as protection does', async t => {
+  const f = fixture(t);
+  f.body.nearbyResources = async args => { f.calls.push({ name: 'scan', args: clone(args) }); return { instanceId: 'instance', sessionId: 'session', worldId: 'world', dimension: 'minecraft:overworld', controlGeneration: f.state.controlGeneration, center: clone(f.state.entities[0].position), candidates: [], truncated: false }; };
+  await f.follow({ blockIds: ['#c:ores'] });
+  const mining = f.mode.snapshot().mining;
+  assert.equal(mining.maxBlocks, MINING_LIMITS.maxBlocks); assert.equal(mining.durationMs, MINING_LIMITS.durationMs.max); assert.equal(mining.radius, COMPANION_MINING_RANGE.max);
+  await f.spin(() => f.native('scan').length > 0);
+  assert.equal(f.native('scan')[0].args.companionMiningGuard.maxDistance, COMPANION_MINING_RANGE.max);
 });
 
 test('known player range refusal returns to follow but never automatically retries the selected position', async t => {
@@ -192,10 +242,11 @@ test('known player range refusal returns to follow but never automatically retri
   assert.equal(f.mode.snapshot().mining.attemptedBlocks, 1); assert.equal(f.native('approach-resource').length, 1); assert.equal(f.native('dig-block').length, 0);
 });
 
-test('options reject unavailable capability, missing budget, duplicate IDs, pickup conflict and non-follow mining before acquiring', async t => {
+test('options reject unavailable capability, a bad budget, duplicate IDs, pickup conflict and non-follow mining before acquiring', async t => {
   const f = fixture(t);
   for (const request of [
-    { action: 'follow', player: 'Alex', mining: { blockIds: ['minecraft:coal_ore'] } },
+    { action: 'follow', player: 'Alex', mining: { blockIds: ['minecraft:coal_ore'], maxBlocks: 0 } },
+    { action: 'follow', player: 'Alex', mining: { ...f.mining, radius: COMPANION_MINING_RANGE.max + 1 } },
     { action: 'follow', player: 'Alex', mining: { ...f.mining, blockIds: ['minecraft:coal_ore', 'minecraft:coal_ore'] } },
     { action: 'follow', player: 'Alex', mining: f.mining, pickup: { items: ['minecraft:coal'] } },
     { action: 'wait', mining: f.mining }, { action: 'follow', player: 'Alex', mining: { ...f.mining, radius: 2 } },

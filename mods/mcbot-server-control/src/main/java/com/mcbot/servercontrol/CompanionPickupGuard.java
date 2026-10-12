@@ -7,6 +7,8 @@ import static com.mcbot.servercontrol.Protocol.*;
 
 /** A short pickup detour remains tied to one live companion instance and its moving radius. */
 final class CompanionPickupGuard {
+    /** A pickup detour beside the player; a mined ore's drop may lie as far as the ore (CompanionMiningGuard.MAX_DISTANCE). */
+    static final double MIN_DISTANCE=1.5,MAX_DISTANCE=4;
     record Player(Object identity,UUID uuid,Object dimension,Vec3 position,boolean available) {}
     interface View {
         Object dimension();Vec3 bodyPosition();Vec3 itemPosition();Player companion(String name);
@@ -16,15 +18,15 @@ final class CompanionPickupGuard {
     private final UUID expected;
     private final double maxDistance,itemDistance;
     private final Player bound;
-    CompanionPickupGuard(JsonObject args,View view){this(args,view,0);}
-    /** itemMargin only widens where the drop may rest (mined drops); body and route keep the plain radius. */
-    CompanionPickupGuard(JsonObject args,View view,double itemMargin) {
+    CompanionPickupGuard(JsonObject args,View view){this(args,view,0,MAX_DISTANCE);}
+    /** itemMargin only widens where the drop may rest (mined drops); body and route keep the plain radius, at most maxRadius. */
+    CompanionPickupGuard(JsonObject args,View view,double itemMargin,double maxRadius) {
         this.view=view;player=string(args,"player");
         if(!player.matches("[A-Za-z0-9_]{1,16}"))throw error("INVALID_ARGUMENT","companionGuard.player must be a player name");
         String uuid=string(args,"expectedEntityId");
         try {expected=UUID.fromString(uuid);if(!expected.toString().equalsIgnoreCase(uuid))throw new IllegalArgumentException();}
         catch(IllegalArgumentException invalid){throw error("INVALID_ARGUMENT","companionGuard.expectedEntityId must be a complete UUID");}
-        number(args,"maxDistance");maxDistance=bounded(args,"maxDistance",0,1.5,4);itemDistance=maxDistance+itemMargin;
+        number(args,"maxDistance");maxDistance=bounded(args,"maxDistance",0,MIN_DISTANCE,maxRadius);itemDistance=maxDistance+itemMargin;
         bound=view.companion(player);
     }
     private Player current() {

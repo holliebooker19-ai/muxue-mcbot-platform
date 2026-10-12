@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { BodyError, type Body, type Observation, type Operation, type GroundItem, type Components, type PickupReceipt } from './body.js';
+import { BodyError, COMPANION_MINING_RANGE, COMPANION_PICKUP_RANGE, type Body, type Observation, type Operation, type GroundItem, type Components, type PickupReceipt } from './body.js';
 import type { EventJournal } from './events.js';
 import type { GatherTasks, BorrowedMining } from './gather-tasks.js';
 import { Scheduler, type Lease, type StopHandle } from './scheduler.js';
@@ -7,12 +7,16 @@ import type { CompanionRequest, CompanionState, Context, Identity } from './comp
 
 export interface PickupOptions { items: string[]; radius?: number }
 export interface PickupState { items: string[]; radius: number; pickedUpCount?: number; lastConfirmedPickedUpCount?: number; lastItem?: string; code?: string; lastCode?: string; countStatus: 'confirmed' | 'partial-or-unknown'; totals: Array<{ item: string; count: number; maxStackSize: number; variant: number; storedIn?: string }> }
-export interface MiningOptions { blockIds: string[]; maxBlocks: number; radius?: number; durationMs?: number }
+export interface MiningOptions { blockIds: string[]; maxBlocks?: number; radius?: number; durationMs?: number }
+/** Budgets of one companion mining: at most this many ore blocks tried and this long; not given, the largest (they are the program's limits, not the player's words). */
+export const MINING_LIMITS = { maxBlocks: 32, durationMs: { min: 10000, max: 600000 } } as const;
 export interface MiningState { blockIds: string[]; maxBlocks: number; radius: number; durationMs: number; deadline: number; attemptedBlocks: number; remainingBlocks: number; minedBlocks: number; active: boolean; disabledReason?: string; lastCode?: string; countStatus: 'confirmed' | 'partial-or-unknown'; dropAttribution: 'unconfirmed'; newPickedByItem: Array<{ item: string; count: number; maxStackSize: number; variant: number; storedIn?: string }> }
 type MiningTracker = { state: MiningState; lastScanAt: number; attempted: Set<string>; cursor: number; variants: Array<{ item: string; count: number; maxStackSize: number; components: Components; storedIn?: string }>; child?: symbol; childMined: number };
 // Ores by block ID or tag (#c:ores, modded too); the body scans only ores whatever else is named.
 const miningSelector = /^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/;
 type PickupTracker = { state: PickupState; cursor: number; count: number; variants: Array<{ item: string; count: number; maxStackSize: number; components: Components; storedIn?: string }>; attempted: Set<string>; pending?: { item: GroundItem; cursor: number; receipts: PickupReceipt[] } };
+/** A mining child failed because the followed player is gone (left, died, changed): that ends the companion, not just the ore. */
+const followEnded = new Set(['STALE_COMPANION']);
 const contextOf = (state: Context): Context => ({ instanceId: state.instanceId, sessionId: state.sessionId, worldId: state.worldId, dimension: state.dimension, controlGeneration: state.controlGeneration });
 /** The lock's name in the scheduler: what the BUSY of the model's tools names while an errand or the death recovery holds the body. */
 const LOCK_TOOL = 'companion-mode';
@@ -67,13 +71,13 @@ export class CompanionErrands {
     if (request.pickup && request.mining) throw new BodyError('INVALID_ARGUMENT', '首版持续拾取与陪挖配置互斥；陪挖自行收取新观察的掉落');
     if (request.mining) {
       if (!['companion-mining', 'nearby-resources', 'approach-resource', 'dig-block', 'pickup-item', 'select-slot', 'assess-tool'].every(cap => this.body.hello.capabilities.includes(cap))) throw new BodyError('UNSUPPORTED', '游戏端没有完整持续陪挖／工具及玩家边界保护能力');
-      const { blockIds, maxBlocks, radius = 4, durationMs = 300000 } = request.mining;
-      if (!Array.isArray(blockIds) || blockIds.length < 1 || blockIds.length > 8 || new Set(blockIds).size !== blockIds.length || blockIds.some(id => typeof id !== 'string' || !miningSelector.test(id)) || !Number.isInteger(maxBlocks) || maxBlocks < 1 || maxBlocks > 32 || !Number.isInteger(radius) || radius < 3 || radius > 4 || !Number.isInteger(durationMs) || durationMs < 10000 || durationMs > 600000 || distance > radius) throw new BodyError('INVALID_ARGUMENT', '陪挖需要1..8个矿石ID或标签（如 #c:ores）、maxBlocks 1..32、整数半径3..4和durationMs 10000..600000；跟随距离不能超过半径');
+      const { blockIds, maxBlocks = MINING_LIMITS.maxBlocks, radius = COMPANION_MINING_RANGE.max, durationMs = MINING_LIMITS.durationMs.max } = request.mining;
+      if (!Array.isArray(blockIds) || blockIds.length < 1 || blockIds.length > 8 || new Set(blockIds).size !== blockIds.length || blockIds.some(id => typeof id !== 'string' || !miningSelector.test(id)) || !Number.isInteger(maxBlocks) || maxBlocks < 1 || maxBlocks > MINING_LIMITS.maxBlocks || !Number.isInteger(radius) || radius < COMPANION_MINING_RANGE.min || radius > COMPANION_MINING_RANGE.max || !Number.isInteger(durationMs) || durationMs < MINING_LIMITS.durationMs.min || durationMs > MINING_LIMITS.durationMs.max || distance > radius) throw new BodyError('INVALID_ARGUMENT', `陪挖需要1..8个矿石ID或标签（如 #c:ores）、maxBlocks 1..${MINING_LIMITS.maxBlocks}、整数半径${COMPANION_MINING_RANGE.min}..${COMPANION_MINING_RANGE.max}和durationMs ${MINING_LIMITS.durationMs.min}..${MINING_LIMITS.durationMs.max}；跟随距离不能超过半径`);
     }
     if (request.pickup) {
       if (!['companion-pickup', 'pickup-item'].every(cap => this.body.hello.capabilities.includes(cap))) throw new BodyError('UNSUPPORTED', '游戏端没有持续拾取玩家边界保护能力');
       const radius = request.pickup.radius ?? 3;
-      if (!Array.isArray(request.pickup.items) || request.pickup.items.length < 1 || request.pickup.items.length > 8 || request.pickup.items.some(item => !/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/.test(item)) || !Number.isFinite(radius) || radius < 1.5 || radius > 4 || distance > radius) throw new BodyError('INVALID_ARGUMENT', '拾取需要1..8个明确物品ID、1.5..4半径，跟随距离不能大于拾取半径');
+      if (!Array.isArray(request.pickup.items) || request.pickup.items.length < 1 || request.pickup.items.length > 8 || request.pickup.items.some(item => !/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/.test(item)) || !Number.isFinite(radius) || radius < COMPANION_PICKUP_RANGE.min || radius > COMPANION_PICKUP_RANGE.max || distance > radius) throw new BodyError('INVALID_ARGUMENT', `拾取需要1..8个明确物品ID、${COMPANION_PICKUP_RANGE.min}..${COMPANION_PICKUP_RANGE.max}半径，跟随距离不能大于拾取半径`);
     }
   }
   /** A new follow: its pickup or mining (or none), counted from the receipts after this observation. */
@@ -104,16 +108,18 @@ export class CompanionErrands {
   }
   /**
    * One look of the monitor while the follow runs: take in the receipts, end a spent mining budget, and start a child when
-   * the body stands beside the player (standing) and something is there to mine or pick up. Throws what blocks the companion.
+   * something is there. Picking up waits until the body stands beside the player (standing); mining looks while it goes with
+   * them too (going: following or beside them, not giving way nor after one out of reach), so the player need not stop for an ore.
+   * Throws what blocks the companion.
    */
-  tick(state: Observation, epoch: number, standing: boolean): void {
+  tick(state: Observation, epoch: number, standing: boolean, going: boolean = standing): void {
     const intent = this.host.intent()!;
     if (this.pickup) this.ingestPickup(state);
     if (this.mining) this.ingestMining(state);
     if (this.mining?.state.active) {
       if (this.now() >= this.mining.state.deadline) this.disableMining('DURATION_BUDGET');
       else if (this.mining.state.attemptedBlocks >= this.mining.state.maxBlocks) this.disableMining('BLOCK_BUDGET');
-      else if (standing && this.now() - this.mining.lastScanAt >= 2000) {
+      else if (going && this.now() - this.mining.lastScanAt >= 2000) {
         this.host.identity(state, intent.player!, intent.expectedEntityId);
         const target = state.entities.find(entity => entity.id === intent.expectedEntityId)!;
         if (Math.hypot(state.position.x - target.position.x, state.position.y - target.position.y, state.position.z - target.position.z) <= this.mining.state.radius) {
@@ -167,8 +173,8 @@ export class CompanionErrands {
   private initMining(state: Observation, options?: MiningOptions): void {
     if (!options) { this.mining = undefined; return; }
     if (state.pickupCursor === undefined || state.pickupOldestCursor === undefined || !state.pickupReceipts || !state.groundItems) throw new BodyError('UNSUPPORTED', '持续陪挖缺少原生收据／地面观察');
-    const durationMs = options.durationMs ?? 300000;
-    this.mining = { state: { blockIds: [...options.blockIds], maxBlocks: options.maxBlocks, radius: options.radius ?? 4, durationMs, deadline: this.now() + durationMs, attemptedBlocks: 0, remainingBlocks: options.maxBlocks, minedBlocks: 0, active: true, countStatus: 'confirmed', dropAttribution: 'unconfirmed', newPickedByItem: [] }, lastScanAt: -Infinity, attempted: new Set(), cursor: state.pickupCursor, variants: [], childMined: 0 };
+    const durationMs = options.durationMs ?? MINING_LIMITS.durationMs.max, maxBlocks = options.maxBlocks ?? MINING_LIMITS.maxBlocks;
+    this.mining = { state: { blockIds: [...options.blockIds], maxBlocks, radius: options.radius ?? COMPANION_MINING_RANGE.max, durationMs, deadline: this.now() + durationMs, attemptedBlocks: 0, remainingBlocks: maxBlocks, minedBlocks: 0, active: true, countStatus: 'confirmed', dropAttribution: 'unconfirmed', newPickedByItem: [] }, lastScanAt: -Infinity, attempted: new Set(), cursor: state.pickupCursor, variants: [], childMined: 0 };
   }
   private ingestMining(state: Observation): void {
     const mining = this.mining; if (!mining) return;
@@ -223,27 +229,26 @@ export class CompanionErrands {
   }
   private async mineBlock(epoch: number, mining: MiningTracker, child: symbol, context: Context): Promise<void> {
     const host = this.host;
-    let unknownChild = false;
+    let unknownChild = false, failed: string | undefined;
     const check = () => { host.check(epoch); if (this.mining !== mining || mining.child !== child) throw new BodyError('CANCELLED', '旧陪挖子任务已被取代'); if (this.now() >= mining.state.deadline) throw new BodyError('MINING_DURATION', '陪挖总时间已到，未开始后续步骤'); };
     try {
       check();
       const state = await host.observe(epoch, context); check();
       const intent = host.intent()!;
       host.identity(state, intent.player!, intent.expectedEntityId);
-      const target = state.entities.find(entity => entity.id === intent.expectedEntityId)!;
       const companionMiningGuard = { player: intent.player!, expectedEntityId: intent.expectedEntityId!, maxDistance: mining.state.radius };
-      host.show('waiting', 'mining');
       const scan = await this.body.nearbyResources!({ blockIds: mining.state.blockIds, radius: mining.state.radius, maxResults: 32, companionMiningGuard }); check();
       if (!isDeepStrictEqual(contextOf(scan), context)) throw new BodyError('WORLD_CHANGED', '陪挖扫描不属于开始时的权威代次');
       const fresh = await host.observe(epoch, context); check(); this.ingestMining(fresh);
       host.identity(fresh, companionMiningGuard.player, companionMiningGuard.expectedEntityId);
+      // The player may walk on meanwhile: the ore is chosen from where they are now; the server holds the walk and the dig to their live radius.
       const latestPlayer = fresh.entities.find(entity => entity.id === companionMiningGuard.expectedEntityId)!;
-      if (!isDeepStrictEqual(latestPlayer.position, target.position)) throw new BodyError('COMPANION_OUT_OF_RANGE', '陪挖扫描期间玩家已移动；此轮未选定矿石');
       const positionKey = (point: { x: number; y: number; z: number }) => `${point.x},${point.y},${point.z}`;
       const candidate = scan.candidates.find(candidate => candidate.kind === 'ore' && candidate.visible && candidate.targetToken && !mining.attempted.has(positionKey(candidate.position))
         && Math.hypot(candidate.position.x + 0.5 - latestPlayer.position.x, candidate.position.y + 0.5 - latestPlayer.position.y, candidate.position.z + 0.5 - latestPlayer.position.z) >= 2);
       if (!candidate) { await this.returnFromMining(epoch, mining, child, false); return; }
       mining.attempted.add(positionKey(candidate.position)); mining.state.attemptedBlocks++;
+      host.show('waiting', 'mining');
       const owner: BorrowedMining = { kind: 'mining', taskToken: this.lease!.token, context, center: scan.center, companionGuard: companionMiningGuard, candidate: structuredClone(candidate), deadline: mining.state.deadline, check,
         onProgress: operation => {
           if (epoch !== host.epoch() || this.mining !== mining || mining.child !== child) return;
@@ -255,14 +260,23 @@ export class CompanionErrands {
       if (result.status === 'unknown') { unknownChild = true; throw new BodyError('UNKNOWN', result.summary); }
       check();
       const latest = await host.observe(epoch); check(); this.ingestMining(latest);
+      if (result.status === 'failed') failed = (result.result as { code?: string } | undefined)?.code ?? 'STEP_FAILED';
       if (result.status !== 'succeeded') throw new BodyError((result.result as { code?: string } | undefined)?.code ?? (result.status === 'cancelled' ? 'CANCELLED' : 'STEP_FAILED'), result.summary);
       await this.returnFromMining(epoch, mining, child, false);
     } catch (error) {
       if (epoch !== host.epoch() || this.mining !== mining || mining.child !== child) return;
       if (unknownChild) { mining.state.lastCode = 'UNKNOWN'; await host.block(new BodyError('UNKNOWN', (error as Error).message), epoch); return; }
       const code = error instanceof BodyError ? error.code : 'INVALID_RESPONSE'; mining.state.lastCode = code;
-      if (code === 'MINING_DURATION' || code === 'TASK_TIMEOUT' && this.now() >= mining.state.deadline || code === 'COMPANION_OUT_OF_RANGE') {
-        try { await this.returnFromMining(epoch, mining, child); } catch (stopError) { if (epoch === host.epoch()) await host.block(stopError as Error, epoch); }
+      // Out of room: no ore is worth starting; the follow goes on and the model hears why the mining ended.
+      if (failed === 'INVENTORY_FULL') {
+        try { await this.returnFromMining(epoch, mining, child, false); this.disableMining('INVENTORY_FULL'); } catch (stopError) { if (epoch === host.epoch()) await host.block(stopError as Error, epoch); }
+        return;
+      }
+      // A definite failure of this one ore (no way there, out of reach or sight, the player too far meanwhile, no fitting pickaxe...) leaves
+      // nothing unsure: that ore is left (it stays tried) and the follow goes on. Only the player gone ends it, as a companion failure.
+      if (code === 'MINING_DURATION' || code === 'TASK_TIMEOUT' && this.now() >= mining.state.deadline || code === 'COMPANION_OUT_OF_RANGE' || failed && !followEnded.has(failed)) {
+        // A child that ended in a definite failure left nothing running; anything else is stopped first.
+        try { await this.returnFromMining(epoch, mining, child, !failed); } catch (stopError) { if (epoch === host.epoch()) await host.block(stopError as Error, epoch); }
       } else await host.block(error as Error, epoch);
     }
   }

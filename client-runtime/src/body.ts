@@ -209,6 +209,12 @@ export const TRAVEL_MAX_BLOCKS = 2000;
 export const TRAVEL_TIMEOUT_MS = { min: 5000, max: 900000 } as const;
 /** pickup-item timeoutMs limits (the server-body.ts schema); the death recovery asks within them. */
 export const PICKUP_TIMEOUT_MS = { min: 500, max: 30000 } as const;
+/**
+ * companionMiningGuard.maxDistance (CompanionMiningGuard MIN/MAX_DISTANCE): an ore at most as far from the player as protection goes
+ * for a fight (GuardDuty.ENGAGE_RANGE), the same short detour; a plain companion pickup stays within 4 (CompanionPickupGuard).
+ */
+export const COMPANION_MINING_RANGE = { min: 3, max: 16 } as const;
+export const COMPANION_PICKUP_RANGE = { min: 1.5, max: 4 } as const;
 /** assess-armour: per candidate stack in the main inventory, whether wearing it improves on what is worn (decided server-side). */
 export interface ArmourCandidate { slot: number; item: string; count: number; part: 'head' | 'chest' | 'legs' | 'feet' | 'offhand'; verdict: 'better' | 'not-better' | 'blocked'; reason: string; wearing?: string }
 export interface ArmourAssessment { candidates: ArmourCandidate[] }

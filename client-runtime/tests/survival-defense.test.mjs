@@ -181,6 +181,19 @@ test('a refused defense keeps automatic defense on and reports the same refusal 
   assert.equal(f.events.since(0).filter(e => /REFUSED/.test(e.text)).length, notes);
 });
 
+test('the hand taken right after selecting (the guard\'s fight) is a definite refusal: defense stays on and the next tick defends', async () => {
+  // The trial death: a stone sword selected, then the read showed another slot; this used to be unknown and switched automatic defense off.
+  const f = fixture(); f.state.selectedSlot = 1;
+  let taken = false;
+  f.body.afterAct = op => { if (op.name === 'select-slot' && !taken) { taken = true; f.state.selectedSlot = 2; } };
+  await f.reflexes.tick(); await until(() => f.reflexes.read().phase === 'idle');
+  assert.equal(f.reflexes.read().lastDefense.operation.status, 'failed'); assert.equal(f.reflexes.read().lastDefense.operation.result.code, 'ITEM_CHANGED');
+  assert.equal(f.reflexes.read().armed, true, 'automatic defense is not switched off'); assert.equal(f.tasks.read().state, 'idle'); assert.equal(f.owner(), undefined);
+  assert.equal(f.calls.filter(c => c.name === 'defend-entity').length, 0, 'nothing swung with an unexpected hand');
+  await wait(550); await f.reflexes.tick(); await until(() => f.reflexes.read().phase === 'idle');
+  assert.equal(f.calls.filter(c => c.name === 'defend-entity').length, 1, 'the same threat is defended on the next tick');
+});
+
 test('unknown native defense side effects preserve ownership and block all next writers', async () => {
   const f = fixture(); f.body.afterAct = op => { op.result.sideEffects = 'unknown'; };
   const op = await f.tasks.defend({ policy }); assert.equal(op.status, 'unknown'); assert.equal(f.tasks.read().state, 'blocked'); assert.notEqual(f.owner(), undefined);

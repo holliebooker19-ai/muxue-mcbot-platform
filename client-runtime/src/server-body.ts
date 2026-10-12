@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
 import { applyPluginPolicy, pluginRefusal, type PluginPolicy } from './plugins.js';
-import { BodyError, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type PostureRequest, type PostureState, type StopOptions, type InterruptReason, type InterruptWindow, TRAVEL_TIMEOUT_MS, PICKUP_TIMEOUT_MS } from './body.js';
+import { BodyError, COMPANION_MINING_RANGE, COMPANION_PICKUP_RANGE, type Body, type BodyHello, type Position, type Observation, type ActionName, type ActionArguments, type Operation, type NearbyBlocks, type NearbyResources, type ResourceScanOptions, type SurvivalState, type ToolAssessment, type ToolAssessmentOptions, type ArmourAssessment, type MachineStatus, type GuardDutyRequest, type GuardDutyState, type PostureRequest, type PostureState, type StopOptions, type InterruptReason, type InterruptWindow, TRAVEL_TIMEOUT_MS, PICKUP_TIMEOUT_MS } from './body.js';
 import { serverDetail } from './claim-failure.js';
 
 const identifier = z.string().min(1);
@@ -470,7 +470,7 @@ export class ServerBody implements Body {
     if (!this.hello.capabilities.includes('nearby-resources')) throw new BodyError('UNSUPPORTED', '身体不支持有限资源观察');
     if (options.companionMiningGuard && !this.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '游戏端未声明持续陪挖的玩家保护能力');
     const parsed = z.object({ blockIds: z.array(z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/)).min(1).max(8), radius: z.number().int().min(1).max(16), maxResults: z.number().int().min(1).max(64), center: position.optional(), wholeTree: z.boolean().optional(), trees: z.number().int().min(1).max(8).optional(),
-      companionMiningGuard: z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), maxDistance: z.number().int().min(3).max(4) }).strict().optional(),
+      companionMiningGuard: z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), maxDistance: z.number().int().min(COMPANION_MINING_RANGE.min).max(COMPANION_MINING_RANGE.max) }).strict().optional(),
     }).strict().refine(value => !value.companionMiningGuard || value.center === undefined && value.radius <= value.companionMiningGuard.maxDistance).safeParse(options);
     if (!parsed.success) throw new BodyError('INVALID_ARGUMENT', '资源扫描范围或陪挖玩家守卫无效；陪挖中心必须由服务端确定');
     const args = parsed.data;
@@ -544,7 +544,9 @@ export class ServerBody implements Body {
     const guardedBlock = { x: z.number().int(), y: z.number().int(), z: z.number().int(), expectedBlock: identifier, expectedProperties: components };
     const schemas: Partial<Record<ActionName, z.ZodTypeAny>> = {
       'approach-resource': z.object({ targetToken: z.string().uuid(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
-      'pickup-item': z.object({ entityId: z.string().uuid(), expectedItem: identifier, expectedCount: z.number().int().positive(), expectedComponents: components, expectedMaxStackSize: maxStackSize, companionGuard: z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), maxDistance: z.number().finite().min(1.5).max(4) }).optional(), resourceTargetToken: z.string().uuid().optional(), timeoutMs: z.number().int().min(PICKUP_TIMEOUT_MS.min).max(PICKUP_TIMEOUT_MS.max).optional() }),
+      'pickup-item': z.object({ entityId: z.string().uuid(), expectedItem: identifier, expectedCount: z.number().int().positive(), expectedComponents: components, expectedMaxStackSize: maxStackSize, companionGuard: z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid(), maxDistance: z.number().finite().min(COMPANION_PICKUP_RANGE.min).max(COMPANION_MINING_RANGE.max) }).optional(), resourceTargetToken: z.string().uuid().optional(), timeoutMs: z.number().int().min(PICKUP_TIMEOUT_MS.min).max(PICKUP_TIMEOUT_MS.max).optional() })
+        // Only a mined ore's drop (resourceTargetToken) is picked up past the plain companion pickup range.
+        .refine(args => !args.companionGuard || args.resourceTargetToken !== undefined || args.companionGuard.maxDistance <= COMPANION_PICKUP_RANGE.max),
       'approach-container': z.object({ targetToken: z.string().uuid(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
       'approach-player': z.object({ player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/), expectedEntityId: z.string().uuid().optional(), distance: z.number().finite().min(1).max(1.5).optional(), timeoutMs: z.number().int().min(500).max(120000).optional() }),
       'dig-block': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }), 'open-container': z.object({ ...guardedBlock, targetToken: z.string().uuid().optional() }),

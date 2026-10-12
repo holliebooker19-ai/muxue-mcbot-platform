@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { BodyError, PICKUP_TIMEOUT_MS, type Body, type Observation, type Operation, type ItemValue, type Position, type NearbyResources, type ActionName, type ActionArguments, type GroundItem, type CompanionGuard } from './body.js';
+import { BodyError, COMPANION_MINING_RANGE, COMPANION_PICKUP_RANGE, PICKUP_TIMEOUT_MS, type Body, type Observation, type Operation, type ItemValue, type Position, type NearbyResources, type ActionName, type ActionArguments, type GroundItem, type CompanionGuard } from './body.js';
 import type { EventJournal } from './events.js';
 import { selectFood, type SurvivalTasks } from './survival-tasks.js';
 import { pillarBlockCount, pillarDown, pillarUp, type PillarBlock, type PillarHost, type PillarPurpose } from './pillar.js';
@@ -125,9 +125,11 @@ export class GatherTasks {
     task.deadline += task.grace?.take() ?? 0;
     if (this.now() >= task.deadline) throw new BodyError('TASK_TIMEOUT', '任务执行预算已到；未追加数量或候选');
   }
-  private validate(request: Request, fractionalRadius = false): void {
+  /** The radius: a companion child keeps its own range (the pickup's beside the player, the mining's up to the protection range), otherwise 1..6 blocks. */
+  private validate(request: Request, borrowed?: Borrowed): void {
+    const fractionalRadius = !!borrowed && !miningOwner(borrowed), range = miningOwner(borrowed) ? COMPANION_MINING_RANGE : fractionalRadius ? COMPANION_PICKUP_RANGE : { min: 1, max: 6 };
     if ((request.count === undefined) === (request.stacks === undefined) || !Number.isInteger(request.count ?? request.stacks) || (request.count ?? request.stacks)! < 1 || (request.count ?? request.stacks)! > MAX_GOAL) throw new BodyError('INVALID_ARGUMENT', '必须明确count或stacks二选一，1..256整数；省略数量由Agent先选定');
-    if (!/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/.test(request.item) || (request.maxSteps !== undefined && (!Number.isInteger(request.maxSteps) || request.maxSteps < 1 || request.maxSteps > 256)) || (request.timeoutMs !== undefined && (!Number.isInteger(request.timeoutMs) || request.timeoutMs < 1000 || request.timeoutMs > 120000)) || (request.radius !== undefined && ((!fractionalRadius && !Number.isInteger(request.radius)) || !Number.isFinite(request.radius) || request.radius < (fractionalRadius ? 1.5 : 1) || request.radius > (fractionalRadius ? 4 : 6)))) throw new BodyError('INVALID_ARGUMENT', '物品ID、范围或独立执行预算无效');
+    if (!/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/.test(request.item) || (request.maxSteps !== undefined && (!Number.isInteger(request.maxSteps) || request.maxSteps < 1 || request.maxSteps > 256)) || (request.timeoutMs !== undefined && (!Number.isInteger(request.timeoutMs) || request.timeoutMs < 1000 || request.timeoutMs > 120000)) || (request.radius !== undefined && ((!fractionalRadius && !Number.isInteger(request.radius)) || !Number.isFinite(request.radius) || request.radius < range.min || request.radius > range.max))) throw new BodyError('INVALID_ARGUMENT', '物品ID、范围或独立执行预算无效');
   }
   private bind(task: Active, stack: ItemValue): void {
     if (stack.components === undefined || stack.maxStackSize === undefined || !Number.isSafeInteger(stack.maxStackSize) || stack.maxStackSize < 1) throw new BodyError('UNKNOWN_MAX_STACK', '实际物品缺少完整组件或有效堆叠上限，未猜测64');
@@ -235,7 +237,7 @@ export class GatherTasks {
     return this.startOwned(name, { ...request, count: logs.length * Math.max(1, Math.min(...logs.map(log => dropOf(log, request.item)!.least))) });
   }
   private async startOwned(name: Name, request: Request, borrowed?: Borrowed): Promise<Operation> {
-    this.validate(request, !!borrowed); this.assertIdle();
+    this.validate(request, borrowed); this.assertIdle();
     if (!this.body.acquireTask || !this.body.releaseTask) throw new BodyError('UNSUPPORTED', '有限任务需要共享身体写锁');
     borrowed?.check();
     const lease = this.scheduler.start(name, { ...(borrowed ? { lender: borrowed } : {}), retired: () => this.retired(lease) }), id = lease.id;
@@ -1029,6 +1031,8 @@ export class GatherTasks {
       await this.byproducts(task);
       await this.observe(task);
       if (miningOwner(task.borrowed)) {
+        // No walkable way to the one ore: nothing was dug, a definite failure (the companion leaves that ore and follows on).
+        if (task.progress.minedBlocks === 0 && task.progress.unreachable) throw new BodyError('NO_PATH', '走不到这块矿，没挖');
         if (task.progress.minedBlocks !== 1) throw new BodyError('UNKNOWN', '单块原生破坏未完整确认，未自动重试');
         this.finish(task, 'succeeded', '单块原生破坏已确认；新拾取按独立收据记录，掉落归属未确认'); return;
       }

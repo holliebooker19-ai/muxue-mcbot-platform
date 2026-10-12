@@ -321,9 +321,11 @@ export class SurvivalTasks {
         ...(source.maxStackSize !== undefined ? { expectedMaxStackSize: source.maxStackSize } : {}) });
       task.progress.prepared = true; // retain the native selection receipt before a potentially failing read
       const selected = await this.state(task);
-      try {
-        if (selected.selectedSlot !== target || !isDeepStrictEqual(this.value(this.stack(selected, target)), this.value(source))) throw new BodyError('UNKNOWN', '选择热栏后实际物品未完整确认');
-      } catch (error) { throw new BodyError('UNKNOWN', (error as Error).message); }
+      let held: ItemValue;
+      try { held = this.value(this.stack(selected, target)); } catch (error) { throw new BodyError('UNKNOWN', `选择热栏后实际物品未完整确认：${(error as Error).message}`); }
+      // The read is complete, so what is in hand now is known; only it is not what was selected (the guard's fight took the hand or wore the
+      // weapon in between). Nothing was used: a definite refusal that leaves the reflexes armed, not an unknown that switches them off.
+      if (selected.selectedSlot !== target || !isDeepStrictEqual(held, this.value(source))) throw new BodyError('ITEM_CHANGED', '选好热栏后手里不是要的那件（多半刚被别的动作换了手或磨损了），这次没用它；手上现在是什么已经读清了');
     }
     task.progress.prepared = true; return target;
   }

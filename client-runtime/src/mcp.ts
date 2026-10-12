@@ -1,11 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z, type ZodRawShape } from 'zod';
-import { BodyError, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
+import { BodyError, COMPANION_MINING_RANGE, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
 import { EventJournal, type GameEvent } from './events.js';
 import type { PlayerStop } from './player-stop.js';
 import { ContainerTasks } from './tasks.js';
 import { CompanionMode, FOLLOW_DISTANCE, hasCompanionMode, type CompanionRequest } from './companion-mode.js';
+import { MINING_LIMITS } from './companion-errands.js';
 import { GatherTasks } from './gather-tasks.js';
 import { SurvivalTasks } from './survival-tasks.js';
 import { SurvivalReflexes, MAX_RESUMES } from './survival-reflexes.js';
@@ -119,7 +120,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       try {
         if (name === 'companion-mode' && args.mining) {
           if (!body.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '身体未声明持续陪挖保护，未降级为普通跟随');
-          if (args.action !== 'follow' || args.pickup || (args.distance ?? 2.5) > args.mining.radius || new Set(args.mining.blockIds).size !== args.mining.blockIds.length) throw new BodyError('INVALID_ARGUMENT', '陪挖仅用于跟随，不能同时开启独立拾取，跟随距离须在陪挖半径内，矿石列表不能重复');
+          if (args.action !== 'follow' || args.pickup || new Set(args.mining.blockIds).size !== args.mining.blockIds.length) throw new BodyError('INVALID_ARGUMENT', '陪挖仅用于跟随，不能同时开启独立拾取，矿石列表不能重复');
         }
         // go-to while a meet walk is all that runs: the model looks somewhere else now. That walk stops (following and protection stay) and this one goes.
         if (name === 'go-to' && meetWatch?.walking() && scheduler.current()?.id === meetWatch.walking()) await (reflexes ? reflexes.stop({ keepCompanion: true }) : stopCurrent({}));
@@ -195,7 +196,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   if (companion) {
     const caps = body.hello.capabilities;
     // Only what the model needs to choose; the guard's ranges and the mining guards answer in events and errors (docs/tool_consolidation_plan.md).
-    register('companion-mode', `follow: go with a named visible player; wait: stay in place. A standing state, not a task. Other tools (go-to, gather, build, eat, sleep...) make it step aside by themselves (get-status companionMode suspendedFor) and it comes back after them, so never pause/resume around work; if the player is out of sight then, it waits for them (away). Beside the player it shows waiting. pause: deliberate stop until resume. stop: ends the follow/wait and protection; the work running goes on. sit ends it too; after get-up, follow again. stop-action ends follow/wait and protection.${caps.includes('guard-duty-fenced') ? ' A follow protects the followed player by itself (see guard); action guard turns protection on/off or changes its options, also without a follow if you give player.' : ''}${caps.includes('companion-pickup') ? ' pickup: also pick up only these drops.' : ''}${caps.includes('companion-mining') ? ' mining (not with pickup): ores the player allowed and maxBlocks; visible ones near the way are mined and picked up while following (other tools get BUSY meanwhile), until maxBlocks or durationMs, then plain following. Report mined blocks and picked items separately.' : ' mining is not available on this body.'} Only follow takes player/distance/wander/pickup/mining. UNSUPPORTED for follow/wait: the core mod needs updating.`, {
+    register('companion-mode', `follow: go with a named visible player; wait: stay in place. A standing state, not a task. Other tools (go-to, gather, build, eat, sleep...) make it step aside by themselves (get-status companionMode suspendedFor) and it comes back after them, so never pause/resume around work; if the player is out of sight then, it waits for them (away). Beside the player it shows waiting. pause: deliberate stop until resume. stop: ends the follow/wait and protection; the work running goes on. sit ends it too; after get-up, follow again. stop-action ends follow/wait and protection.${caps.includes('guard-duty-fenced') ? ' A follow protects the followed player by itself (see guard); action guard turns protection on/off or changes its options, also without a follow if you give player.' : ''}${caps.includes('companion-pickup') ? ' pickup: also pick up only these drops.' : ''}${caps.includes('companion-mining') ? ` mining (not with pickup): ores the player allowed; ores in sight within ${COMPANION_MINING_RANGE.max} blocks of the player are mined and their drops picked up while following, without the player stopping; ones it cannot reach are skipped (other tools get BUSY meanwhile). It ends by itself after a while (then plain following); its limits are the program's, not something to tell the player. Report mined blocks and picked items separately.` : ' mining is not available on this body.'} Only follow takes player/distance/wander/pickup/mining. UNSUPPORTED for follow/wait: the core mod needs updating.`, {
       action: z.enum((body.hello.capabilities.includes('guard-duty-fenced') ? ['follow', 'wait', 'pause', 'resume', 'stop', 'guard'] : ['follow', 'wait', 'pause', 'resume', 'stop']) as [string, ...string[]]), player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(),
       distance: z.number().finite().min(FOLLOW_DISTANCE.min).max(FOLLOW_DISTANCE.max).optional(), say: z.string().min(1).max(256).optional(),
       wander: z.boolean().optional().describe('Default true: stroll a little near a player who stands still. Off with pickup or mining.'),
@@ -204,8 +205,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       ...(caps.includes('companion-pickup') ? { pickup: z.object({ items: z.array(registryId).min(1).max(8), radius: z.number().finite().min(1.5).max(4).default(3) }).optional() } : {}),
       mining: z.object({
         blockIds: z.array(resourceSelector).min(1).max(8).describe('Ores: e.g. ["#c:ores"] for all, ["#c:ores/iron"]; non-ores are skipped.'),
-        maxBlocks: z.number().int().min(1).max(32).describe('Most ore blocks to try (not an item count); tell the player.'),
-        radius: z.number().int().min(3).max(4).default(4), durationMs: z.number().int().min(10000).max(600000).default(300000),
+        maxBlocks: z.number().int().min(1).max(MINING_LIMITS.maxBlocks).optional().describe('Only when the player names how many ore blocks; otherwise leave it out.'),
+        durationMs: z.number().int().min(MINING_LIMITS.durationMs.min).max(MINING_LIMITS.durationMs.max).optional().describe('Only when the player names how long; otherwise leave it out.'),
       }).strict().optional(),
     }, async args => {
       if (args.mining && !body.hello.capabilities.includes('companion-mining')) throw new BodyError('UNSUPPORTED', '身体未声明持续陪挖保护，未降级为普通跟随');

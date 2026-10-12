@@ -21,7 +21,7 @@ import { MachineBook, MachineWatch } from './machines.js';
 import { MeetWatch } from './meet-watch.js';
 import { BlueprintShelf } from './blueprints.js';
 import { writePosture, takeHeldPosture, type HeldPosture } from './posture.js';
-import { recoverAfterDeath } from './death-recovery.js';
+import { recoverAfterDeath, DropWatch } from './death-recovery.js';
 import { logClaimFailure } from './claim-failure.js';
 import { useGiftGear } from './gift-gear.js';
 import { loadPluginPolicy } from './plugins.js';
@@ -168,7 +168,12 @@ async function main(): Promise<void> {
     await server.connect(transport);
     monitor.start();
     // After a death or a restart: fetch what was dropped when it is worth it, then set the posture the player had asked for.
-    if (companion && values.hosted && body.hello.capabilities.includes('server-posture')) void recoverAfterDeath({ body, companion, events }, held, body.hello.lastDeath).catch(error => process.stderr.write(`死后恢复出错：${(error as Error).message}\n`));
+    // What is still lying there afterwards is picked up whenever the body sees it, until the items' time is up (DropWatch).
+    if (companion && values.hosted && body.hello.capabilities.includes('server-posture')) {
+      const watch = new DropWatch({ body, companion, events });
+      companion.onLook = state => watch.look(state);
+      void recoverAfterDeath({ body, companion, events, watch }, held, body.hello.lastDeath).catch(error => process.stderr.write(`死后恢复出错：${(error as Error).message}\n`));
+    }
   } catch (error) {
     // Taking the body failed (body never connected): the hosting person sees why in the WebUI log, not only on stderr.
     if (values.hosted && !body) logClaimFailure(path.join(runtimeDir, `activity-${values.username}.jsonl`), error as Error);

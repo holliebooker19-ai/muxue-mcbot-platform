@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { recoverAfterDeath } from '../dist/death-recovery.js';
+import { recoverAfterDeath, DropWatch } from '../dist/death-recovery.js';
+import { MAX_RESUMES } from '../dist/survival-reflexes.js';
 import { BodyError } from '../dist/body.js';
 import { companionFixture } from './companion-fixture.mjs';
 
@@ -89,15 +90,25 @@ test('too far to walk (past the travel limit) is told, not attempted', async t =
   assert.equal(f.acts().includes('travel-to'), false); assert.match(f.note(), /太远/);
 });
 
-test('monsters at the start keep it home; only hostile, defence-eligible ones count', async t => {
+test('monsters at the start make it wait: once they are gone it goes; only hostile, defence-eligible ones count', async t => {
   const f = await setup(t);
-  f.monsters([f.zombie()]);
+  let looks = 0;
+  f.monsters(() => (++looks <= 2 ? [f.zombie()] : []));
   await f.recover(held(), f.death());
-  assert.equal(f.acts().includes('travel-to'), false); assert.match(f.note(), /身边有怪/); assert.equal(f.mode.snapshot().state, 'following');
+  assert.deepEqual(f.acts().filter(name => ['travel-to', 'pickup-item'].includes(name)), ['travel-to', 'pickup-item', 'pickup-item'], 'went once it was calm');
+  assert.match(f.note(), /捡回：6×minecraft:iron_ingot/); assert.equal(f.mode.snapshot().state, 'following');
   const calm = await setup(t);
   calm.monsters([calm.zombie({ defenseEligible: false }), calm.zombie({ classification: 'neutral' }), calm.zombie({ alive: false })]);
   await calm.recover(held(), calm.death());
   assert.ok(calm.acts().includes('travel-to'), 'not eligible, neutral or dead: not a reason to stay');
+});
+
+test('monsters that stay until the items would be gone keep it home, and the model is told', async t => {
+  const f = await setup(t);
+  f.monsters([f.zombie()]);
+  let clock = NOW;
+  await recoverAfterDeath({ body: f.body, companion: f.mode, events: f.events, now: () => (clock += 20_000), sleep }, held(), f.death());
+  assert.equal(f.acts().includes('travel-to'), false); assert.match(f.note(), /身边有怪/); assert.equal(f.mode.snapshot().state, 'following');
 });
 
 test('monsters met at the place stop the picking up there; what was not picked up is told', async t => {
@@ -172,15 +183,71 @@ test('a stop on the way (stop-action, companion-mode stop) ends it: nothing is s
   f.lockFree();
 });
 
-test('a plain stop (a reflex) while on the way does not end the player\'s wish: the walk is told as not finished and the posture is set', async t => {
+test('a plain stop (a reflex\'s fight) on the way does not end the player\'s wish: once calm it walks again and picks up, then the posture is set', async t => {
   const f = await setup(t);
   const act = f.mock.handlers.act;
-  f.mock.handlers.act = (params, ctx) => { const op = act(params, ctx); if (params.name !== 'travel-to') return op; const running = { ...op, status: 'running' }; ctx.operations.set(op.operationId, running); return running; };
+  let walks = 0;
+  f.mock.handlers.act = (params, ctx) => { const op = act(params, ctx); if (params.name !== 'travel-to' || ++walks > 1) return op; const running = { ...op, status: 'running' }; ctx.operations.set(op.operationId, running); return running; };
   const recovery = f.recover(held(), f.death());
   for (let i = 0; i < 400 && !f.acts().includes('travel-to'); i++) await sleep();
   await f.mode.stop('reflex');
   await recovery;
-  assert.match(f.note(), /被打断|没走到/); assert.equal(f.mode.snapshot().state, 'following');
+  assert.equal(walks, 2, 'went again'); assert.equal(f.ground.length, 0);
+  assert.match(f.note(), /捡回：6×minecraft:iron_ingot/); assert.equal(f.mode.snapshot().state, 'following');
+  f.lockFree();
+});
+
+test('a walk whose reply came after the stop (a cancelled walk, not an error) is the same interruption: it goes again', async t => {
+  const f = await setup(t);
+  const act = f.mock.handlers.act;
+  let walks = 0;
+  f.mock.handlers.act = (params, ctx) => { const op = act(params, ctx); return params.name === 'travel-to' && ++walks === 1 ? { ...op, status: 'cancelled', summary: '停止前动作的迟到回执已丢弃' } : op; };
+  await f.recover(held(), f.death());
+  assert.equal(walks, 2, 'went again'); assert.match(f.note(), /捡回：6×minecraft:iron_ingot/); assert.equal(f.mode.snapshot().state, 'following');
+});
+
+test('cut short more often than a paused task may carry on: told as interrupted, the posture is set, and the watch keeps the items', async t => {
+  const f = await setup(t);
+  const act = f.mock.handlers.act;
+  f.mock.handlers.act = (params, ctx) => { const op = act(params, ctx); if (params.name !== 'travel-to') return op; const running = { ...op, status: 'running' }; ctx.operations.set(op.operationId, running); return running; };
+  const armed = [];
+  const recovery = recoverAfterDeath({ body: f.body, companion: f.mode, events: f.events, now: () => NOW, sleep, watch: { arm: (...args) => armed.push(args) } }, held(), f.death());
+  for (let walk = 1; walk <= MAX_RESUMES + 1; walk++) {
+    // Under a loaded run the next walk may take a while to start: wait for it rather than stop a walk that is not there yet.
+    for (let i = 0; i < 4000 && f.acts().filter(name => name === 'travel-to').length < walk; i++) await sleep();
+    await f.mode.stop('reflex');
+  }
+  await recovery;
+  assert.equal(f.acts().filter(name => name === 'travel-to').length, MAX_RESUMES + 1);
+  assert.match(f.note(), new RegExp(`被打断了（又去了 ${MAX_RESUMES} 次）`)); assert.equal(f.mode.snapshot().state, 'following');
+  assert.equal(armed.length, 1, 'what is left is watched'); assert.equal(armed[0][1], NOW + 4 * MINUTE);
+  f.lockFree();
+});
+
+test('the watch picks up the items of the death once the body sees them, on the companion\'s lock, and says so once', async t => {
+  const f = await setup(t);
+  const watch = new DropWatch({ body: f.body, companion: f.mode, events: f.events, now: () => NOW, sleep });
+  assert.equal(watch.look(await f.body.observe()), false, 'nothing armed, nothing done');
+  watch.arm(OVERWORLD, NOW + 4 * MINUTE);
+  assert.equal(watch.look(await f.body.observe()), true);
+  for (let i = 0; i < 400 && f.ground.length; i++) await sleep();
+  for (let i = 0; i < 400 && !/死后掉落/.test(f.note()); i++) await sleep();
+  assert.equal(f.ground.length, 0); assert.equal(f.acts().includes('travel-to'), false, 'no walk: only what it sees');
+  assert.match(f.note(), /【死后掉落】.*6×minecraft:iron_ingot/);
+  assert.equal(watch.look(await f.body.observe()), false, 'all picked up: the watch is done');
+  f.lockFree();
+});
+
+test('the watch leaves the items while the model has the body, and after their time', async t => {
+  const f = await setup(t);
+  const watch = new DropWatch({ body: f.body, companion: f.mode, events: f.events, now: () => NOW, sleep });
+  watch.arm(OVERWORLD, NOW + 4 * MINUTE);
+  f.body.isBusy = () => true;
+  assert.equal(watch.look(await f.body.observe()), false); assert.equal(f.acts().includes('pickup-item'), false);
+  f.body.isBusy = () => false;
+  const late = new DropWatch({ body: f.body, companion: f.mode, events: f.events, now: () => NOW, sleep });
+  late.arm(OVERWORLD, NOW);
+  assert.equal(late.look(await f.body.observe()), false); assert.equal(f.acts().includes('pickup-item'), false);
 });
 
 test('a failed walk is told with the server\'s words and the posture is still set', async t => {
