@@ -55,11 +55,13 @@ import { resolveMemory, readMcpConfig, writeHostedMcpConfig, writeMemoryMcpConfi
 import { acquireLock, releaseLock, removeIfOwn, createHeartbeat } from './driver/lock.mjs';
 import { rotateLog, createLog, createNotifier } from './driver/log.mjs';
 
+import { QUOTA_PAUSE_MS, classifyError, quotaResetAt, createPause } from './driver/errors.mjs';
 // 测试和夹具脚本从这里 import 的名字（实现已经搬到 scripts/driver/）
 export { parseArgs, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
 export { stripAnsi, pidAlive } from './driver/files.mjs';
 export { resolveMemory, hostedMcpConfig, readMcpConfig, writeHostedMcpConfig } from './driver/mcp-config.mjs';
 export { writeHeartbeat, lockHolder, acquireLock, releaseLock, removeIfOwn } from './driver/lock.mjs';
+export { classifyError, quotaResetAt } from './driver/errors.mjs';
 export { rotateLog, createRateLimiter } from './driver/log.mjs';
 
 
@@ -80,7 +82,6 @@ const SERVER_CHAT_QUIET_MS = 120;
 const SERVER_CHAT_MAX_MS = 350;
 const LONG_TURN_WARN_MS = 8 * 60 * 1000;
 const MAX_PENDING_EVENTS = 100;
-const QUOTA_PAUSE_MS = Number(process.env.COMPANION_QUOTA_PAUSE_MS) || 5 * 60 * 1000;
 const BOT_LOCK_WAIT_MS = 20000;
 // --reconnect 时身体断开的退出码：外层 start-server-play.mjs --wait 看到它就回去等世界、复活后重新接管
 export const RECONNECT_EXIT = 75;
@@ -214,29 +215,6 @@ export function cleanupBodyArtifacts(snapshot, alive = pidAlive) {
 // 一轮还没做完时玩家又说话：等这一轮跑满 minMs 后，每轮只回一次“收到，正在忙”，不挡住后面的正常送达
 export function busyAck({ busy, turnStartedAt, now, ackedTurn, wakes, minMs = 6000 }) {
   return Boolean(busy && wakes && now - turnStartedAt >= minMs && ackedTurn !== turnStartedAt);
-}
-
-// 本轮报错的文字看起来像额度或登录问题
-export function classifyError(text) {
-  const t = String(text ?? '');
-  if (/usage limit|rate.?limit|quota|credit balance|limit reached|hit your .*limit|overloaded|429|额度/i.test(t)) return 'quota';
-  if (/log ?in|logged out|authenticat|unauthori[sz]ed|401|403|oauth|api key|token (has )?expired|invalid.*key/i.test(t)) return 'auth';
-  return 'error';
-}
-
-// 额度报错里写的恢复时刻（Claude："You've hit your session limit · resets 8:10pm (Asia/Tokyo)"），按本机时间算；
-// 已经过了就是明天这个时候。认不出返回 0
-export function quotaResetAt(text, now) {
-  const m = /resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i.exec(String(text ?? ''));
-  if (!m) return 0;
-  let hour = Number(m[1]);
-  const minute = Number(m[2] ?? 0), half = m[3]?.toLowerCase();
-  if (half === 'pm' && hour < 12) hour += 12;
-  if (half === 'am' && hour === 12) hour = 0;
-  if (hour > 23 || minute > 59) return 0;
-  const at = new Date(now);
-  at.setHours(hour, minute, 0, 0);
-  return at.getTime() > now ? at.getTime() : at.getTime() + 24 * 3600 * 1000;
 }
 
 // 服务器状态：连上过之后连续 goneMs 连不上 → 'gone'；启动后 waitMs 内一直没连上 → 'never'
@@ -636,7 +614,7 @@ function main() {
   let idleNudged = false;
   let restarting = false;
   let restartCount = 0;
-  let pausedUntil = 0;
+  const pause = createPause();
   let shuttingDown = false;
   let cancellingActions = false;
   let lastStopAt = 0;
@@ -818,10 +796,10 @@ function main() {
         const resetAt = quotaResetAt(error, Date.now());
         const clock = resetAt ? new Date(resetAt).toTimeString().slice(0, 5) : '';
         notifyGame('quota', clock ? `额度用完了，${clock} 恢复，到时候接着回` : '额度好像用完了，暂时回不了话，过一会儿再试');
-        pausedUntil = resetAt || Date.now() + QUOTA_PAUSE_MS;
+        pause.pauseUntil(resetAt || Date.now() + QUOTA_PAUSE_MS);
       } else if (errorKind === 'auth') {
         notifyGame('auth', `登录好像失效了，要在电脑上检查 ${PROVIDER} 的登录`);
-        pausedUntil = Date.now() + QUOTA_PAUSE_MS;
+        pause.pauseUntil(Date.now() + QUOTA_PAUSE_MS);
       } else {
         notifyGame('turn_error', '刚才这一轮出错了，没处理完');
       }
@@ -966,7 +944,7 @@ function main() {
       return;
     }
     // 额度、登录问题暂停中：暂停结束再整理
-    if (Date.now() < pausedUntil) { sideRetry = { reason, attempts, at: pausedUntil }; return; }
+    if (pause.active()) { sideRetry = { reason, attempts, at: pause.until }; return; }
     sideRetry = null;
     let config;
     try { config = writeMemoryMcpConfig(hostedServer, { memory: MEMORY, worldId: WORLD_ID, runtimeDir: RUNTIME, name: args.name }); } catch (e) { info(`整理记忆没能开始：${e.message}`); return; }
@@ -1000,7 +978,7 @@ function main() {
         if (done) info('整理记忆完成', 'consolidate', { done: true });
         else if (kind === 'quota' || kind === 'auth') {
           // 和玩的会话一样处理额度：按写的恢复时刻（认不出就过一会儿）再试，不算失败次数
-          const at = Math.max(pausedUntil, kind === 'quota' ? quotaResetAt(error, Date.now()) || Date.now() + QUOTA_PAUSE_MS : Date.now() + QUOTA_PAUSE_MS);
+          const at = Math.max(pause.until, kind === 'quota' ? quotaResetAt(error, Date.now()) || Date.now() + QUOTA_PAUSE_MS : Date.now() + QUOTA_PAUSE_MS);
           sideRetry = { reason, attempts, at };
           info(`整理记忆没做完（${kind === 'quota' ? '额度用完' : '登录问题'}），${new Date(at).toTimeString().slice(0, 5)} 以后再试`, 'consolidate', { done: false });
         } else if (attempts + 1 < MAX_CONSOLIDATE_ATTEMPTS && !shuttingDown) {
@@ -1449,7 +1427,7 @@ function main() {
 
   function flush() {
     if (busy || restarting || shuttingDown || cancellingActions || batchTimer) return;
-    if (Date.now() < pausedUntil) return;
+    if (pause.active()) return;
     // agent 自己用 wait-for-events 读过的只算当前这个 MCP 进程的事件；旧进程留下的事件按 (session, seq) 区分，照样发
     const consumed = consumedSeq();
     const taskReceipt = readJson(path.join(RUNTIME, `task-delivered-${args.name}.json`));
@@ -1746,7 +1724,7 @@ function main() {
   }, 400);
   setInterval(idleCheck, 15000);
   // 暂停（额度问题）结束后，把攒下的事件发出去
-  setInterval(() => { if (pausedUntil && Date.now() >= pausedUntil) { pausedUntil = 0; flush(); } }, 5000);
+  setInterval(() => { if (pause.expire()) flush(); }, 5000);
   // 整理会话碰上额度或登录问题：到了时候再试（ServerBody）
   setInterval(() => { if (sideRetry && Date.now() >= sideRetry.at && !sideConsolidation) { const r = sideRetry; sideRetry = null; startSideConsolidation(r.reason, r.attempts); } }, 1000);
   if (args.serverWaitMinutes > 0 && args.serverCheckSeconds > 0) {
