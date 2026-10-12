@@ -149,7 +149,7 @@ export interface ActionArguments {
   'move-to-position': Position & { tolerance?: number; timeoutMs?: number };
   'follow-player': { player: string; distance?: number; timeoutMs?: number };
   'approach-container': { targetToken: string; timeoutMs?: number };
-  'approach-player': { player: string; expectedEntityId?: string; distance?: number; timeoutMs?: number };
+  'approach-player': { player: string; expectedEntityId?: string; distance?: number; timeoutMs?: number; track?: boolean };
   'approach-resource': { targetToken: string; timeoutMs?: number };
   'pickup-item': { entityId: string; expectedItem: string; expectedCount: number; expectedComponents: Components; expectedMaxStackSize?: number; companionGuard?: CompanionGuard; resourceTargetToken?: string; timeoutMs?: number };
   'dig-block': Position & { expectedBlock: string; expectedProperties?: Components; targetToken?: string; timeoutMs?: number };

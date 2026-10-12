@@ -93,6 +93,11 @@ final class ApproachSafetyTest {
         check(FlatApproach.arrivalStand(playerStand,playerReach)&&playerStand.distanceTo(recipient)>=0.65,"player route chooses an interior requested-distance stand around real player collision");
         for(double x:new double[]{-0.149,0,0.149})for(double z:new double[]{-0.149,0,0.149})check(playerReach.test(playerStand.add(x,0,z)),"player endpoint tolerance never relaxes the originally requested distance");
         check(!FlatApproach.arrivalStand(safeStand,feet->false),"arrival margin never overrides denied reach or line of sight");
+        Vec3 start=new Vec3(0,64,0),body=new Vec3(3,64,0);
+        check(FlatApproach.recipientProblem(false,start,start.add(0.4,0,0),body)==null,"fixed approach tolerates a small shift");
+        check("TARGET_MOVED".equals(FlatApproach.recipientProblem(false,start,start.add(2,0,0),body)),"fixed approach still fails once the player walked off");
+        check(FlatApproach.recipientProblem(true,start,start.add(6,0,0),body)==null,"tracking approach follows a walking player");
+        check("OUT_OF_REACH".equals(FlatApproach.recipientProblem(true,start,body.add(33,0,0),body)),"tracking approach gives up beyond the navigation range");
         AtomicLong time=new AtomicLong();
         final ControlSession.Operation[] driving={null};
         ControlSession.Game game=new ControlSession.Game() {

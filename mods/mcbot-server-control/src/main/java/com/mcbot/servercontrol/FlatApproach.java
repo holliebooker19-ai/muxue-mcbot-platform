@@ -116,6 +116,15 @@ final class FlatApproach implements BlockGetter {
         AABB body=player.getBoundingBox().move(feet.subtract(player.position())).inflate(1,0.5,1);
         return body.intersects(item);
     }
+    /**
+     * approach-player's check on the recipient each tick: null while fine. A fixed approach (no track) fails once the player
+     * moved more than half a block; a tracking one follows the player and only gives up beyond the navigation range (the
+     * same 32 blocks follow-player uses), so catching up is limited by the approach's own time limit.
+     */
+    static String recipientProblem(boolean track,Vec3 start,Vec3 current,Vec3 body) {
+        if(!track) return current.distanceTo(start)>0.5?"TARGET_MOVED":null;
+        return current.distanceTo(body)>32?"OUT_OF_REACH":null;
+    }
     boolean playerReach(Vec3 feet,ServerPlayer target,double distance) {
         if(feet.distanceTo(target.position())>distance) return false;
         missing=false;

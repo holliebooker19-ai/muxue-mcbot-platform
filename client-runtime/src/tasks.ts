@@ -12,6 +12,13 @@ type TaskName = 'container-list' | 'container-withdraw' | 'give-item' | 'fetch-a
 type Limit = { deadline: number; expired: Promise<never>; timer: ReturnType<typeof setTimeout>; fail: () => void; grace?: FightGrace };
 type TaskOwner = { lease: Lease; epoch: number; limit: Limit };
 type Progress = { requestedCount: number; maxStackSize?: number; withdrawnCount: number; heldCount?: number; droppedCount: number; slot?: number; carriedCount?: number; lastConfirmedHeldCount?: number; lastConfirmedCarriedCount?: number; counts?: string; pickup: 'unconfirmed'; player?: string; item?: string; items?: unknown[]; stage: string; code?: string; cleanup?: string; containerProtection?: 'instance-bound' | 'state-only' };
+/** give-item/fetch-and-give: how long the body may walk after the recipient (the former fixed approach limit). */
+const GIVE_APPROACH_MS = 20000;
+/** The server's smallest approach-player timeoutMs (server-body.ts schema): less time left than this cannot start another approach. */
+const MIN_APPROACH_MS = 500;
+/** The recipient must be this close (blocks) for look-at, select-slot and the drop. */
+const GIVE_REACH = 2;
+const distanceBetween = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 /** A bounded task runner. Authoritative snapshots and target tokens stay inside the task boundary. */
 export class ContainerTasks {
   private readonly targets = new Map<string, Target>();
@@ -142,7 +149,7 @@ export class ContainerTasks {
     const check = await this.wait(epoch, () => this.body.nearbyBlocks!({ centerPlayer: player, radius: 1, maxResults: 1 })); this.check(epoch);
     if (!isDeepStrictEqual(this.context(check), context) || check.center.player !== player) throw new BodyError('WORLD_CHANGED', '接收者观察不属于任务会话');
     const point = check.center.position;
-    if (Math.hypot(point.x - state.position.x, point.y - state.position.y, point.z - state.position.z) > 2) throw new BodyError('OUT_OF_REACH', '接收者须在2格内；首版不自动移动或绕障');
+    if (Math.hypot(point.x - state.position.x, point.y - state.position.y, point.z - state.position.z) > GIVE_REACH) throw new BodyError('OUT_OF_REACH', '接收者须在2格内；首版不自动移动或绕障');
     return point;
   }
   private async click(epoch: number, token: string, context: Context, menu: Container, slot: ItemStack, button: 0 | 1): Promise<Container> {
@@ -268,19 +275,36 @@ export class ContainerTasks {
           progress.stage = 'approaching-player';
           const beforeApproach = await this.observe(epoch, context);
           if (!beforeApproach.entities.some(entity => entity.id === recipientIdentity!.id && entity.name === request.player && entity.type === 'minecraft:player')) throw new BodyError('STALE_TARGET', '接收者已离线、移远或身份改变；物品保持持有');
-          this.success(await this.step(epoch, id, context, 'approach-player', { player: request.player!, expectedEntityId: recipientIdentity!.id, distance: 1.3, timeoutMs: 20000 }), epoch);
+          // The recipient may be walking: the body follows them (track) and gives up only at the old 20 s limit; one more approach if they got ahead again.
+          const approachUntil = this.now() + GIVE_APPROACH_MS;
+          for (let remaining = GIVE_APPROACH_MS; ; remaining = approachUntil - this.now()) {
+            const approach = await this.step(epoch, id, context, 'approach-player', { player: request.player!, expectedEntityId: recipientIdentity!.id, distance: 1.3, timeoutMs: remaining, track: true });
+            if (approach.status === 'failed' && (approach.result as { code?: string } | undefined)?.code === 'TIMEOUT') throw new BodyError('CANNOT_CATCH_UP', `追不上 ${request.player}：${Math.round(GIVE_APPROACH_MS / 1000)} 秒内没走到身边，物品保持持有；等对方停下再给`);
+            this.success(approach, epoch);
+            const arrived = await this.observe(epoch, context);
+            const near = arrived.entities.find(entity => entity.id === recipientIdentity!.id && entity.name === request.player && entity.type === 'minecraft:player');
+            if (!near || distanceBetween(near.position, arrived.position) <= GIVE_REACH) break;
+            if (approachUntil - this.now() < MIN_APPROACH_MS) throw new BodyError('CANNOT_CATCH_UP', `追不上 ${request.player}：到了身边对方又走远了，物品保持持有；等对方停下再给`);
+          }
         }
         progress.stage = 'giving';
         let state = await this.observe(epoch, context);
         if (state.container) throw new BodyError('BUSY', '交物前容器仍开启');
         const recipient = state.entities.find(entity => entity.id === recipientIdentity!.id && entity.name === request.player && entity.type === 'minecraft:player');
         if (!recipient || recipient.name === state.username) throw new BodyError('PLAYER_NOT_VISIBLE', '接收者未在附近可见玩家中');
-        if (Math.hypot(recipient.position.x - state.position.x, recipient.position.y - state.position.y, recipient.position.z - state.position.z) > 2) throw new BodyError('OUT_OF_REACH', '接收者须在2格内；首版不自动移动或绕障');
+        if (Math.hypot(recipient.position.x - state.position.x, recipient.position.y - state.position.y, recipient.position.z - state.position.z) > GIVE_REACH) throw new BodyError('OUT_OF_REACH', '接收者须在2格内；首版不自动移动或绕障');
         const point = await this.recipient(epoch, context, request.player!, state);
-        if (acquiredSlot === undefined && request.slot !== undefined && request.slot > 8) {
-          // The chosen stack is in the main inventory: swap it whole into an empty hotbar slot first.
-          const source = state.inventory.find(item => item.slot === request.slot);
-          if (!source || source.id !== request.item || source.count === 0) throw new BodyError('ITEM_CHANGED', `背包第 ${request.slot} 格不是 ${request.item}`);
+        // A stack in the main inventory (slot 9..35) cannot be dropped from the hand: swap it whole into an empty hotbar slot first.
+        // Given a slot that is that slot; without one, only when no hotbar stack holds enough and a main-inventory stack does.
+        let swapFrom = acquiredSlot === undefined && request.slot !== undefined && request.slot > 8 ? request.slot : undefined;
+        if (acquiredSlot === undefined && request.slot === undefined) {
+          const found = this.variants(state.inventory, request.item!); // AMBIGUOUS_ITEM stays when variants differ
+          const wanted = count ?? this.quantity(request, found[0]);
+          if (found.length && !found.some(item => item.slot <= 8 && item.count >= wanted)) swapFrom = found.find(item => item.slot > 8 && item.count >= wanted)?.slot;
+        }
+        if (swapFrom !== undefined) {
+          const source = state.inventory.find(item => item.slot === swapFrom);
+          if (!source || source.id !== request.item || source.count === 0) throw new BodyError('ITEM_CHANGED', `背包第 ${swapFrom} 格不是 ${request.item}`);
           const hotbar = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(slot => state.inventory.find(item => item.slot === slot) ?? { slot, id: 'minecraft:air', count: 0, components: {} }).find(item => this.empty(item));
           if (!hotbar) throw new BodyError('INVENTORY_FULL', '快捷栏没有空格，先用 equip-item hand:main 把它拿到手上');
           const value = (item: ItemStack) => ({ id: item.id, count: item.count, components: item.components!, ...(item.maxStackSize !== undefined ? { maxStackSize: item.maxStackSize } : {}) });
@@ -293,7 +317,7 @@ export class ContainerTasks {
         if (acquiredSlot === undefined && request.slot !== undefined && !candidates.length) throw new BodyError('ITEM_CHANGED', `快捷栏第 ${request.slot} 格不是 ${request.item}`);
         if (count === undefined) { count = this.quantity(request, candidates[0]); progress.requestedCount = count; }
         const stack = acquiredSlot === undefined ? candidates.find(item => item.slot <= 8 && item.count >= count!) : candidates.find(item => item.count === count!);
-        if (!stack) throw new BodyError('INSUFFICIENT_ITEMS', '快捷栏没有足量的单栈目标物品');
+        if (!stack) throw new BodyError('INSUFFICIENT_ITEMS', '背包里没有足量的单栈目标物品（不跨栈凑数）');
         progress.maxStackSize = stack.maxStackSize;
         progress.heldCount = stack.count;
         this.success(await this.step(epoch, id, context, 'look-at', { ...point, y: point.y + 0.5 }), epoch);
@@ -301,7 +325,7 @@ export class ContainerTasks {
         state = await this.observe(epoch, context);
         if (state.inventory.find(item => item.slot === stack.slot)?.maxStackSize !== stack.maxStackSize) throw new BodyError('MAX_STACK_CHANGED', '交物前实际物品有效堆叠上限已改变；未继续丢出');
         const latest = state.entities.find(entity => entity.id === recipient.id && entity.name === request.player && entity.type === 'minecraft:player');
-        if (!latest || Math.hypot(latest.position.x - state.position.x, latest.position.y - state.position.y, latest.position.z - state.position.z) > 2) throw new BodyError('OUT_OF_REACH', '丢物前接收者已离开触及范围');
+        if (!latest || Math.hypot(latest.position.x - state.position.x, latest.position.y - state.position.y, latest.position.z - state.position.z) > GIVE_REACH) throw new BodyError('OUT_OF_REACH', '丢物前接收者已离开触及范围');
         const finalPoint = await this.recipient(epoch, context, request.player!, state);
         if (!isDeepStrictEqual(point, finalPoint)) this.success(await this.step(epoch, id, context, 'look-at', { ...finalPoint, y: finalPoint.y + 0.5 }), epoch);
         while (progress.droppedCount < count!) {
@@ -309,7 +333,7 @@ export class ContainerTasks {
           const current = state.inventory.find(item => item.slot === stack.slot);
           if (!current || current.id !== stack.id || !isDeepStrictEqual(current.components, stack.components) || current.maxStackSize !== stack.maxStackSize || current.count !== stack.count - progress.droppedCount) throw new BodyError('ITEM_CHANGED', '分批交物的实际栈／有效上限改变，未继续');
           const latestPlayer = state.entities.find(entity => entity.id === recipient.id && entity.name === request.player && entity.type === 'minecraft:player');
-          if (!latestPlayer || Math.hypot(latestPlayer.position.x - state.position.x, latestPlayer.position.y - state.position.y, latestPlayer.position.z - state.position.z) > 2) throw new BodyError('OUT_OF_REACH', '分批交物时接收者已离开触及范围');
+          if (!latestPlayer || Math.hypot(latestPlayer.position.x - state.position.x, latestPlayer.position.y - state.position.y, latestPlayer.position.z - state.position.z) > GIVE_REACH) throw new BodyError('OUT_OF_REACH', '分批交物时接收者已离开触及范围');
           await this.recipient(epoch, context, request.player!, state);
           const batch = Math.min(64, count! - progress.droppedCount);
           const dropping = await this.step(epoch, id, context, 'drop-item', { slot: current.slot, expectedItem: current.id, expectedCount: current.count, expectedComponents: current.components!, ...(current.maxStackSize !== undefined ? { expectedMaxStackSize: current.maxStackSize } : {}), count: batch, ...(canApproach ? { recipient: request.player!, expectedEntityId: recipient.id } : {}) });
