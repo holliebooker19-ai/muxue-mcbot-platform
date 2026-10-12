@@ -2,6 +2,7 @@ package com.mcbot.servercontrol;
 
 import java.util.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.Blocks;
@@ -15,6 +16,9 @@ import net.minecraft.world.phys.Vec3;
  * belongs to the trunk it is nearest to within BRANCH_REACH blocks, so two trees standing side by side stay two
  * trees even where their crowns touch. Pieces that reach no trunk (what is left of a tree whose base was cut) group
  * among themselves the same way and count as one tree.
+ * A tree has a crown: one of its logs touches leaves (or the wart blocks and shroomlights of a huge fungus). Logs
+ * with none, a village house wall, a fence or a stump, are no tree and are left alone (10-12 a house wall was cut
+ * as the tree beside the player).
  */
 final class TreeScan {
     static final int BRANCH_REACH=4,SPREAD=10,BELOW=4,ABOVE=40,MAX_LOGS=256;
@@ -35,15 +39,11 @@ final class TreeScan {
      * radius and BELOW below to 8 above the point. Loaded chunks only; at most MAX_LOGS logs in all.
      */
     static Tree nearest(ServerLevel level,Vec3 center,int radius,ResourceCatalog.Selection selection,int count) {
-        BlockPos origin=BlockPos.containing(center);int reach=radius+SPREAD;
-        Set<BlockPos> logs=new HashSet<>();
-        for(int x=-reach;x<=reach;x++)for(int z=-reach;z<=reach;z++){
-            if(x*x+z*z>reach*reach)continue;
-            for(int y=-BELOW;y<=ABOVE;y++){BlockPos pos=origin.offset(x,y,z);BlockState state=loaded(level,pos);if(state!=null&&log(state,selection))logs.add(pos.immutable());}
-        }
-        List<Set<BlockPos>> pieces=pieces(logs);int[] owner=attach(level,pieces);
+        BlockPos origin=BlockPos.containing(center);
+        List<Set<BlockPos>> pieces=pieces(region(level,center,radius,selection));int[] owner=attach(level,pieces);
+        Set<Integer> crowned=crowned(level,pieces,owner);
         Map<Integer,Double> distance=new HashMap<>();
-        for(int i=0;i<pieces.size();i++){int root=owner[i]<0?i:owner[i];
+        for(int i=0;i<pieces.size();i++){int root=owner[i]<0?i:owner[i];if(!crowned.contains(root))continue;
             for(BlockPos p:pieces.get(i)){int dx=p.getX()-origin.getX(),dz=p.getZ()-origin.getZ(),dy=p.getY()-origin.getY();
                 if(dx*dx+dz*dz<=radius*radius&&dy>=-BELOW&&dy<=8)distance.merge(root,Vec3.atCenterOf(p).distanceTo(center),Math::min);}}
         List<Integer> roots=new ArrayList<>(distance.keySet());roots.sort(Comparator.comparingDouble(distance::get));
@@ -56,6 +56,31 @@ final class TreeScan {
         }
         return new Tree(chosen.size()>MAX_LOGS?List.copyOf(chosen.subList(0,MAX_LOGS)):chosen,chosen.size()>MAX_LOGS);
     }
+    /** The requested logs that belong to a tree with a crown, over the same cells nearest() looks at (a plain scan drops the rest). */
+    static Set<BlockPos> wild(ServerLevel level,Vec3 center,int radius,ResourceCatalog.Selection selection) {
+        List<Set<BlockPos>> pieces=pieces(region(level,center,radius,selection));int[] owner=attach(level,pieces);
+        Set<Integer> crowned=crowned(level,pieces,owner);Set<BlockPos> wild=new HashSet<>();
+        for(int i=0;i<pieces.size();i++)if(crowned.contains(owner[i]<0?i:owner[i]))wild.addAll(pieces.get(i));
+        return wild;
+    }
+    /** Every requested log within radius+SPREAD across and BELOW below to ABOVE above the point, loaded chunks only. */
+    private static Set<BlockPos> region(ServerLevel level,Vec3 center,int radius,ResourceCatalog.Selection selection) {
+        BlockPos origin=BlockPos.containing(center);int reach=radius+SPREAD;
+        Set<BlockPos> logs=new HashSet<>();
+        for(int x=-reach;x<=reach;x++)for(int z=-reach;z<=reach;z++){
+            if(x*x+z*z>reach*reach)continue;
+            for(int y=-BELOW;y<=ABOVE;y++){BlockPos pos=origin.offset(x,y,z);BlockState state=loaded(level,pos);if(state!=null&&log(state,selection))logs.add(pos.immutable());}
+        }
+        return logs;
+    }
+    /** The roots (trunk or remnant pieces, see attach) whose tree has a crown: some log of it touches a crown block on a face. */
+    private static Set<Integer> crowned(ServerLevel level,List<Set<BlockPos>> pieces,int[] owner) {
+        Set<Integer> crowned=new HashSet<>();
+        for(int i=0;i<pieces.size();i++){int root=owner[i]<0?i:owner[i];if(crowned.contains(root))continue;
+            search:for(BlockPos p:pieces.get(i))for(Direction side:Direction.values()){BlockState next=loaded(level,p.relative(side));if(next!=null&&crown(next)){crowned.add(root);break search;}}}
+        return crowned;
+    }
+    static boolean crown(BlockState state){return state.is(BlockTags.LEAVES)||state.is(BlockTags.WART_BLOCKS)||state.is(Blocks.SHROOMLIGHT);}
     private static boolean log(BlockState state,ResourceCatalog.Selection selection){return ResourceCatalog.kind(state)==ResourceCatalog.Kind.LOG&&selection.matches(state);}
     private static BlockState loaded(ServerLevel level,BlockPos pos) {
         if(level.isOutsideBuildHeight(pos)||!level.getWorldBorder().isWithinBounds(pos))return null;

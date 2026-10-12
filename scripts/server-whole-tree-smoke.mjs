@@ -6,7 +6,8 @@
 //   3. 普通扫描（不是 wholeTree）时候选也带树编号：金合欢的两根枝和树干同一个编号，橡树另一个；
 //   4. 积雪针叶林：树旁边一层薄雪、Bot 从 2 格高的雪台子上开始，整棵砍完；
 //   5. trees:3 一次找到三棵、一次提交砍完，地上的木棍顺手捡到也不中断；
-//   6. 根已经砍掉、悬在空中的半截 2x2 云杉也认成一棵，垫高砍完。
+//   6. 根已经砍掉、悬在空中的半截 2x2 云杉也认成一棵，垫高砍完；
+//   7. 没有树叶的原木墙（村民房子）不算树：整棵树和普通扫描都不要它。
 // 不启停服务器、不调用模型、不计算哈希。需要：隔离服开着、平坦世界、没装要求客户端的 Mod。
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -176,6 +177,25 @@ try {
   const remnantLeft = await left(remnant, 'minecraft:spruce_log'), remnantLogs = await countItem('minecraft:spruce_log'), remnantStuck = (op.value.result?.stuckHigh ?? 0) + (op.value.result?.stuckInLeaves ?? 0);
   check('半截树垫高砍完，拿到的加上卡住的正好 32，回到地面', remnantLeft.length === 0 && remnantLogs <= 32 && remnantLogs + remnantStuck >= 32 && (await pos('Claude'))[1] < Y + 2.01,
     { remnantLeft, remnantLogs, remnantStuck, status: op.value.status, summary: op.value.summary, result: op.value.result, bot: await pos('Claude') });
+
+  // 7. 村民房子的原木墙不是树（10-12 晚试玩把墙当树砍了一块）：Bot 身边一面 3x3 橡木墙 (3403..3405, 201..203, 3402)，没有树叶；
+  //    东边 6 格一棵带树冠的橡树 (3410, 201..205, 3404)。整棵树只找到那棵树，普通扫描不列墙上的原木。
+  await ground();
+  const wall = []; for (let y = Y + 1; y <= Y + 3; y++) for (const x of [3403, 3404, 3405]) wall.push([x, y, 3402]);
+  const crowned = Array.from({ length: 5 }, (_, i) => [3410, Y + 1 + i, 3404]);
+  await fixture(`fill 3403 ${Y + 1} 3402 3405 ${Y + 3} 3402 oak_log[axis=x]`);
+  await fixture(`fill 3408 ${Y + 4} 3402 3412 ${Y + 6} 3406 oak_leaves[persistent=true]`);
+  for (const p of crowned) await fixture(`setblock ${p.join(' ')} oak_log`);
+  await command('clear Claude'); await command('give Claude diamond_axe'); await command('give Claude dirt 32');
+  await command(`tp Claude 3404.5 ${Y + 1} 3404.5 180 0`); await wait(1500);
+  const wallPlan = await tool('discover-resources', { blockIds: ['#minecraft:logs'], radius: 8, wholeTree: true });
+  report.runs.wallPlan = wallPlan.value;
+  check('原木墙不算树：wholeTree 只找到 6 格外那棵带树冠的橡树 5 节', !wallPlan.error && wallPlan.value.logs === crowned.length, wallPlan.value);
+  const wallPlain = await tool('discover-resources', { blockIds: ['#minecraft:logs'], radius: 8, maxResults: 64 });
+  const wallSeen = (wallPlain.value.candidates ?? []).filter(c => wall.some(p => c.position.x === p[0] && c.position.y === p[1] && c.position.z === p[2]));
+  report.runs.wallPlain = { builtLogs: wallPlain.value.builtLogs, candidates: wallPlain.value.candidates?.length };
+  check('原木墙不算树：普通扫描不列墙上的 9 节，回给模型 builtLogs', !wallPlain.error && wallSeen.length === 0 && wallPlain.value.builtLogs === wall.length,
+    { seen: wallSeen.length, builtLogs: wallPlain.value.builtLogs });
   report.result = 'passed';
 } catch (error) {
   report.result = 'failed'; report.error = redact(error.stack || error.message); process.exitCode = 1; console.error(report.error);

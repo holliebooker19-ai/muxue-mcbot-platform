@@ -823,3 +823,57 @@ test('guard fights push the container task limit back on bodies with guard-duty-
     else assert.equal(result.result.code, 'TASK_TIMEOUT', 'without the capability the limit stays');
   }
 });
+
+// give-item to a walking player and from the main inventory (10-12 evening playtest: TARGET_MOVED, then INSUFFICIENT_ITEMS for iron in slot 12).
+function ironFixture(options = {}) {
+  const f = fixture({ approach: true, ...options });
+  f.state.inventory = [empty(0), { slot: 12, id: 'minecraft:iron_ingot', count: 5, components: {}, maxStackSize: 64 }];
+  f.body.beforeAct = (name, args) => {
+    if (name !== 'swap-inventory') return;
+    const source = f.state.inventory.find(item => item.slot === args.sourceSlot), target = f.state.inventory.find(item => item.slot === args.hotbarSlot);
+    source.slot = args.hotbarSlot; if (target) target.slot = args.sourceSlot;
+  };
+  return f;
+}
+
+test('give-item through the MCP tool: iron only in the main inventory is swapped to the hotbar, and a walking player does not fail the approach', async t => {
+  const f = ironFixture();
+  f.body.hello.capabilities = ['nearby-blocks', 'approach-player', 'look-at', 'select-slot', 'drop-item', 'swap-inventory'];
+  const before = f.body.beforeAct;
+  f.body.beforeAct = (name, args) => { before(name, args); if (name === 'approach-player') f.state.entities[0].position = { x: 7, y: 64, z: 3 }; };
+  const { call } = await mcpClient(t, f.body);
+  const { reply, result } = await call('give-item', { player: 'Alex', item: 'minecraft:iron_ingot', count: 5 });
+  assert.equal(reply.isError, undefined, JSON.stringify(result));
+  assert.equal(result.status, 'succeeded'); assert.equal(result.result.droppedCount, 5);
+  assert.deepEqual(f.calls.map(c => c.name), ['approach-player', 'swap-inventory', 'look-at', 'select-slot', 'drop-item']);
+  const approach = f.calls[0].args; assert.equal(approach.track, true); assert.equal(approach.timeoutMs, 20000);
+  assert.equal(f.calls[1].args.sourceSlot, 12); assert.equal(f.calls.at(-1).args.slot, 0);
+});
+
+test('give-item without slot: hotbar stack is used as before, a short hotbar stack falls back to the main inventory, a full hotbar keeps the equip-item hint', async () => {
+  const hotbar = ironFixture(); hotbar.state.inventory.push({ slot: 3, id: 'minecraft:iron_ingot', count: 9, components: {}, maxStackSize: 64 });
+  assert.equal((await hotbar.tasks.run('give-item', { item: 'minecraft:iron_ingot', count: 5, player: 'Alex' })).status, 'succeeded');
+  assert.equal(hotbar.calls.some(call => call.name === 'swap-inventory'), false); assert.equal(hotbar.calls.at(-1).args.slot, 3);
+  const short = ironFixture(); short.state.inventory.push({ slot: 3, id: 'minecraft:iron_ingot', count: 2, components: {}, maxStackSize: 64 });
+  assert.equal((await short.tasks.run('give-item', { item: 'minecraft:iron_ingot', count: 5, player: 'Alex' })).status, 'succeeded');
+  assert.equal(short.calls.find(call => call.name === 'swap-inventory').args.sourceSlot, 12);
+  const none = ironFixture(); none.state.inventory = [{ slot: 12, id: 'minecraft:iron_ingot', count: 2, components: {}, maxStackSize: 64 }];
+  assert.equal((await none.tasks.run('give-item', { item: 'minecraft:iron_ingot', count: 5, player: 'Alex' })).result.code, 'INSUFFICIENT_ITEMS');
+  const full = ironFixture(); full.state.inventory = [...[0, 1, 2, 3, 4, 5, 6, 7, 8].map(slot => ({ slot, id: 'minecraft:stone', count: 1, components: {}, maxStackSize: 64 })), { slot: 12, id: 'minecraft:iron_ingot', count: 5, components: {}, maxStackSize: 64 }];
+  const refused = await full.tasks.run('give-item', { item: 'minecraft:iron_ingot', count: 5, player: 'Alex' });
+  assert.equal(refused.result.code, 'INVENTORY_FULL'); assert.equal(full.calls.some(call => ['swap-inventory', 'drop-item'].includes(call.name)), false);
+});
+
+test('give-item: a player who got ahead again is approached once more within the same 20 s, and an uncatchable one reports CANNOT_CATCH_UP', async () => {
+  const f = ironFixture(); let approaches = 0, clock = 0;
+  const tasks = new ContainerTasks(f.body, () => clock), act = f.body.act;
+  f.body.act = async (...args) => { const op = await act(...args); if (args[0] === 'approach-player' && ++approaches === 1) { clock = 8000; f.state.entities[0].position = { x: 12, y: 64, z: 0 }; } return op; };
+  assert.equal((await tasks.run('give-item', { item: 'minecraft:iron_ingot', count: 5, player: 'Alex' })).status, 'succeeded');
+  const timeouts = f.calls.filter(call => call.name === 'approach-player').map(call => call.args.timeoutMs);
+  assert.deepEqual(timeouts, [20000, 12000]);
+  const late = ironFixture(), lateAct = late.body.act;
+  late.body.act = async (...args) => (args[0] === 'approach-player' ? { ...await lateAct(...args), status: 'failed', result: { code: 'TIMEOUT' } } : lateAct(...args));
+  const lost = await late.tasks.run('give-item', { item: 'minecraft:iron_ingot', count: 5, player: 'Alex' });
+  assert.equal(lost.status, 'failed'); assert.equal(lost.result.code, 'CANNOT_CATCH_UP'); assert.match(lost.summary + JSON.stringify(lost.result), /追不上/);
+  assert.equal(late.calls.some(call => ['swap-inventory', 'drop-item'].includes(call.name)), false);
+});

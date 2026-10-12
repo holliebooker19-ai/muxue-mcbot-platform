@@ -41,7 +41,8 @@ async function fixture(text) { const reply = await command(text); assert(!/not l
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const exists = async tag => /Test passed/.test(await command(`execute if entity @e[tag=${tag}]`));
 const health = async tag => Number((await command(`data get entity @e[tag=${tag},limit=1] Health`)).match(/(-?[\d.]+)f?\s*$/)?.[1]);
-const countOf = async (selector) => Number((await command(`execute store result score #n mcbot_hunt if entity ${selector}`)).match(/(\d+)/)?.[1] ?? NaN);
+// None left: the command answers "Test failed" without a number.
+const countOf = async (selector) => { const reply = await command(`execute store result score #n mcbot_hunt if entity ${selector}`); return /failed/i.test(reply) ? 0 : Number(reply.match(/(\d+)/)?.[1] ?? NaN); };
 let client;
 async function tool(name, args = {}) {
   const reply = await client.callTool({ name, arguments: args }, undefined, { timeout: 180000 });
@@ -113,6 +114,30 @@ try {
   const creeper = await tool('hunt', { type: 'minecraft:creeper', count: 1 });
   report.runs.creeper = creeper.value;
   check('苦力怕直接拒绝', creeper.error || /UNSUPPORTED/.test(JSON.stringify(creeper.value)), creeper.value);
+
+  // 3b. 村子生成的铁傀儡（PlayerCreated:0b）用垫高打法；玩家造的和起了名字的不动。热栏 0 是 4 块泥土；未运行过。
+  await command(`kill @e[type=sheep,tag=hs]`);
+  await fixture(`summon iron_golem ${C.x + 4} ${Y + 1} ${C.z + 2} {Tags:["hg","gb"],PersistenceRequired:1b,PlayerCreated:1b}`);
+  await fixture(`summon iron_golem ${C.x - 4} ${Y + 1} ${C.z + 2} {Tags:["hg","gn"],PersistenceRequired:1b,PlayerCreated:0b,CustomName:'"Iron"'}`);
+  await fixture(`summon iron_golem ${C.x} ${Y + 1} ${C.z + 8} {Tags:["hg","gv"],PersistenceRequired:1b,PlayerCreated:0b}`);
+  await wait(1000);
+  const golemSurvey = await tool('hunt', { type: 'minecraft:iron_golem', survey: true, radius: 16 });
+  const gs = golemSurvey.value.result ?? golemSurvey.value;
+  check('survey：3 只傀儡里只有村子生成的 1 只可打，2 只受保护', gs.total === 3 && gs.huntable === 1 && gs.protected === 2, gs);
+  const golemOp = await settle(await tool('hunt', { type: 'minecraft:iron_golem', count: 1, radius: 16, timeoutMs: 120000 }));
+  const golemResult = golemOp.value.result ?? golemOp.value;
+  const feetY = Number((await command('data get entity Claude Pos[1]')).match(/(-?[\d.]+)d?\s*$/)?.[1]);
+  report.runs.golem = { status: golemOp.value.status, summary: golemOp.value.summary, result: golemResult, villageLeft: await countOf('@e[type=iron_golem,tag=gv]'),
+    built: await health('gb'), named: await health('gn'), myHealth: Number((await command('data get entity Claude Health')).match(/(-?[\d.]+)f?\s*$/)?.[1]), feetY, dirt: (await command('clear Claude dirt 0')).match(/(\d+)/)?.[1] };
+  check('村子的铁傀儡被打死', golemOp.value.status === 'succeeded' && golemResult.killed === 1 && report.runs.golem.villageLeft === 0, report.runs.golem);
+  check('玩家造的和起了名字的铁傀儡没挨打', report.runs.golem.built === 100 && report.runs.golem.named === 100, report.runs.golem);
+  check('下回地面、垫脚的泥土拆回来了、没被傀儡打到', feetY === Y + 1 && Number(report.runs.golem.dirt) === 4 && golemResult.standBlocksLeft === 0 && report.runs.golem.myHealth >= 20, report.runs.golem);
+  await command('kill @e[type=iron_golem,tag=hg]');
+  // pillar:true 对骷髅这类远程怪不使用垫高：直接拒绝。
+  await fixture(`summon skeleton ${C.x + 6} ${Y + 1} ${C.z + 6} {Tags:["hg"],PersistenceRequired:1b,NoAI:1b}`);
+  const shooter = await settle(await tool('hunt', { type: 'minecraft:skeleton', pillar: true, radius: 16 }));
+  check('远程怪不用垫高打法：UNSUPPORTED', /UNSUPPORTED/.test(JSON.stringify(shooter.value)), shooter.value);
+  await command('kill @e[type=skeleton,tag=hg]');
 
   // 4. enchanted golden apple
   await fixture('item replace entity Claude hotbar.3 with enchanted_golden_apple 2');

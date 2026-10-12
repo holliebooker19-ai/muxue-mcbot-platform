@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z, type ZodRawShape } from 'zod';
-import { BodyError, COMPANION_MINING_RANGE, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
+import { BodyError, COMPANION_MINING_RANGE, EMOTE_SECONDS, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
 import { EventJournal, type GameEvent } from './events.js';
 import type { PlayerStop } from './player-stop.js';
 import { ContainerTasks } from './tasks.js';
@@ -245,7 +245,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
   if (serverObserved && body.hello.capabilities.includes('pickup-item')) {
     register('collect-items', 'Pick up this item lying on the ground within radius (never digs). Items a worn backpack takes still count (storedIn). Fails when there is not enough; no automatic retry.', { ...quantity, radius: z.number().int().min(1).max(6).default(4) }, async args => operationResult(await gather.start('collect-items', args)));
     if (['nearby-resources', 'approach-resource', 'dig-block', 'select-slot'].every(cap => body.hello.capabilities.includes(cap))) {
-      register('discover-resources', 'Find visible logs, ores or stones nearby (modded ones too) by block ID or tag: ["#minecraft:logs"] any tree, ["#c:ores"] any ore, ["#c:ores/iron"] one kind. Each candidate lists its drops; give one of those items and the resourceRef to gather-resources. It cannot tell buildings from nature: choose the area. No automatic rescan.', { blockIds: z.array(resourceSelector).min(1).max(8), radius: z.number().int().min(1).max(16).default(4).describe('Blocks around (2 below, 4 above)'), maxResults: z.number().int().min(1).max(64).default(32),
+      register('discover-resources', 'Find visible logs, ores or stones nearby (modded ones too) by block ID or tag: ["#minecraft:logs"] any tree, ["#c:ores"] any ore, ["#c:ores/iron"] one kind. Each candidate lists its drops; give one of those items and the resourceRef to gather-resources. Logs touching no leaves (a house wall, a fence) are not trees and are left out (builtLogs); other blocks of buildings are not told apart: choose the area. No automatic rescan.', { blockIds: z.array(resourceSelector).min(1).max(8), radius: z.number().int().min(1).max(16).default(4).describe('Blocks around (2 below, 4 above)'), maxResults: z.number().int().min(1).max(64).default(32),
         center: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional().describe('Scan around this point (within 8 blocks of you, 16 with wholeTree)'),
         wholeTree: z.boolean().optional().describe('The player wants a whole tree cut ("cut down this tree", 整棵树): every log of the tree nearest center. Then gather-resources wholeTree:true without count.'),
         trees: z.number().int().min(1).max(8).optional().describe('With wholeTree: how many trees, nearest first, in one scan and one gather (default 1)') }, args => gather.discover(args));
@@ -286,14 +286,41 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     const gestures = body.hello.emotes?.builtin ?? [];
     const sources = body.hello.emotes?.sources ?? [];
     const sourceText = sources.length ? ` Add-on animations (pass source): ${sources.map(s => `${s.id}${s.hint ? ` - ${s.hint}` : ''}`).join('; ')}; they play for seconds (default 6) until you do something else.` : '';
-    register('emote', `A short gesture others see: ${gestures.join(', ')}; player: face them first. Don't overuse it.${sourceText} Without name: just turn to look at player or x/y/z.`, {
+    /**
+     * Built-in gestures back to back, one act at a time: the next one goes out only after the last has succeeded (the body
+     * takes one emote at a time). A stop refuses the next act (CANCELLED, body.act) and a gesture that ends otherwise ends the run;
+     * after the first one completed, a later error returns what was done instead of failing the whole call.
+     */
+    const repeatGesture = async (args: import('./body.js').ActionArguments['emote'], times: number) => {
+      let operation: import('./body.js').Operation | undefined;
+      let done = 0;
+      for (let turn = 0; turn < times; turn++) {
+        try { operation = await waitGesture(await body.act('emote', args)); }
+        catch (error) {
+          if (done === 0) throw error;
+          return { ...operationResult(operation!), done, times, stopped: error instanceof BodyError ? error.code : 'INTERNAL', reason: error instanceof Error ? error.message : String(error) };
+        }
+        if (operation.status !== 'succeeded') break;
+        done++;
+      }
+      return { ...operationResult(operation!), done, times };
+    };
+    /** A gesture is about a second; this waits the 3 seconds the single emote always waited. Player chat does not end the wait (the repeats finish; a halt does). */
+    const waitGesture = async (operation: import('./body.js').Operation) => {
+      const end = Date.now() + 3000;
+      while (operation.status === 'running' && Date.now() < end) { await new Promise(resolve => setTimeout(resolve, 250)); operation = await body.operation(operation.operationId); }
+      return operation;
+    };
+    register('emote', `A short gesture others see: ${gestures.join(', ')}; player: face them first. Don't overuse it. When the player asks for several (e.g. "nod three times"), pass times with that count (built-in gestures only).${sourceText} Without name: just turn to look at player or x/y/z.`, {
       name: z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/).optional().describe(sources.length ? 'Gesture, or the animation of source' : 'Gesture'),
       ...(sources.length ? { source: z.enum(sources.map(s => s.id) as [string, ...string[]]).optional() } : {}),
       player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(),
-      seconds: z.number().min(1).max(30).optional().describe('Add-on animation length'),
+      seconds: z.number().min(EMOTE_SECONDS.min).max(EMOTE_SECONDS.max).optional().describe('Add-on animation length'),
+      // Capped by the same EMOTE_SECONDS.max: a built-in gesture takes about a second, so 30 seconds is 30 gestures.
+      times: z.number().int().min(1).max(EMOTE_SECONDS.max).optional().describe('Built-in gesture repeats, back to back (default 1)'),
       x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(),
       say: z.string().min(1).max(256).optional(),
-    }, async ({ say, x, y, z: zz, ...args }) => {
+    }, async ({ say, x, y, z: zz, times, ...args }) => {
       if (say) await body.act('send-chat', { message: say });
       if (!args.name) {
         // Only looking: the plain look-at action, which a follow keeps driving through.
@@ -302,9 +329,14 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
         if (!at) throw new BodyError('INVALID_ARGUMENT', '给 name 做动作，或给 player／x、y、z 转过去看');
         return operationResult(await body.act('look-at', at));
       }
-      const operation = await body.act('emote', args as import('./body.js').ActionArguments['emote']);
-      const done = await settle(operation, 3000);
-      return operationResult(done);
+      const repeats = times ?? 1;
+      if (args.source !== undefined) {
+        if (repeats > 1) throw new BodyError('INVALID_ARGUMENT', 'times 只用于内置动作；附属动画一次播一段');
+        const operation = await body.act('emote', args as import('./body.js').ActionArguments['emote']);
+        const done = await settle(operation, 3000);
+        return operationResult(done);
+      }
+      return repeatGesture(args as import('./body.js').ActionArguments['emote'], repeats);
     });
   }
   /**
@@ -401,8 +433,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     });
   }
   if (serverObserved && body.hello.capabilities.includes('hunt')) {
-    register('hunt', 'Only when the player asks: kill count (default 1) grown mobs of one type nearby with your best sword or axe (never players, villagers, pets, named or baby animals; no creepers). Stops at lowHealth. Pick up leftover drops with collect-items. survey:true only counts them.', {
-      type: registryId.describe('e.g. minecraft:sheep'), count: z.number().int().min(1).max(16).optional(), survey: z.boolean().optional(), ...area,
+    register('hunt', 'Only when the player asks: kill count (default 1) grown mobs of one type nearby with your best sword or axe (never players, villagers, pets, named or baby animals; no creepers). Iron golems: only a village\'s own (not player-built, not named), and only when the player clearly asks; it stands on a pillar of spare blocks 1-8 high beside the golem and fights from there, so the pack needs plain full blocks (dirt, cobblestone, planks). pillar:true does the same for a ground melee mob that is chasing you or hurts a lot (zombie, vindicator); useless against ranged mobs, spiders and endermen (refused). Stops at lowHealth. Pick up leftover drops with collect-items. survey:true only counts them.', {
+      type: registryId.describe('e.g. minecraft:sheep'), count: z.number().int().min(1).max(16).optional(), pillar: z.boolean().optional().describe('Fight from a pillar beside the target (always so for iron golems)'), survey: z.boolean().optional(), ...area,
       lowHealth: z.number().min(2).max(18).optional(), say: z.string().min(1).max(256).optional(), timeoutMs: z.number().int().min(5000).max(180000).optional(),
     }, async ({ say, ...args }) => {
       if (args.survey) return operationResult(await body.act('hunt', args));

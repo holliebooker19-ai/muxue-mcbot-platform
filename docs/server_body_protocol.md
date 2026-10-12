@@ -91,7 +91,7 @@ NBT 类型为 end／byte／short／int／long／float／double／byte_array／st
 | place-block | `{x,y,z,face,slot,expectedBlock,expectedProperties,expectedItem,expectedCount,expectedComponents,timeoutMs?}`；坐标是支撑格，目标是其 face 相邻格。slot 0–8；检查支撑状态、当前完整栈、空目标和原生放置／真实消耗。当前拒绝门、床、双格植物等多格放置，拒绝以菜单方块为支撑 |
 | open-container | `{x,y,z,expectedBlock,expectedProperties,timeoutMs?}`；普通距离／视线下原生交互，要求至少一个空快捷栏槽以避免物品使用回退 |
 | approach-container | `{targetToken,timeoutMs?}`；仅走到当前实例绑定容器的原版可触及／可见站位，不打开菜单。MCP用本地`containerRef`转换，模型不传私有token。running须查询，取消复用控制代次 |
-| approach-player | `{player,expectedEntityId?,distance?,timeoutMs?}`；distance默认1.3，范围1–1.5；同维度真实玩家，任务内部必带UUID。行走中目标位移超过0.5格返回TARGET_MOVED；到达后由任务重新核验 |
+| approach-player | `{player,expectedEntityId?,distance?,timeoutMs?,track?}`；distance默认1.3，范围1–1.5；同维度真实玩家，任务内部必带UUID。默认行走中目标位移超过0.5格返回TARGET_MOVED（`go-to` 走向玩家用这个）；`track:true`（10-12 起 give-item 用）时不做这个检查，每刻朝玩家当前位置走，超过 `timeoutMs` 没追上返回 TIMEOUT（说明写“追不上”），玩家离开32格返回 OUT_OF_REACH，离线或换维度仍是 STALE_TARGET；到达后由任务重新核验 |
 | approach-resource | `{targetToken,timeoutMs?}`；仅走向引用资源的原版block reach／LOS站位，不挖掘。开始时目标距Bot最多16格，默认15秒、timeoutMs 500–120000；复用已加载安全高差路线与资源引用／支撑保护 |
 | pickup-item | `{entityId,expectedItem,expectedCount,expectedComponents,expectedMaxStackSize?,timeoutMs?,companionGuard?}`；完整UUID必需、expectedCount为正整数。绑定真实ItemEntity实例与完整栈，距Bot须保持8格内；相对开始位置移动超过0.75格停止；统一导航行走无进展3秒进入有限重规划，预算耗尽停止。默认15秒、timeoutMs 500–30000。可选companionGuard另限制实时玩家范围，未携带时保持原有限拾取语义。普通物理碰撞拾取，不调用虚拟touch、塞库存或传送；原生Post才确认获得量，详见下节 |
 | follow-companion | **已删（8m 第二步，由 `posture` 方法取代，能力名也不再声明）**。原来：`{player,expectedEntityId,distance?}`；UUID必需，distance默认2.5、范围1.5–6。持续运行，无总时长自然结束；距离及LOS满足时waiting，玩家离开站位后following。绑定真实玩家实例／UUID／维度，已加载安全高差地形内有界重规划；受阻、离线、受伤等失败后不自动恢复。原follow-player有限语义不变 |
@@ -138,7 +138,7 @@ Bot 不会踩坏耕地：ServerBody 取消 Bot 自己触发的 `FarmlandTrampleE
 
 挂在台阶边上（2026-10-12）：往上跳一格时身体侧面挂住方块棱角、贴着它跳了 0.7 秒还没上去，就先不跳、走回起跳那格的中心，再按原来的方式正对着台阶走过去跳；每级台阶最多这样调两次，还不行才按原来的 2 秒没进展重新算路。回执 navigation 里 `ledges` 是这样调整的次数，build 的 trace 里记一行“caught on the step up…”。离线编译和隔离服建房回归通过，挂边本身还没在测试里复现过。
 
-drop-item携expectedMaxStackSize时，每次原生DROP_ITEM前均再核验；数量上限不因实际栈大于64而扩大。Node的give-item可以把一个真实足量栈的最多256个目标分成每批最多64个丢出；容器取物仍要求一个足量源栈和空快捷栏，不跨栈凑数，目标不能超过实际源／目标栈有效上限。
+drop-item携expectedMaxStackSize时，每次原生DROP_ITEM前均再核验；数量上限不因实际栈大于64而扩大。Node的give-item可以把一个真实足量栈的最多256个目标分成每批最多64个丢出；交物前先带 `track:true` 走向接收者（玩家在走也跟着，20秒内追上就给；追不上报 CANNOT_CATCH_UP；到了身边对方又走远会在剩余时间内再走一次）；没给 `slot` 且快捷栏没有足量的栈、背包主栏（9～35格）有时，先把主栏那一整栈换到快捷栏空格（swap-inventory）再给，快捷栏没空格仍报 INVENTORY_FULL 提示先用 equip-item，同ID有不同组件变体仍报 AMBIGUOUS_ITEM；容器取物仍要求一个足量源栈和空快捷栏，不跨栈凑数，目标不能超过实际源／目标栈有效上限。
 
 Observation 另带 `sitting`（Bot 是否骑着已安装座位适配认定的座位实体，hello 的 `seatAdapters` 列出已安装的适配）、`sleeping`（Bot 是否躺在床上）和 `time:{dayTime,canSleep}`（一天里的时刻 0–23999；canSleep 是当前维度能用床且不是白天），附近玩家的 entities 条目带 `sleeping`。客户端运行端据此发两种唤醒事件：附近玩家上床 `player_sleep`（接管时已经在睡的不算），Bot 自己起床 `woke`。
 
@@ -151,7 +151,7 @@ Observation 另带 `sitting`（Bot 是否骑着已安装座位适配认定的座
 - 跟丢（`away`）后不自动去找。
 
 表情和外观（2026-10-08，第 8j 步）：
-- `emote` `{name,source?,player?,seconds?}`。不带 source 是内置手势 wave（挥三下手）、nod（点头）、shake（摇头）、crouch（蹲起两次）、jump（跳一下）、spin（转一圈），约 1 秒，逐 tick 做，做完把朝向和姿势复原；player 先转向那位玩家（32 格内，否则 PLAYER_NOT_VISIBLE）。带 source 是附属模组登记的动画（`EmoteSource`），立即成功，result `{source,name,seconds}`；到 seconds（默认 6，1–30）、开始别的动作（send-chat、look-at、emote、set-appearance 除外）或身体被移除时，核心调来源的 `stop`。名字只能是 `[A-Za-z0-9_.:-]{1,64}`；没装的来源 UNSUPPORTED，来源不认的名字 INVALID_ARGUMENT。
+- `emote` `{name,source?,player?,seconds?}`。不带 source 是内置手势 wave（挥三下手）、nod（点头）、shake（摇头）、crouch（蹲起两次）、jump（跳一下）、spin（转一圈），约 1 秒，逐 tick 做，做完把朝向和姿势复原；player 先转向那位玩家（32 格内，否则 PLAYER_NOT_VISIBLE）。运行端 MCP 的 `emote` 另有 `times`（1–30，默认 1，只对内置手势；玩家说做几下就填几）：运行端连着发几次 `emote`，上一下 succeeded 才发下一下，服务端协议不变、`times` 不发给服务端；叫停或某一下没 succeeded 就停，结果里 `done` 是做完的下数。带 source 是附属模组登记的动画（`EmoteSource`），立即成功，result `{source,name,seconds}`；到 seconds（默认 6，1–30）、开始别的动作（send-chat、look-at、emote、set-appearance 除外）或身体被移除时，核心调来源的 `stop`。名字只能是 `[A-Za-z0-9_.:-]{1,64}`；没装的来源 UNSUPPORTED，来源不认的名字 INVALID_ARGUMENT。
 - `set-appearance` `{source,choice}`：套用附属模组登记的外观（`AppearanceSource`），choice 必须在来源当前的 `choices` 里。只给托管宿主用：运行端带 `--appearance <source>=<choice>`（WebUI 配置页选）时，每次接管后调一次，失败只在 stderr 提示；MCP 不发布这个动作。
 - hello 多两项：`emotes:{builtin:[...],sources:[{id,hint}]}` 和 `appearances:[{id,choices:[...]}]`（只列已安装的来源）。
 - Observation 多 `weather:{natural,sky,raining,thundering}`（natural 是有昼夜的维度，sky 是头顶看得见天）。运行端据此发 `scene` 唤醒事件：露天时太阳下山（dayTime 进入 11800–13000）、开始下雨、开始打雷各一次，下雨时不报日落；接管后的第一次观察只当基准，从下界等维度回来也重新当基准。
@@ -170,7 +170,7 @@ Observation新增`groundItems`：`[{entityId,position,stack:{id,count,components
 
 pickup-item成功result为`{entityId,pickedUpCount,pickup:"confirmed",requestedCount,remainingCount,stack}`；部分原生拾取也只报告真实片段。失败保留真实已获得量和`code`，没有Post时为`pickup:"unconfirmed"`，不猜消失实体的剩余量。其它玩家拾取为PICKUP_TAKEN，未知消失为PICKUP_UNKNOWN；被原版合并进附近同物品掉落（实体被丢弃、1.5 格内有同物品同组件的掉落）为PICKUP_MERGED（普通失败，没捡到任何东西，客户端重新观察后去捡合并后的那个实体），变体或上限变化为STALE_ITEM；危险／掉血／无进展为BLOCKED，移动过远为TARGET_MOVED，原生延迟／拒绝等未确认在有限时限内停止。收据也覆盖dig／walk期间的自然拾取；Node按seq累计一次，不再把pickup-item返回量重复相加。
 
-2026-10-07（第 8a 步）起资源按方块标签认，模组的也算：原木是 `#minecraft:logs`（不含去皮原木和 `_wood`／`_hyphae` 六面树皮木），矿石是 `#c:ores`，石料是 `#c:stones` 加上原版 `minecraft:stone`／`deepslate`／`granite`／`diorite`／`andesite`；带方块实体的不算。blockIds 可以是方块 ID（必须属于上面三类，否则 UNSUPPORTED），也可以是标签（`#c:ores/iron`），标签只用来缩小范围。每个候选多带 `kind`（`log|ore|stone`）和 `drops`：服务器用顶级镐（原木用斧）不带时运、分别带和不带精准采集，各按掉落表掷 12 次算出的 `{item,preference,least}`，preference 是 `any|silk_touch|no_silk_touch`，least 是这几次里每块最少的数量（偶然掉落为 0）；矿石只报普通产物，不报精准采集掉的矿石块。实际数量仍以原生拾取回执为准。陪挖的拾取授权按目标矿石的同一份掉落表核对。不能区分玩家建筑与天然地形。明确用户请求／授权区域仍由Agent判断，发现不等于破坏授权。
+2026-10-07（第 8a 步）起资源按方块标签认，模组的也算：原木是 `#minecraft:logs`（不含去皮原木和 `_wood`／`_hyphae` 六面树皮木），矿石是 `#c:ores`，石料是 `#c:stones` 加上原版 `minecraft:stone`／`deepslate`／`granite`／`diorite`／`andesite`；带方块实体的不算。blockIds 可以是方块 ID（必须属于上面三类，否则 UNSUPPORTED），也可以是标签（`#c:ores/iron`），标签只用来缩小范围。每个候选多带 `kind`（`log|ore|stone`）和 `drops`：服务器用顶级镐（原木用斧）不带时运、分别带和不带精准采集，各按掉落表掷 12 次算出的 `{item,preference,least}`，preference 是 `any|silk_touch|no_silk_touch`，least 是这几次里每块最少的数量（偶然掉落为 0）；矿石只报普通产物，不报精准采集掉的矿石块。实际数量仍以原生拾取回执为准。陪挖的拾取授权按目标矿石的同一份掉落表核对。原木要算树（2026-10-12）：相连的原木里至少有一节的某个面贴着树叶（下界巨型菌是疣块或菌光体），整棵树和普通扫描都不要没有树冠的原木（村民房子的墙、栅栏、树桩），普通扫描在 `budget.builtLogs` 记排除了几节、运行端回给模型 `builtLogs`；玩家自己放的树叶也算树冠。除此之外不能区分玩家建筑与天然地形。明确用户请求／授权区域仍由Agent判断，发现不等于破坏授权。
 
 有限任务先筛选与目标产物匹配的冻结候选，矿石须完整工具评估／准备能力、已知掉落效果与非精准工具；服务端资源引用挖掘仍在执行前核验实际主手及原生位置相关采掘资格。首批不支持精准矿石块，不按工具名称写等级表，不保证数据包或Mod未改变掉落。目标数量按原生新拾取回执累计；铜的多产物、时运等可导致一次真实拾取超过目标，以`overage`如实记录，到量后不再开挖新候选。实际掉落不匹配、无工具、未知或部分完成均保留真实结果，不扩大区域或自动重试。
 
@@ -335,7 +335,8 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 ### 打指定生物 hunt、金苹果（2026-10-11 试玩反馈）
 
-- **能力`hunt`**（操作，同时一个）：`{type, count?, radius?, player?|center?, lowHealth?, survey?, timeoutMs?}`。在中心（默认 Bot 自己，或玩家、坐标）`radius`（1～16，默认 12）内找成年的该种生物，走过去用背包里最好的剑或斧（不在热栏就换进热栏），满蓄力一下一下砍，攻击走和自卫一样的原生攻击范围（只能伤到目标，不横扫），直到打死`count`只（1～16，默认 1）或附近没有了。永远不打：玩家、村民和商人、傀儡、有主人或拴着的、起了名字的、幼崽；苦力怕直接拒绝（`UNSUPPORTED`）。血量到`lowHealth`（默认 8）就停（`LOW_HEALTH`）。掉落只在走过时按原版拾取。`survey:true`只数（`total`、`huntable`、`babies`、`protected`）。结果：`killed`（只算自己砍过、随后死亡的）、`swings`、`damage`、走不到的个数和原因、背包变化。走路时可被常驻保护打断。运行端工具`hunt`，说明里要求只打玩家要求的。
+- **能力`hunt`**（操作，同时一个）：`{type, count?, pillar?, radius?, player?|center?, lowHealth?, survey?, timeoutMs?}`。在中心（默认 Bot 自己，或玩家、坐标）`radius`（1～16，默认 12）内找成年的该种生物，走过去用背包里最好的剑或斧（不在热栏就换进热栏），满蓄力一下一下砍，攻击走和自卫一样的原生攻击范围（只能伤到目标，不横扫），直到打死`count`只（1～16，默认 1）或附近没有了。永远不打：玩家、村民和商人、玩家造的傀儡、有主人或拴着的、起了名字的、幼崽；苦力怕直接拒绝（`UNSUPPORTED`）。**唯一的例外是村子自己生成的铁傀儡**（不是玩家造的、没名字、没拴着，`GuardCombat.wildGolem`），只在`type`是`minecraft:iron_golem`时才会被选为目标，`survey`里也按这个算“可打／受保护”；玩家造的和起了名字的铁傀儡照旧受保护。放行只在这一次挥击里生效（`GuardCombat.huntSwing`临时记下被打的那只，友军伤害取消`protectedFromBody`据此放过，挥完就清掉），自卫、保护玩家（GuardDuty）、弓箭路线上的判断都没改，仍把铁傀儡当受保护的。血量到`lowHealth`（默认 8）就停（`LOW_HEALTH`）。掉落只在走过时按原版拾取。`survey:true`只数（`total`、`huntable`、`babies`、`protected`）。结果：`killed`（只算自己砍过、随后死亡的）、`swings`、`damage`、走不到的个数和原因、背包变化。走路时可被常驻保护打断。运行端工具`hunt`，说明里要求只打玩家要求的。
+- **垫高打法（`HuntPillar`，铁傀儡一定用，其他怪传`pillar:true`才用）**：近战怪的攻击范围是自己的碰撞箱只向水平方向扩一点、竖直方向不扩（原版 1.21.1 `Mob.getAttackBoundingBox`、`isWithinMeleeAttackRange`），所以 Bot 脚底不低于目标碰撞箱顶就够不着。流程：走到目标 2.4 格内（`HuntTask.NEAR`；已经在追 Bot 的怪就原地不走）→ 按“目标碰撞箱顶 − 脚底高度”向上取整算要垫几格（`HuntPillar.levels`，铁傀儡 2.7 高同一地面是 3，僵尸是 2；不写死）→ 一格一格用 `NativePillar`（和`pillar-up`同一段代码，作为 hunt 的子操作）跳起放方块 → 换回剑站在垫脚上，目标在交互距离里就打，直到打死 `count` 只、血量到`lowHealth`、超时或这只一直够不着（`WALK_MS`）→ 用`dig-block`（同一段原生挖掘）从最上面一块往下拆回自己放的方块，再继续或结束；结果里`standBlocksLeft`是没拆掉的个数，`note`写原因。垫脚用背包里软的、手或带着的工具能挖的普通整块（和 build 的脚手架同一套挑法，上限`BuildTask.MAX_SCAFFOLD`=8 格），数量不够直接失败`NO_BLOCKS`（不会走过去）、目标太高失败`UNSUPPORTED`。`pillar:true`只对地面近战怪（`HuntTask.pillarable`：要是铁傀儡或敌对怪；不含远程的、手里拿弓弩三叉戟的、法术师、会飞的、蜘蛛、末影人、监守者、守卫者、旋风人、末影龙、苦力怕），其他类型整次拒绝`UNSUPPORTED`。不处理怪跳起来，也不追：目标走开出了交互距离就等到`WALK_MS`后放弃这只。叫停（`stop`）或租约丢了时 Bot 留在垫脚上，不会先拆。
 - **金苹果**：金苹果、附魔金苹果的效果都是有益的，不再按“带效果的食物”拒绝；仍是贵重食物，自动进食只在血量紧急线才吃，模型可以按玩家要求指定槽位吃；和原版一样饱腹时也能吃。
 - **验证**：隔离服`scripts/server-hunt-smoke.mjs` 8 项（2026-10-11）：只数不动；打 2 只成年羊、剩 1 只，剑从背包换到手上；起名字的和小羊没挨打；苦力怕拒绝；饱腹时吃附魔金苹果少一个、有伤害吸收。羊会走动，没有测会还手的怪，没有真实模型试玩。
 

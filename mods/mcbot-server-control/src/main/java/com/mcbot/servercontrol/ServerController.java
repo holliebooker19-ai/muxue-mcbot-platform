@@ -144,7 +144,7 @@ final class ServerController implements ControlSession.Game {
     }
     /** The body never tramples farmland: a companion walking the player's field must not turn it back to dirt. */
     /** Whatever the body does (a swing, an arrow, a guard fight), it never hurts a player, a pet, a villager or anything named. */
-    private void guardFriendlyFire(net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent event){if(GuardCombat.blocksFriendlyFire(player!=null&&event.getSource().getEntity()==player,event.getSource().getDirectEntity()!=null&&event.getSource().getDirectEntity().getTags().contains(GuardCombat.BODY_PROJECTILE_TAG),event.getEntity()==player,GuardCombat.protectedEntity(event.getEntity())))event.setCanceled(true);}
+    private void guardFriendlyFire(net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent event){if(GuardCombat.blocksFriendlyFire(player!=null&&event.getSource().getEntity()==player,event.getSource().getDirectEntity()!=null&&event.getSource().getDirectEntity().getTags().contains(GuardCombat.BODY_PROJECTILE_TAG),event.getEntity()==player,GuardCombat.protectedFromBody(event.getEntity())))event.setCanceled(true);}
     /** An arrow the body loosed keeps its mark after the body is gone (or its owner reference is), so the guard still knows whose it is. */
     private void markBodyProjectile(net.neoforged.neoforge.event.entity.EntityJoinLevelEvent event){if(player!=null&&!event.getLevel().isClientSide()&&event.getEntity() instanceof net.minecraft.world.entity.projectile.Projectile projectile&&projectile.getOwner()==player)projectile.addTag(GuardCombat.BODY_PROJECTILE_TAG);}
     private void guardFarmland(net.neoforged.neoforge.event.level.BlockEvent.FarmlandTrampleEvent event){if(player!=null&&event.getEntity()==player)event.setCanceled(true);}
@@ -633,7 +633,7 @@ final class ServerController implements ControlSession.Game {
                 requireWalkable();farm.start();
                 if(operation.status.equals("running")){task=farm;active=operation;}
             } else if(operation.name.equals("hunt")) {
-                HuntTask hunt=new HuntTask(operation,player,session,center);
+                HuntTask hunt=new HuntTask(operation,player,session,center,survival);
                 if(survey){operation.finish("succeeded","Hunt survey",hunt.survey());return;}
                 requireWalkable();hunt.start();
                 if(operation.status.equals("running")){task=hunt;active=operation;}
@@ -719,6 +719,8 @@ final class ServerController implements ControlSession.Game {
         /** Fight time added to the deadline, at most the walk's own limit; none for a retreat. */
         final GuardDuty.Grace grace;
         ServerPlayer followed,recipient;
+        /** approach-player with track:true: walk after a recipient who is moving instead of failing with TARGET_MOVED. */
+        boolean track;
         Vec3 recipientStart,retreatOrigin;
         BlockPos bed,seat;
         net.minecraft.world.entity.LivingEntity threat;
@@ -752,7 +754,7 @@ final class ServerController implements ControlSession.Game {
             catch(RuntimeException e) { finish("failed","Movement failed: "+e.getClass().getSimpleName()); }
         }
         private void tickApproach() {
-            if(now()>=deadline)throw error("TIMEOUT","Approach time limit reached");
+            if(now()>=deadline)throw error("TIMEOUT",track?"Could not catch up with the moving recipient before the time limit":"Approach time limit reached");
             FlatApproach geometry=new FlatApproach(player);Vec3 destination;
             java.util.function.Predicate<Vec3> goal;
             CompanionMiningGuard miningGuard=null;
@@ -767,7 +769,8 @@ final class ServerController implements ControlSession.Game {
             } else {
                 ServerPlayer actual=findPlayer(string(operation.args,"player"));
                 if(actual!=recipient)throw error("STALE_TARGET","Recipient entity changed or left local range/dimension");
-                if(actual.position().distanceTo(recipientStart)>0.5)throw error("TARGET_MOVED","Recipient moved during bounded approach");
+                String problem=FlatApproach.recipientProblem(track,recipientStart,actual.position(),player.position());
+                if(problem!=null)throw error(problem,problem.equals("TARGET_MOVED")?"Recipient moved during bounded approach":"Recipient moved beyond navigation range");
                 destination=actual.position();goal=feet->geometry.playerReach(feet,actual,bounded(operation.args,"distance",1.3,1,1.5));
             }
             boolean arrived;
@@ -828,6 +831,7 @@ final class ServerController implements ControlSession.Game {
         }
         WalkTask walk=new WalkTask(operation,timeout,true);
         walk.recipient=recipient;walk.recipientStart=recipient==null?null:recipient.position();
+        walk.track=recipient!=null&&operation.args.has("track")&&bool(operation.args,"track");
         task=walk;active=operation;
     }
     private JsonObject approachResult(ControlSession.Operation operation,ServerPlayer recipient) {
