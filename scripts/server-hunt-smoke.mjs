@@ -41,7 +41,8 @@ async function fixture(text) { const reply = await command(text); assert(!/not l
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const exists = async tag => /Test passed/.test(await command(`execute if entity @e[tag=${tag}]`));
 const health = async tag => Number((await command(`data get entity @e[tag=${tag},limit=1] Health`)).match(/(-?[\d.]+)f?\s*$/)?.[1]);
-const countOf = async (selector) => Number((await command(`execute store result score #n mcbot_hunt if entity ${selector}`)).match(/(\d+)/)?.[1] ?? NaN);
+// None left: the command answers "Test failed" without a number.
+const countOf = async (selector) => { const reply = await command(`execute store result score #n mcbot_hunt if entity ${selector}`); return /failed/i.test(reply) ? 0 : Number(reply.match(/(\d+)/)?.[1] ?? NaN); };
 let client;
 async function tool(name, args = {}) {
   const reply = await client.callTool({ name, arguments: args }, undefined, { timeout: 180000 });
