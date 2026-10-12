@@ -1,4 +1,7 @@
 // Offline Claude/Codex/dsh(ACP) protocol peer with a simulated MCP lease owner; no model or game.
+// The driver's memory tidy-up session (MCP args with --memory-only) takes no body: it only records itself, and with
+// FAKE_AGENT_MEMORY (<memory>/<agent>) a 【整理记忆】 turn writes state.json as a finished tidy-up would.
+// FAKE_AGENT_CONSOLIDATE=quota-once: the first tidy-up turn answers with a usage-limit error (counted across processes).
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -15,6 +18,7 @@ const rpc = async (method, params) => {
 };
 async function connect(server) {
   const a = server.args;
+  if (a.includes('--memory-only')) { record({kind:'memory-session',args:a}); return; }
   const connectionFile = arg(a,'--connection-file');
   connection = JSON.parse(fs.readFileSync(connectionFile,'utf8'));
   const hello = await rpc('hello',{});
@@ -39,12 +43,18 @@ function cleanup() {
 }
 function finish(text) {
   record({kind:'turn',text});
+  if(text.includes('【整理记忆】')) {
+    const flag=`${process.env.FAKE_AGENT_LOG}.consolidate-quota.done`;
+    if(process.env.FAKE_AGENT_CONSOLIDATE==='quota-once'&&!fs.existsSync(flag)) {fs.writeFileSync(flag,'');text=`[error-quota] ${text}`;}
+    else if(process.env.FAKE_AGENT_MEMORY) {fs.mkdirSync(process.env.FAKE_AGENT_MEMORY,{recursive:true});fs.writeFileSync(path.join(process.env.FAKE_AGENT_MEMORY,'state.json'),JSON.stringify({consolidatedAt:Date.now()}));}
+  }
   if(text.includes('[crash]')) {cleanup(); record({kind:'crash'}); process.exit(17);}
   if(text.includes('[hold]')) return;
-  if(text.includes('[error]')) {
-    if(kind==='claude') emit({type:'result',is_error:true,result:'fake turn error'});
-    else if(kind==='dsh') emit({jsonrpc:'2.0',id:promptId,error:{code:-32603,message:'fake turn error'}});
-    else emit({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'failed',items:[],error:{message:'fake turn error'}}}});
+  if(text.includes('[error]')||text.startsWith('[error-quota]')) {
+    const message=text.startsWith('[error-quota]')?'Claude AI usage limit reached':'fake turn error';
+    if(kind==='claude') emit({type:'result',is_error:true,result:message});
+    else if(kind==='dsh') emit({jsonrpc:'2.0',id:promptId,error:{code:-32603,message}});
+    else emit({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'failed',items:[],error:{message}}}});
     return;
   }
   if(kind==='claude') {
@@ -88,7 +98,7 @@ rl.on('line',async line=>{
   if(method==='thread/start'||method==='thread/resume') {
     await connect(params.config.mcp_servers.minecraft);
     threadId=`server-fake-${process.pid}`;
-    record({kind:'thread',compactPrompt:params.config.compact_prompt});
+    record({kind:'thread',compactPrompt:params.config.compact_prompt,developerInstructions:params.developerInstructions,enabledTools:params.config.mcp_servers.minecraft.enabled_tools});
     return reply({thread:{id:threadId,turns:[]},model:'fake',modelProvider:'openai',reasoningEffort:'low'});
   }
   if(method==='turn/start') {

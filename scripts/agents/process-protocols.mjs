@@ -40,7 +40,8 @@ const claude = Object.freeze({
   identity: 'xiaoke', memoryAgent: 'xiaoke', soulFile: 'claude_soul.md', systemInstructions: true, hostedMcpConfig: true,
   serverPolicy: 'claude-game-tools-v1',
   environment: (env, { body }) => body === 'server' ? claudeGameEnvironment(env) : env,
-  command({ hostedConfigFile, model, effort, conversationId, body, gameInstructions }) {
+  // rules: replaces the game rules (the driver's memory tidy-up session has its own, scripts/companion.mjs SIDE_CONSOLIDATE_RULES).
+  command({ hostedConfigFile, model, effort, conversationId, body, gameInstructions, rules }) {
     const gameOnly = body === 'server';
     const a = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
       '--mcp-config', hostedConfigFile, '--strict-mcp-config',
@@ -54,7 +55,7 @@ const claude = Object.freeze({
       a.push('--tools', '', '--restricted',
         '--settings', JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false }));
       // The same game rules as Codex and dsh get, then the persona (they were missing here until 10-12).
-      a.push('--append-system-prompt', [SERVER_GAME_INSTRUCTIONS, gameInstructions].filter(Boolean).join('\n\n'));
+      a.push('--append-system-prompt', [rules ?? SERVER_GAME_INSTRUCTIONS, gameInstructions].filter(Boolean).join('\n\n'));
     }
     if (effort) a.push('--effort', effort);
     if (model) a.push('--model', model);
@@ -173,8 +174,8 @@ const dsh = Object.freeze({
   // 没指定账号目录也不落到用户的 ~/.dsh。桌面版的 Electron 要 ELECTRON_RUN_AS_NODE 才当 Node 用，对普通 Node 没影响。
   environment: (env, { root }) => ({ ...env, DSH_HOME: env.DSH_HOME || path.join(root, 'runtime', 'dsh', 'home'), ELECTRON_RUN_AS_NODE: '1' }),
   defaultEffort: 'low',
-  command({ root, hostedConfigFile, gameInstructions, rotateTokens, contextWindow }) {
-    const patchFile = writeDshPatch(hostedConfigFile.replace(/\.json$/i, '') + '.dsh-patch.yml', gameInstructions, { rotateTokens, contextWindow });
+  command({ root, hostedConfigFile, gameInstructions, rotateTokens, contextWindow, rules }) {
+    const patchFile = writeDshPatch(hostedConfigFile.replace(/\.json$/i, '') + '.dsh-patch.yml', gameInstructions, { rotateTokens, contextWindow, rules });
     return dshCommand({ root, patchFile });
   },
   createConnection: createDshConnection,

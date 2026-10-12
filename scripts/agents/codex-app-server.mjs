@@ -56,7 +56,7 @@ export function codexThreadConfig(existing, server, root, body = 'mineflayer', c
 }
 
 export function createCodexConnection({ write, emit, fail, conversationId = '', root,
-  model = '', effort = '', mcpServer, body = 'mineflayer', gameInstructions = '', compactPrompt = '', requestTimeoutMs = 45000, cancelTimeoutMs = 10000 }) {
+  model = '', effort = '', mcpServer, body = 'mineflayer', gameInstructions = '', rules, compactPrompt = '', requestTimeoutMs = 45000, cancelTimeoutMs = 10000 }) {
   let nextId = 0, threadId = '', activeTurn = '', disposed = false, stopping = false;
   let pendingTurn = null, startingTurn = false, ready, turnRequest;
   let cancelling = false, cancelPromise = null;
@@ -87,7 +87,8 @@ export function createCodexConnection({ write, emit, fail, conversationId = '', 
       cwd: root, approvalPolicy: 'never', sandbox: 'read-only',
       config: codexThreadConfig(current.config, mcpServer, root, body, compactPrompt),
       developerInstructions: body === 'server'
-        ? [SERVER_GAME_INSTRUCTIONS, gameInstructions].filter(Boolean).join('\n\n')
+        // rules: the driver's memory tidy-up session replaces the game rules with its own (scripts/companion.mjs SIDE_CONSOLIDATE_RULES).
+        ? [rules ?? SERVER_GAME_INSTRUCTIONS, gameInstructions].filter(Boolean).join('\n\n')
         : LEGACY_GAME_INSTRUCTIONS,
       ...(model ? { model } : {}),
       ...(conversationId ? { threadId: conversationId, excludeTurns: true } : {}),

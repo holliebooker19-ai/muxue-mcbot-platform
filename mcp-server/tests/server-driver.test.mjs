@@ -89,7 +89,9 @@ test('ServerBody 参数、提示与工具不继承旧进服/记忆路径',()=>{
   for(const tool of ['build','machine-items']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
   // Merged into the tools above (docs/tool_consolidation_plan.md); the old ClientBody keeps its own names.
   for(const tool of ['select-slot','prepare-item','approach-player','travel-to','go-to-place','move-to-position','follow-player','look-at','get-position','list-inventory','get-companion-mode','get-survival-state','remember-place','list-places','forget-place','list-blueprints','save-blueprint','pillar-up','pillar-down','wake-up','stand-up','open-container','click-slot','close-container','get-container','read-chat','assess-tool','fetch-and-give','approach-container']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),false,tool);
-  assert.equal(CODEX_SERVER_TOOLS.length,45);
+  // 45 个游戏工具加 4 个记忆工具（docs/memory_plan.md；记忆没开时运行端不注册，整理会话只注册记忆工具）。
+  assert.equal(CODEX_SERVER_TOOLS.length,49);
+  for(const tool of ['memory-note','memory-recall','memory-context','memory-write']) assert.equal(CODEX_SERVER_TOOLS.includes(tool),true,tool);
 });
 
 test('持续陪伴只为受阻通知唤醒，普通状态变化不产生空闲回合',()=>{
