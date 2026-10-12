@@ -42,26 +42,27 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { createServerBodyControl, respawnIfDead, lastDeath } from './server-body-control.mjs';
-import { getAgentProtocol, claudeContextTokens, agentConfigDir } from './agents/process-protocols.mjs';
+import { getAgentProtocol } from './agents/process-protocols.mjs';
 import { ROOT, parseArgs, runtimeDirOf, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
-import { pidAlive, readJson, writeFileAtomic, jsonLines } from './driver/files.mjs';
+import { pidAlive, readJson, jsonLines } from './driver/files.mjs';
 import { resolveMemory, readMcpConfig, writeHostedMcpConfig, writeMemoryMcpConfig } from './driver/mcp-config.mjs';
 import { acquireLock, releaseLock, removeIfOwn, createHeartbeat } from './driver/lock.mjs';
 import { rotateLog, createLog, createNotifier } from './driver/log.mjs';
 
 import { QUOTA_PAUSE_MS, classifyError, quotaResetAt, createPause } from './driver/errors.mjs';
+import { createSession, providerOf, effectiveConfigDir } from './driver/session.mjs';
 // 测试和夹具脚本从这里 import 的名字（实现已经搬到 scripts/driver/）
 export { parseArgs, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
 export { stripAnsi, pidAlive } from './driver/files.mjs';
 export { resolveMemory, hostedMcpConfig, readMcpConfig, writeHostedMcpConfig } from './driver/mcp-config.mjs';
 export { writeHeartbeat, lockHolder, acquireLock, releaseLock, removeIfOwn } from './driver/lock.mjs';
 export { classifyError, quotaResetAt } from './driver/errors.mjs';
+export { readSessionState, writeSessionState, providerOf, effectiveConfigDir, isColdSession, resumableConversation, contextTokensOf } from './driver/session.mjs';
 export { rotateLog, createRateLimiter } from './driver/log.mjs';
 
 
@@ -229,60 +230,6 @@ export function serverVerdict(state, up, now, { goneMs, waitMs }) {
 }
 
 // ---------------- 会话和记忆（docs/memory_plan.md） ----------------
-
-export function readSessionState(file) {
-  const s = readJson(file);
-  return {
-    conversationId: typeof s?.conversationId === 'string' ? s.conversationId : '',
-    provider: typeof s?.provider === 'string' ? s.provider : '',
-    configDir: typeof s?.configDir === 'string' ? s.configDir : '',
-    lastRequestAt: Number(s?.lastRequestAt) || 0,
-    contextTokens: Number(s?.contextTokens) || 0,
-    ...(Number(s?.contextWindow) > 0 ? { contextWindow: Number(s.contextWindow) } : {}),
-    ...(Number(s?.lastStopAt) > 0 ? { lastStopAt: Number(s.lastStopAt) } : {}),
-    ...(typeof s?.model === 'string' && s.model ? { model: s.model } : {}),
-    ...(s?.bodyScope && typeof s.bodyScope === 'object' ? { bodyScope: s.bodyScope } : {}),
-  };
-}
-
-export function writeSessionState(file, state) {
-  writeFileAtomic(file, JSON.stringify(state) + '\n');
-}
-
-// agent 用的是哪个平台（会话 ID 只在同一个平台里有效）
-export function providerOf(agent) {
-  return getAgentProtocol(agent).provider;
-}
-
-// 实际生效的账号目录：命令行 > Agent 自己的环境变量（CLAUDE_CONFIG_DIR、CODEX_HOME、DSH_HOME）> 默认目录。规范化后才能比较
-export function effectiveConfigDir(agent, configDir, env = process.env, home = os.homedir()) {
-  return agentConfigDir(agent, configDir, env, home, ROOT);
-}
-
-// 缓存过期了没有：离上次成功请求超过窗口（窗口为 0 表示永不过期）
-export function isColdSession(lastRequestAt, now, resumeWindowMs) {
-  return resumeWindowMs > 0 && lastRequestAt > 0 && now - lastRequestAt > resumeWindowMs;
-}
-
-// 驱动器启动时接不接着上次的会话：同一个平台、同一个账号、同一个模型、缓存还没过期才接着
-// （换了模型还接着旧会话，Claude Code 会卡在启动阶段不出第一轮）
-export function resumableConversation(state, now, { resumeWindowMs, configDir, provider, model = '', bodyScope = null }) {
-  if (!state.conversationId) return '';
-  if (state.provider !== provider) return '';
-  if ((state.configDir || '') !== (configDir || '')) return '';
-  if ((state.model || '') !== (model || '')) return '';
-  if (!!state.bodyScope !== !!bodyScope) return '';
-  if (bodyScope && ['body', 'worldId', 'connectionFile', 'username', 'agentPolicy'].some((key) => state.bodyScope[key] !== bodyScope[key])) return '';
-  if (!state.lastRequestAt || isColdSession(state.lastRequestAt, now, resumeWindowMs)) return '';
-  return state.conversationId;
-}
-
-// 一次 API 请求的上下文大小（stream-json 里 assistant 消息带的 usage）。
-// 是最近一次请求的规模，用来估计下一次请求至少有多大，不是严格上限
-export function contextTokensOf(usage) {
-  return claudeContextTokens(usage);
-}
-
 // 哪些事件触发整理：自己躺上床（sleep），玩家都下线后角色被自动停放（presence 里带 no_players）；
 // ServerBody 的运行端在最后一个玩家下线时发的 player_left 带「现在没有玩家在线」（有 far-players 时才有，client-runtime/src/events.ts）
 export function consolidationTrigger(e) {
@@ -597,7 +544,6 @@ function main() {
   // 这一轮送出去的事件和输入、这一轮有没有动过工具：额度或登录报错时没动过工具就原样再送一次
   let turnInput = null, turnUsedTool = false;
   let playerStopTimer = null;
-  let conversationId = '';
   let session = '';
   let lastSeq = 0;
   let deliveredSeq = 0;
@@ -617,7 +563,6 @@ function main() {
   const pause = createPause();
   let shuttingDown = false;
   let cancellingActions = false;
-  let lastStopAt = 0;
   let lastStopBy = '';
   let hostedConfigFile = '';
   let hostedServer = null;
@@ -625,15 +570,6 @@ function main() {
   let serverControl = null;
   let waitingNewServerTask = false;
   let queuedServerTasks = [];
-  // 会话：最后一次成功 API 请求开始的时间和上下文大小，决定接着旧会话还是换新会话
-  let lastRequestAt = 0;
-  // 最近一次把输入交给模型的时间（发消息、工具结果回来）。下一次 API 请求就在这之后开始，拿它当请求开始时间偏保守
-  let lastInputAt = 0;
-  let contextTokens = 0;
-  // 模型的上下文窗口（dsh 报的）：下次启动 dsh 时按它设自动压缩的触发点
-  let contextWindow = 0;
-  // 压缩过几次（写进心跳）：运行端看到变了，就把玩法说明再给一次（client-runtime/src/guides.ts）
-  let compactions = 0;
   let turnKind = 'normal';
   // 整理记忆：排队中的和正在跑的分开记（{ reason, attempts, since, before }）；要不要换会话单独记
   let pendingConsolidation = null;
@@ -659,6 +595,9 @@ function main() {
   fs.mkdirSync(RUNTIME, { recursive: true });
   const { out, activity, info } = createLog({ logFile: F.log, activityFile: F.activity });
   const notifyGame = createNotifier({ args, agentProtocol, info, serverControl: () => serverControl });
+  // 会话：对话 ID、上次请求、上下文大小、上次叫停（session-<名字>.json）
+  const conversation = createSession({ file: F.session, provider: PROVIDER, configDir: CONFIG_DIR, model: args.model, bodyScope: BODY_SCOPE, resumeWindowMs,
+    keepStop: agentProtocol.identity === 'independent' || args.body === 'server', info, onCompaction: () => heartbeat.beat() });
 
 
   // ---------------- agent 进程 ----------------
@@ -670,7 +609,7 @@ function main() {
       return { cmd: override[0], a: override.slice(1) };
     }
     const { cmd, a } = agentProtocol.command({ root: ROOT, hostedConfigFile, body: args.body, gameInstructions,
-      model: args.model, effort: args.effort, conversationId, rotateTokens: args.rotateTokens, contextWindow });
+      model: args.model, effort: args.effort, conversationId: conversation.conversationId, rotateTokens: args.rotateTokens, contextWindow: conversation.contextWindow });
     if (process.env.COMPANION_AGENT_CMD) {
       const override = JSON.parse(process.env.COMPANION_AGENT_CMD);
       return { cmd: override[0], a: [...override.slice(1), ...a] };
@@ -681,7 +620,7 @@ function main() {
   function startAgent() {
     gameInstructions = serverInstructions();
     const { cmd, a } = agentCommand();
-    info(`启动 ${cmd}${args.effort ? `（思考 ${args.effort}）` : ''}${args.configDir ? `（账号配置 ${args.configDir}）` : ''} ${conversationId ? `（接着会话 ${conversationId}）` : ''}`);
+    info(`启动 ${cmd}${args.effort ? `（思考 ${args.effort}）` : ''}${args.configDir ? `（账号配置 ${args.configDir}）` : ''} ${conversation.conversationId ? `（接着会话 ${conversation.conversationId}）` : ''}`);
     // 指定了配置目录就用那个目录里登录的账号（各 Agent 自己的环境变量），不影响别的会话
     let env = args.configDir ? { ...process.env, [agentProtocol.configEnv]: args.configDir } : process.env;
     env = agentProtocol.environment(env, { body: args.body, root: ROOT });
@@ -731,9 +670,9 @@ function main() {
         return;
       }
       // 接着旧会话连续失败几次，可能是会话本身坏了，换新会话
-      if (restartCount >= 3 && conversationId) {
-        info(`接着会话 ${conversationId} 重启连续失败，改为开新会话`);
-        conversationId = '';
+      if (restartCount >= 3 && conversation.conversationId) {
+        info(`接着会话 ${conversation.conversationId} 重启连续失败，改为开新会话`);
+        conversation.dropConversation();
       }
       notifyGame('restart', '出了点问题，正在重启');
       const delay = Math.min(60, 3 * restartCount) * 1000;
@@ -743,7 +682,7 @@ function main() {
         restarting = false;
         if (shuttingDown) return;
         startAgent();
-        if (!conversationId) sendTurn(STARTUP_PROMPT, 'startup');
+        if (!conversation.conversationId) sendTurn(STARTUP_PROMPT, 'startup');
         else {
           resumeNote = 'agent 进程出错退出后刚重启';
           flush();
@@ -754,7 +693,7 @@ function main() {
     proc.on('exit', (code, signal) => onGone(`code ${code}${signal ? `，${signal}` : ''}`));
     if (agentProtocol.createConnection) {
       proc.connection = agentProtocol.createConnection({
-        root: ROOT, conversationId, model: args.model, effort: args.effort, mcpServer: hostedServer, body: args.body, gameInstructions, compactPrompt: COMPACT_PROMPT,
+        root: ROOT, conversationId: conversation.conversationId, model: args.model, effort: args.effort, mcpServer: hostedServer, body: args.body, gameInstructions, compactPrompt: COMPACT_PROMPT,
         write: (msg) => { if (!proc.stdin.destroyed) proc.stdin.write(JSON.stringify(msg) + '\n'); },
         emit: (event) => { if (child === proc && !proc.intentional && !shuttingDown) handleAgentEvent(event); },
         fail: (e) => {
@@ -776,7 +715,7 @@ function main() {
     turnUsedTool = false;
     if (kind !== 'normal') turnInput = null;
     activity('turn_start', { turnKind: kind });
-    lastInputAt = turnStartedAt;
+    conversation.inputSent(turnStartedAt);
     lastActivity = Date.now();
     idleNudged = false;
     if (kind === 'compact') { currentTool = '整理对话'; compactSeen = null; }
@@ -842,11 +781,9 @@ function main() {
       const seen = compactSeen;
       compactSeen = null;
       if (seen && !error) {
-        // Codex 不报压缩前后的大小：先记 0，下一轮的用量会报实际大小
-        const before = Number(seen.preTokens) || contextTokens;
-        contextTokens = Number(seen.postTokens) || 0;
-        info(`压缩完成：上下文 ${Math.round(before / 1000)}k → ${seen.postTokens ? `${Math.round(contextTokens / 1000)}k` : '（下一轮报）'}，进程和身体控制都没断`);
-        saveSession();
+        const before = conversation.compacted(seen);
+        info(`压缩完成：上下文 ${Math.round(before / 1000)}k → ${seen.postTokens ? `${Math.round(conversation.contextTokens / 1000)}k` : '（下一轮报）'}，进程和身体控制都没断`);
+        conversation.save();
       } else if (errorKind === 'quota' || errorKind === 'auth') {
         // 额度、登录问题：暂停结束后再压缩
         pendingCompact = { since: Date.now() };
@@ -857,12 +794,12 @@ function main() {
     }
     // 每一轮成功结束后都看上下文有没有超过上限（整理轮自己跨过上限也算）
     // dsh 自己在这个上限压缩（生成的补丁里设好了），宿主不压也不换会话
-    if ((!error || compactRefused) && agentProtocol.tracksContextTokens && !agentProtocol.compactsItself && args.rotateTokens > 0 && contextTokens > args.rotateTokens && !rotateDue && !pendingCompact) {
+    if ((!error || compactRefused) && agentProtocol.tracksContextTokens && !agentProtocol.compactsItself && args.rotateTokens > 0 && conversation.contextTokens > args.rotateTokens && !rotateDue && !pendingCompact) {
       if (canCompact()) {
-        info(`会话上下文 ${contextTokens} tokens，超过 ${args.rotateTokens}：压缩对话（进程和身体控制不断，正在做的事接着做）`);
+        info(`会话上下文 ${conversation.contextTokens} tokens，超过 ${args.rotateTokens}：压缩对话（进程和身体控制不断，正在做的事接着做）`);
         pendingCompact = { since: Date.now() };
       } else {
-        info(`会话上下文 ${contextTokens} tokens，超过 ${args.rotateTokens}：整理记忆后换新会话`);
+        info(`会话上下文 ${conversation.contextTokens} tokens，超过 ${args.rotateTokens}：整理记忆后换新会话`);
         rotateDue = true;
       }
     }
@@ -877,23 +814,10 @@ function main() {
     flush();
   }
 
-  function noteCompaction() { compactions += 1; heartbeat.beat(); }
-
   // 压缩只用在服务端身体（还没接长期记忆，换会话会丢掉一切、还要撤控制）；旧身体照旧整理记忆后换会话
   function canCompact() {
     const compacts = agentProtocol.createConnection ? agentProtocol.compacts === true : typeof agentProtocol.compactTurn === 'function';
     return args.body === 'server' && compacts && !compactFailed;
-  }
-
-  function saveSession() {
-    try {
-      writeSessionState(F.session, { conversationId, provider: PROVIDER, configDir: CONFIG_DIR, lastRequestAt, contextTokens, ...(contextWindow ? { contextWindow } : {}),
-        ...(args.model ? { model: args.model } : {}),
-        ...(BODY_SCOPE ? { bodyScope: BODY_SCOPE } : {}),
-        ...(lastStopAt ? { lastStopAt } : {}) });
-    } catch (e) {
-      info(`写会话状态失败：${e.message}`);
-    }
   }
 
   // 安排一轮整理记忆；没有没整理的日志、躺床离上次整理不够久就跳过
@@ -955,7 +879,7 @@ function main() {
     } else {
       try {
         ({ cmd, a } = agentProtocol.command({ root: ROOT, hostedConfigFile: config.configFile, body: 'server', gameInstructions: instructions, rules,
-          model: args.model, effort: args.effort, conversationId: '', rotateTokens: 0, contextWindow }));
+          model: args.model, effort: args.effort, conversationId: '', rotateTokens: 0, contextWindow: conversation.contextWindow }));
       } catch (e) { info(`整理记忆没能开始：${e.message}`); return; }
       if (process.env.COMPANION_AGENT_CMD) { const override = JSON.parse(process.env.COMPANION_AGENT_CMD); a = [...override.slice(1), ...a]; cmd = override[0]; }
     }
@@ -1069,12 +993,10 @@ function main() {
     const old = child;
     child = null;
     busy = false;
-    conversationId = '';
-    contextTokens = 0;
-    lastRequestAt = 0;
+    conversation.reset();
     pendingCompact = null;
     compactFailed = false;
-    saveSession();
+    conversation.save();
     newSessionNote = reason;
     restarting = true;
     if (old) old.intentional = true;
@@ -1101,12 +1023,8 @@ function main() {
 
   function serverHandoff() {
     try {
-      return buildHandoff({ activityFile: F.activity, operationsFile: path.join(RUNTIME, `operations-${args.name}.jsonl`), postureFile: F.posture, lastStopAt });
+      return buildHandoff({ activityFile: F.activity, operationsFile: path.join(RUNTIME, `operations-${args.name}.jsonl`), postureFile: F.posture, lastStopAt: conversation.lastStopAt });
     } catch (e) { info(`交接单没拼成：${e.message}`); return ''; }
-  }
-
-  function coldNow() {
-    return !!conversationId && isColdSession(lastRequestAt, Date.now(), resumeWindowMs);
   }
 
   let textBuffer = '';
@@ -1117,13 +1035,6 @@ function main() {
       textBuffer = done ? '' : parts.pop();
       for (const p of parts) if (p.trim()) { out(`\x1b[36m${args.nickname}>\x1b[0m ${p}`); activity('reply', { text: p }); }
     }
-  }
-
-  function setConversation(id) {
-    if (!id || id === conversationId) return;
-    conversationId = id;
-    info(`会话 ${conversationId}`);
-    saveSession();
   }
 
   function handleAgentLine(line, proc) {
@@ -1169,12 +1080,12 @@ function main() {
     pendingConsolidation = null;
     runningConsolidation = null;
     if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
-    lastStopAt = Date.now();
+    conversation.markStop();
     lastStopBy = typeof event?.username === 'string' ? event.username : '';
     // 叫停也结束跟随和保护：下次重连不再提示接上
     try { fs.rmSync(F.posture, { force: true }); } catch { /* 忽略 */ }
-    lastRequestAt = 0;
-    saveSession();
+    conversation.forgetRequest();
+    conversation.save();
     if (event?.session && Number.isSafeInteger(event.seq)) {
       deliveredSeq = Math.max(deliveredSeq, event.seq);
       try { fs.writeFileSync(F.cursor, `${event.session} ${deliveredSeq}`); } catch { }
@@ -1221,18 +1132,15 @@ function main() {
 
   function handleAgentEvent(event) {
     switch (event.type) {
-        case 'session': setConversation(event.id); break;
-        case 'request_started': lastInputAt = Date.now(); break;
-        case 'request_completed': lastRequestAt = lastInputAt || Date.now(); break;
-        case 'usage':
-          // dsh 自己压缩，不发事件：上下文变小了就是压缩过（同一个会话里只有压缩会让它变小）
-          if (agentProtocol.compactsItself && contextTokens > 0 && event.contextTokens < contextTokens) noteCompaction();
-          contextTokens = event.contextTokens; if (event.contextWindow > 0) contextWindow = event.contextWindow; break;
-        case 'compacted': compactSeen = event; noteCompaction(); break;
+        case 'session': conversation.setConversation(event.id); break;
+        case 'request_started': conversation.requestStarted(); break;
+        case 'request_completed': conversation.requestCompleted(); break;
+        case 'usage': conversation.usage(event, { compactsItself: agentProtocol.compactsItself }); break;
+        case 'compacted': compactSeen = event; conversation.noteCompaction(); break;
         case 'text': printText(event.text, event.done); break;
         case 'tool': currentTool = event.name || ''; turnUsedTool = true; info(`· ${event.name} ${JSON.stringify(event.input).slice(0, 120)}`, 'tool', { name: event.name, input: JSON.stringify(event.input ?? null).slice(0, 400) }); break;
         case 'completed': {
-          saveSession();
+          conversation.save();
           if (event.cancelled) {
             busy = false;
             lastActivity = Date.now();
@@ -1241,7 +1149,7 @@ function main() {
           }
           const cost = typeof event.costUsd === 'number' ? `$${event.costUsd.toFixed(3)}` : '';
           const size = agentProtocol.tracksContextTokens
-            ? (contextTokens ? `，上下文 ${Math.round(contextTokens / 1000)}k` : '')
+            ? (conversation.contextTokens ? `，上下文 ${Math.round(conversation.contextTokens / 1000)}k` : '')
             : `tokens ${event.totalTokens ?? '?'}`;
           turnFinished(cost + size, event.error);
           break;
@@ -1345,8 +1253,8 @@ function main() {
       pendingEvents = [];
       pendingUserLines = [];
       pendingNotes = [];
-      lastStopAt = Date.now();
-      saveSession();
+      conversation.markStop();
+      conversation.save();
       // 这些旧消息已经被宿主处理，不能让后续 wait-for-events 再派发旧任务。
       deliveredSeq = Math.max(deliveredSeq, e.seq);
       try { fs.writeFileSync(F.cursor, `${e.session} ${deliveredSeq}`); } catch { /* 下轮的停止记录仍会说明旧任务已取消 */ }
@@ -1371,11 +1279,9 @@ function main() {
         }
       } else {
         // Agent 已崩溃/正在重启时，防止继续恢复已取消的旧任务。
-        conversationId = '';
-        contextTokens = 0;
-        lastRequestAt = 0;
+        conversation.reset();
         newSessionNote = '玩家要求停止，已撤销旧会话';
-        saveSession();
+        conversation.save();
       }
       return;
     }
@@ -1436,7 +1342,7 @@ function main() {
     const hasWork = hasWake || pendingUserLines.length > 0 || pendingNotes.length > 0;
     if (!hasWork && !pendingConsolidation && !pendingCompact) return;
     // 缓存已经过期：接着旧会话要把整段历史重写一遍，不如换新会话
-    if (child && coldNow()) {
+    if (child && conversation.cold()) {
       renewSession(`离上次请求超过 ${args.resumeWindowMinutes} 分钟，提示缓存已经过期`);
       return;
     }
@@ -1465,7 +1371,7 @@ function main() {
 
     const parts = header ? [header] : [];
     if (respawnNote) { parts.push(respawnNote); respawnNote = ''; }
-    if (lastStopAt) parts.push(`【停止记录】玩家在 ${new Date(lastStopAt).toISOString()} 已叫停。该时间之前的旧任务已取消，不要自行恢复；只执行之后新的明确指令。`);
+    if (conversation.lastStopAt) parts.push(`【停止记录】玩家在 ${new Date(conversation.lastStopAt).toISOString()} 已叫停。该时间之前的旧任务已取消，不要自行恢复；只执行之后新的明确指令。`);
     if (pendingEvents.length) {
       // 驱动器已经把这些事件交给 agent，告诉 MCP 服务端不要在 wait-for-events 里重复返回（只记当前进程的序号）
       const current = pendingEvents.filter((e) => e.session === session);
@@ -1498,7 +1404,7 @@ function main() {
   function idleCheck() {
     if (cancellingActions) return;
     // 空闲到缓存过期：先换好新会话（不发消息，不花额度），下一次有事时直接用
-    if (!busy && !restarting && child && coldNow()) {
+    if (!busy && !restarting && child && conversation.cold()) {
       renewSession(`空闲超过 ${args.resumeWindowMinutes} 分钟，提示缓存已经过期`);
       return;
     }
@@ -1623,7 +1529,7 @@ function main() {
   });
 
   const heartbeat = createHeartbeat({ file: F.heartbeat, agent: args.agent,
-    status: () => ({ name: args.name, nickname: args.nickname, body: args.body, busy, compactions }),
+    status: () => ({ name: args.name, nickname: args.nickname, body: args.body, busy, compactions: conversation.compactions }),
     onError: (e) => info(`写心跳失败：${e.message}`) });
   heartbeat.start();
 
@@ -1652,7 +1558,7 @@ function main() {
       botPlayers: (argValue(hostedServer.args, '--bot-players') || '').split(','),
       isStop: (event) => isAddressedStop(event, args),
       isNewTask: (event) => [args.name, args.nickname].some(name => name && event.message.toLowerCase().includes(name.toLowerCase()))
-        || stopFollowup(event, { lastStopBy, lastStopAt, now: Date.now() }),
+        || stopFollowup(event, { lastStopBy, lastStopAt: conversation.lastStopAt, now: Date.now() }),
       // 叫停先交给运行端原地停（不撤销）；已经撤销过控制、在等新任务时照旧走撤销（幂等），后面的叫停取消排着的新任务
       revokeOnStop: () => waitingNewServerTask,
       onStop: (event, owner) => waitingNewServerTask ? stopServerAgent('玩家叫停（独立聊天通道）', event, owner) : armPlayerStop(event, owner),
@@ -1663,15 +1569,8 @@ function main() {
 
   // 上次的会话缓存还没过期（同一个账号）就接着，不然开新会话并跑启动轮
   function startSession() {
-    const saved = readSessionState(F.session);
-    // 窗口是模型的，换了会话也一样；换了平台就不算
-    if (saved.contextWindow && saved.provider === PROVIDER) contextWindow = saved.contextWindow;
-    lastStopAt = agentProtocol.identity === 'independent' || args.body === 'server' ? saved.lastStopAt || 0 : 0;
-    conversationId = resumableConversation(saved, Date.now(), { resumeWindowMs, configDir: CONFIG_DIR, provider: PROVIDER, model: args.model || '', bodyScope: BODY_SCOPE });
-    if (conversationId) {
-      lastRequestAt = saved.lastRequestAt;
-      contextTokens = saved.contextTokens;
-      info(`接着上次的会话 ${conversationId}（${Math.round((Date.now() - lastRequestAt) / 60000)} 分钟前，上下文 ${Math.round(contextTokens / 1000)}k）`);
+    if (conversation.restore()) {
+      info(`接着上次的会话 ${conversation.conversationId}（${Math.round((Date.now() - conversation.lastRequestAt) / 60000)} 分钟前，上下文 ${Math.round(conversation.contextTokens / 1000)}k）`);
       resumeNote = args.reconnect ? '刚重新连上游戏（游戏关过、退出过世界或者你死过一次），先看看现在的状态' : '托管刚重启过（一般是开发那边更新了程序）';
       startAgent();
     } else {
