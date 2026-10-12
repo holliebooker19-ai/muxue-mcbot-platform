@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 检查的文件：WebUI 页面和接口、托管启动脚本（等待提示显示在页面上）、打包脚本（使用说明）。 */
-export const UI_FILES = ['scripts/webui-page.html', 'scripts/webui.mjs', 'scripts/webui-profiles.mjs', 'scripts/webui-games.mjs', 'scripts/webui-plugins.mjs',
+export const UI_FILES = ['scripts/webui-page.html', 'scripts/webui.mjs', 'scripts/webui-profiles.mjs', 'scripts/webui-games.mjs', 'scripts/webui-plugins.mjs', 'scripts/webui-memory.mjs',
   'scripts/agent-models.mjs', 'scripts/start-server-play.mjs', 'scripts/package.mjs'];
 /** compat.json 里会展示给用户的字段。 */
 const COMPAT_FIELDS = ['name', 'what', 'evidence', 'where', 'login'];

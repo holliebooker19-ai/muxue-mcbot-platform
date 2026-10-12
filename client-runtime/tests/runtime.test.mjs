@@ -48,7 +48,8 @@ test('event journal skips pre-attachment history, own/bot echo, and preserves un
   assert.equal(fs.readFileSync(path.join(dir, 'consumed-ClientBot.txt'), 'utf8'), `${events.session} 3`);
   const stored = fs.readFileSync(path.join(dir, 'events-ClientBot.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(stored.every(e => e.session === events.session && typeof e.timestamp === 'number'));
-  assert.deepEqual(await events.wait(3, 1), []);
+  // The body's own line (self_chat) takes a seq too, for the record only; nothing comes after the last one.
+  assert.deepEqual(await events.wait(events.latestSeq(), 1), []);
 });
 test('runtime lock enforces a single controller and does not remove a replacement lock', t => {
   const dir = directory(t);

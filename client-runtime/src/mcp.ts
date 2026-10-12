@@ -21,6 +21,8 @@ import { BlueprintShelf, resolveCells, type Rotation, type Shape } from './bluep
 import { pluginGuides, pluginIndex, pluginNotes } from './plugins.js';
 import { toolInfo, looksOnly, TOOLS } from './tool-registry.js';
 import { Scheduler } from './scheduler.js';
+import type { MemoryStore } from './memory.js';
+import { memoryTools } from './memory-tools.js';
 
 const coordinate = z.coerce.number().finite();
 const xyz = { x: coordinate, y: coordinate, z: coordinate };
@@ -29,7 +31,7 @@ const registryId = z.string().regex(/^[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('ID
 const resourceSelector = z.string().regex(/^#?[a-z0-9_.-]+:[a-z0-9_/.-]+$/).describe('Block ID or tag: minecraft:oak_log, #minecraft:logs, #c:ores, #c:ores/iron, #c:stones');
 const timeoutMs = z.number().int().min(500).max(120000).optional();
 /** chatFloor: ServerBody claim chatCursor; chat at or before it predates this control and is withheld from the model. */
-export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; meetWatch?: MeetWatch; blueprints?: BlueprintShelf; playerStop?: PlayerStop } = {}): McpServer {
+export function createMcpServer(rawBody: Body, events: EventJournal, options: { chatFloor?: number; companion?: CompanionMode; gather?: GatherTasks; tasks?: ContainerTasks; survival?: SurvivalTasks; reflexes?: SurvivalReflexes; stopCurrent?: StopCurrent; places?: PlaceBook; machines?: MachineWatch; meetWatch?: MeetWatch; blueprints?: BlueprintShelf; playerStop?: PlayerStop; memory?: MemoryStore } = {}): McpServer {
   const server = new McpServer({ name: 'mcbot-client-runtime', version: '0.1.0' });
   const serverObserved = rawBody.hello.backend === 'server';
   const tasks = options.tasks ?? new ContainerTasks(rawBody, Date.now, operation => events.deliverOperation(operation));
@@ -138,7 +140,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
         // The first use of a kind of play in this session brings its guide (guides.ts), after the result itself; then what players said meanwhile.
         const guide = events.guides?.forTool(name, args);
         const relayed = name === 'wait-for-events' ? undefined : relayEvents();
-        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }, ...[guide, relayed].filter((text): text is string => !!text).map(text => ({ type: 'text' as const, text }))] };
+        return { content: [{ type: 'text' as const, text: typeof result === 'string' ? result : JSON.stringify(result) }, ...[guide, relayed].filter((text): text is string => !!text).map(text => ({ type: 'text' as const, text }))] };
       } catch (error) {
         const relayed = name === 'wait-for-events' ? undefined : relayEvents();
         return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ code: error instanceof BodyError ? error.code : 'ERROR', message: (error as Error).message }) }, ...(relayed ? [{ type: 'text' as const, text: relayed }] : [])] };
@@ -654,6 +656,8 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
       return operationResult(await body.act(names[action], parsed.data as ActionArguments[typeof names[typeof action]]));
     });
   }
+  // Hosted with long-term memory (main.ts): note and recall; the program journals the rest (docs/memory_plan.md).
+  if (options.memory) for (const tool of memoryTools(options.memory, 'play')) register(tool.name, tool.description, tool.schema, tool.handler);
   for (const action of actions) {
     if (body.hello.capabilities.includes(action.name)) register(action.name, action.description, action.schema, async args => {
       const sent = action.name === 'place-block' ? await placeGuard(args) : args;

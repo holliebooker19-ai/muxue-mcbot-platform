@@ -261,6 +261,12 @@ svg.px{display:block;width:100%;height:100%;shape-rendering:crispEdges}
 textarea{font:13px/1.6 inherit;font-family:inherit;padding:10px 12px;border:1px solid transparent;border-radius:12px;background:var(--fill);color:var(--text);width:100%;resize:vertical;outline:none;transition:background .2s,border-color .25s,box-shadow .25s}
 textarea:focus{border-color:var(--primary);background:var(--glass-strong);box-shadow:0 0 0 3px var(--primary-soft)}
 .persona-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mem{display:flex;flex-direction:column;gap:10px}
+.mem-sec{padding:12px 14px;border-radius:14px;background:var(--fill);min-width:0}
+.mem-sec h4{margin:0 0 6px;font-size:13px;display:flex;gap:8px;align-items:center}.mem-sec h4 small{color:var(--muted);font-weight:normal}
+.mem-line{display:flex;gap:8px;align-items:flex-start;font-size:12px;padding:4px 0;border-top:1px solid var(--line)}
+.mem-line span{flex:1;min-width:0;word-break:break-all;white-space:pre-wrap}.mem-line.day{align-items:center}
+.mem-empty{font-size:12px;color:var(--muted)}
 .persona-bar .hint{font-size:12px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis}
 @media (max-width:640px){.role{flex-direction:column}.form-head .head-label{width:100%}}
 /* 插件页：核心一行，下面每个插件一张卡片 */
@@ -335,6 +341,7 @@ textarea:focus{border-color:var(--primary);background:var(--glass-strong);box-sh
   <button type="button" class="on" data-pane="conn">连接配置<i class="tdot" id="t-conn"></i></button>
   <button type="button" data-pane="role">角色</button>
   <button type="button" data-pane="soul">灵魂设置<i class="tdot" id="t-soul"></i></button>
+  <button type="button" data-pane="mem">记忆</button>
   <button type="button" data-pane="act">行为</button>
   <button type="button" data-pane="plug">插件<i class="tdot" id="t-plug"></i></button>
   <button type="button" data-pane="adv">高级</button>
@@ -376,6 +383,11 @@ textarea:focus{border-color:var(--primary);background:var(--glass-strong);box-sh
   <div class="f wide"><label for="s-persona">人设</label><textarea id="s-persona" rows="10" maxlength="8000" placeholder="填写 Bot 的名字、性格和说话方式。未填写时回复会偏向客服语气。"></textarea>
     <div class="persona-bar"><span class="hint" id="h-persona"></span><span style="flex:1"></span><button type="button" class="small" id="s-save">保存人设</button></div></div>
 </div>
+</div>
+
+<div class="pane" data-pane="mem" hidden>
+<div class="pane-note"><span id="m-where">托管时自动记录的日志和整理后的记忆，仅可查看和删除；删除前自动备份到 runtime/memory-backup。</span><button type="button" class="small ghost" id="m-refresh">刷新</button></div>
+<div class="mem" id="mem"></div>
 </div>
 
 <div class="pane" data-pane="act" hidden>
@@ -929,6 +941,53 @@ $('#s-save').onclick = async () => {
   else { h.textContent = r.error; h.className = 'hint errc'; }
 };
 $('#c-memoryDir').addEventListener('change', () => loadPersona());
+
+// ---- 记忆：各段和每天的日志，只看和删（scripts/webui-memory.mjs） ----
+let memDay = '';
+async function loadMemory() {
+  const box = $('#mem'), q = personaQuery();
+  const r = await post('/api/memory/view', q);
+  box.replaceChildren();
+  if (!r.ok) { box.append(el('div', 'mem-empty errc', r.error)); return; }
+  $('#m-where').title = r.dir;
+  if (!r.persona) box.append(el('div', 'mem-empty', '尚未填写人设，长期记忆未启用；请在「灵魂设置」中填写人设后启动托管'));
+  for (const sec of r.sections) {
+    const card = el('div', 'mem-sec'), h = el('h4', '', sec.title); h.append(el('small', '', sec.lines.length + ' 行'));
+    card.append(h);
+    if (!sec.lines.length) card.append(el('div', 'mem-empty', '暂无内容'));
+    sec.lines.forEach((text, i) => {
+      const row = el('div', 'mem-line'), del = el('button', 'small danger', '删除');
+      del.type = 'button';
+      del.onclick = async () => {
+        if (!confirm('删除「' + sec.title + '」中的此行？删除前将自动备份')) return;
+        const d = await post('/api/memory/delete-line', { ...q, section: sec.id, line: i + 1, text });
+        if (!d.ok) alert(d.error); loadMemory();
+      };
+      row.append(el('span', '', text), del); card.append(row);
+    });
+    box.append(card);
+  }
+  const days = el('div', 'mem-sec'), dh = el('h4', '', '日志'); dh.append(el('small', '', r.days.length + ' 天'));
+  days.append(dh);
+  if (!r.days.length) days.append(el('div', 'mem-empty', '暂无日志'));
+  for (const day of r.days) {
+    const row = el('div', 'mem-line day'), view = el('button', 'small ghost', memDay === day.date ? '收起' : '查看'), del = el('button', 'small danger', '删除此日');
+    view.type = del.type = 'button';
+    view.onclick = () => { memDay = memDay === day.date ? '' : day.date; loadMemory(); };
+    del.onclick = async () => {
+      if (!confirm('删除 ' + day.date + ' 的全部日志（' + day.count + ' 条）？删除前将自动备份')) return;
+      const d = await post('/api/memory/delete-day', { ...q, date: day.date });
+      if (!d.ok) alert(d.error); if (memDay === day.date) memDay = ''; loadMemory();
+    };
+    row.append(el('span', '', day.date + '　' + day.count + ' 条'), view, del); days.append(row);
+    if (memDay === day.date) {
+      const d = await post('/api/memory/day', { ...q, date: day.date });
+      for (const line of d.ok ? d.lines : [d.error]) days.append(el('div', 'mem-line', line));
+    }
+  }
+  box.append(days);
+}
+$('#m-refresh').onclick = loadMemory;
 const modelCombo = combo($('#c-model'), () => {
   const list = models?.models?.length ? models.models : (cfg?.agents[$('#c-agent').value]?.fallbackModels || []).map((v) => ({ value: v, label: v, desc: '别名，始终指向最新版本' }));
   return list.map((m) => ({ value: m.value, label: m.label, code: m.value, desc: m.desc }));
@@ -1020,6 +1079,7 @@ function onAgent(effort) {
   // dsh 桌面版的 Key 在 ~/.dsh：新配置默认用它，省得朋友自己找
   if ($('#c-agent').value === 'dsh' && !$('#c-configDir').value.trim() && !(cur && cur.id) && (cfg.accounts.dsh || []).includes('~/.dsh')) $('#c-configDir').value = '~/.dsh';
   models = null; updateEfforts(effort); loadModels(false); checkMemory(); loadPersona(); syncRole();
+  if (!$('.pane[data-pane=mem]').hidden) loadMemory();
 }
 /** Which player profiles the memory directory holds; the persona itself is edited per Bot in the soul tab. */
 async function checkMemory() {
@@ -1092,6 +1152,7 @@ function setPane(name) {
     if (on && p.hidden) { p.hidden = false; p.classList.remove('enter'); void p.offsetWidth; p.classList.add('enter'); } else if (!on) p.hidden = true;
   }
   store.set('mcbot.pane', name); closeAll();
+  if (name === 'mem' && cfg) loadMemory();
   requestAnimationFrame(() => { placeThumb($('#c-tabs')); if (name === 'adv') placeThumb($('#c-cred')); if (name === 'conn') placeThumb($('#c-mode')); });
 }
 for (const b of document.querySelectorAll('#c-tabs button')) b.onclick = () => setPane(b.dataset.pane);

@@ -41,8 +41,9 @@ export function dshCompaction(rotateTokens, contextWindow) {
 }
 
 /** 托管用的 profile 补丁：关掉非游戏工具，用陪玩指令替换默认的 coding agent 人设，自动压缩按宿主的上限触发。 */
-export function dshPatch(instructions = '', { rotateTokens = 0, contextWindow = 0 } = {}) {
-  const persona = [SERVER_GAME_INSTRUCTIONS, instructions].filter(Boolean).join('\n\n')
+// rules：换掉游戏规则（驱动器的记忆整理会话用自己的，scripts/companion.mjs SIDE_CONSOLIDATE_RULES）。
+export function dshPatch(instructions = '', { rotateTokens = 0, contextWindow = 0, rules } = {}) {
+  const persona = [rules ?? SERVER_GAME_INSTRUCTIONS, instructions].filter(Boolean).join('\n\n')
     // dsh 用 {{...}} 做模板占位，资料里的花括号不能被当成占位符。
     .replaceAll('{{', '{ {').replaceAll('}}', '} }');
   const rows = DSH_DISABLED_ROWS.map(id => `- id: ${id}\n  disabled: true`);

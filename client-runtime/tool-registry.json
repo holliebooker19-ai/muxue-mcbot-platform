@@ -1,5 +1,5 @@
 {
-  "$comment": "Every MCP game tool and what it is (docs/companion_state_design.md 8.2). kind: read (touches no body), chat, control (stop and reflex settings; never refused as busy), action (one native step), task (several steps or a long server task). Calls of kind action or task rearm stopped reflexes; read, chat and control calls never do (nor a survey/dryRun call or an action:\"read\", which only look). needsIdle: refused with BUSY while other work holds the body. moves: walks the body. resumable: after an eating or self-defense interruption it carries on instead of being cancelled. runsAs: server operations this tool starts under another name that carry its resumable flag (go-to walks far as travel-to). clientOnly: kept only for the old ClientBody; ServerBody has the merged tools instead (docs/tool_consolidation_plan.md). mcp.ts registers only tools listed here; the Codex allow list is these names without clientOnly.",
+  "$comment": "Every MCP game tool and what it is (docs/companion_state_design.md 8.2). kind: read (touches no body), chat, control (stop and reflex settings; never refused as busy), action (one native step), task (several steps or a long server task). Calls of kind action or task rearm stopped reflexes; read, chat and control calls never do (nor a survey/dryRun call or an action:\"read\", which only look). needsIdle: refused with BUSY while other work holds the body. moves: walks the body. resumable: after an eating or self-defense interruption it carries on instead of being cancelled. runsAs: server operations this tool starts under another name that carry its resumable flag (go-to walks far as travel-to). clientOnly: kept only for the old ClientBody; ServerBody has the merged tools instead (docs/tool_consolidation_plan.md). mcp.ts registers only tools listed here; the Codex allow list is these names without clientOnly. memory-*: long-term memory (docs/memory_plan.md, memory-tools.ts), touching no body: memory-note and memory-recall only when hosted with a persona in the memory directory; memory-context and memory-write only in the driver's tidy-up session (main.ts --memory-only).",
   "tools": {
     "get-status": { "kind": "read" },
     "get-position": { "kind": "read", "clientOnly": true },
@@ -15,6 +15,10 @@
     "workstation-options": { "kind": "read" },
     "places": { "kind": "read" },
     "blueprints": { "kind": "read" },
+    "memory-note": { "kind": "read" },
+    "memory-recall": { "kind": "read" },
+    "memory-context": { "kind": "read" },
+    "memory-write": { "kind": "read" },
     "wait-for-events": { "kind": "chat" },
     "send-chat": { "kind": "chat" },
     "stop-action": { "kind": "control" },
