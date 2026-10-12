@@ -147,3 +147,39 @@ export function sideConsolidationInstructions(agentMemoryDir) {
   try { persona = fs.readFileSync(path.join(agentMemoryDir, 'persona.md'), 'utf8').trim(); } catch { /* 没有人设时记忆不会开 */ }
   return persona ? `【本人基础人设：宿主只读加载，只用来分清哪些是你自己的感受】\n${persona}` : '';
 }
+
+// ---------------- 每一轮里驱动器加的话 ----------------
+
+/** 一轮开头的说明：新会话（ServerBody 带交接单）或进程重启过。short：独立试玩身份和 ServerBody 用短说明，旧路径用 newSessionHeader／resumeHeader。 */
+export function turnHeader({ short, newSessionNote, handoffNote, resumeNote }) {
+  return short
+    ? (newSessionNote ? (handoffNote ? `【新会话】${newSessionNote}。之前的对话不在上下文里了，下面是交接单。\n\n${handoffNote}` : `【新会话】${newSessionNote}。重新查询当前游戏状态；不要重放之前的动作。`)
+      : resumeNote ? '【驱动器提示】进程已重启，先确认当前状态和任务；不要重放之前的动作。' : '')
+    : newSessionNote ? newSessionHeader(newSessionNote) : resumeNote ? resumeHeader(resumeNote) : '';
+}
+
+export function stopRecord(lastStopAt) {
+  return `【停止记录】玩家在 ${new Date(lastStopAt).toISOString()} 已叫停。该时间之前的旧任务已取消，不要自行恢复；只执行之后新的明确指令。`;
+}
+
+/** 每一轮的结尾：怎么处理这批事件 */
+export function turnClosing(headless) {
+  return headless
+    ? '按陪玩规则处理：需要回应就在游戏里说（CLI 输出没人看）并行动，不需要就直接结束本轮。'
+    : '按陪玩规则处理：需要回应就在游戏里回应并行动，不需要就直接结束本轮。';
+}
+
+/** 叫停后来了新指令、Agent 还在：随下一轮带上 */
+export function newTaskNote(text) {
+  return `【停止后的新指令】${text}`;
+}
+
+/** 叫停撤销后重新启动 Agent 的第一轮：启动说明加上新指令 */
+export function newTaskTurn(prompt, texts) {
+  return `${prompt}\n\n【停止记录】旧任务已取消，不要自行恢复；只执行下面的新指令。\n\n【停止后的新指令】${texts.join('\n')}`;
+}
+
+/** --idle-minutes：安静太久时提醒一次 */
+export function idleNudge(minutes) {
+  return `（已经安静 ${minutes} 分钟。可以看看周围，主动做点合适的小事或说句话；没必要就保持安静，直接结束本轮）`;
+}
