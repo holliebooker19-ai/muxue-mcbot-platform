@@ -1,6 +1,6 @@
 # 旧路径的可选记忆
 
-本说明仅适用于保留的Mineflayer旧路径；ServerBody当前没有长期记忆工具。
+本说明最早写给保留的Mineflayer旧路径；2026-10-12起ServerBody托管也接上了同一套记忆（日志自动记、`memory-note`／`memory-recall`、开局加载回忆和约定、单独会话整理），接口见[协议](server_body_protocol.md#长期记忆运行端和驱动器2026-10-12)，方案见[memory_plan.md](memory_plan.md)。下面的边界两条路径都适用。
 
 需要使用旧记忆功能时，由使用者在本地配置`--memory-dir`与`--memory-agent`，提供自己的角色资料。仓库不附带个人记忆，`memory/`默认忽略。只更新当前角色获授权的记忆；人设变更先确认。
 

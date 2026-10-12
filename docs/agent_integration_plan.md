@@ -26,7 +26,7 @@
 
 - `scripts/companion.mjs` 和 `start-companion.ps1` 已接受 `gemini`／`claude`／`codex`。Claude／agy 的命令与消息转换位于 `scripts/agents/process-protocols.mjs`；Codex 的握手、线程、回合、取消与配置适配位于 `scripts/agents/codex-app-server.mjs`。驱动器消费统一事件；进程生命周期、MCP 和身体仍有耦合，尚不是最终完整 AgentAdapter。Codex 首轮真实试玩已完成，最新快捷停止和首次交还修复待复验，见 [试玩说明](archive/codex_v0.md)。
 - 当前存在 MCP 工具服务，但“能配置 MCP 工具”不等于已经完成自动事件唤醒、会话恢复、中断、错误处理等托管适配。
-- 旧身体层直接依赖Mineflayer；`client-runtime/`已实现ClientBody v1与ServerBody v2，共用Body／MCP边界。ServerBody完整能力集现为39工具（此前33工具＋5生存／工具／进食入口＋defend-self）；游戏端follow-companion、approach-resource及pickup-item供任务层内部调用，不要求模型逐步操作。新生存工具已有Claude实际模型证据，Codex本批仅同步允许列表并通过宿主检查，实际短回归仍待完成。长期记忆未迁移；不把测试观察者的Mineflayer依赖当产品依赖。
+- 旧身体层直接依赖Mineflayer；`client-runtime/`已实现ClientBody v1与ServerBody v2，共用Body／MCP边界。ServerBody完整能力集现为39工具（此前33工具＋5生存／工具／进食入口＋defend-self）；游戏端follow-companion、approach-resource及pickup-item供任务层内部调用，不要求模型逐步操作。新生存工具已有Claude实际模型证据，Codex本批仅同步允许列表并通过宿主检查，实际短回归仍待完成。长期记忆10-12已搬到运行端（见[memory_plan.md](memory_plan.md)），三家Agent共用一份；不把测试观察者的Mineflayer依赖当产品依赖。
 - `companion --body server`已接Claude／Codex，独立watch／revoke不等待模型或MCP journal。C已通过；10月3日早一批Sonnet5.5／low实测见[真实体验](archive/server_agent_interaction_trial_2026-10-03.md)，最新Claude-b／Codex分别通过取物、持续跟随、聊天、等待、叫停和新查询，见[持续陪伴记录](archive/server_companion_validation.md)。这些是功能及单轮耗时样本，性能结论不外推。
 - 不把现有 `gemini` 名称同时当成 Agent 产品、模型供应商、人物身份和游戏用户名。
 

@@ -604,3 +604,16 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
   - `unknown` + `NATIVE_UNKNOWN`：其他所有情况。回执带 `unexpected`（逐条原因）、`inventory`、`before`、`after`，不自动重试。
   - 打开了没有适配器菜单契约核验的菜单：立即原生关闭，判为 unknown。
 - Node 只向模型发布一个 `interact-block` 工具（参数：坐标、交互 ID、`item` 或 `emptyHand`、可选 `face`），由运行端读最新观察来填方块守卫、挑快捷栏槽；物品不在快捷栏时返回 `NOT_IN_HOTBAR`，提示先用 `equip-item` 带 `hand:"main"` 拿到手上（10-12 前是 `prepare-item`）。`use-item-on-block`／`use-item` 本身不作为模型工具。
+
+## 长期记忆（运行端和驱动器，2026-10-12）
+
+方案和分步见 [memory_plan.md](memory_plan.md)，这里只写接口。协议本身没变，记忆全在 Node 这边。
+
+- 开关：`<记忆目录>/<游戏名小写>/persona.md` 存在才开；没有记忆目录或人设时运行端不记日志、不发布记忆工具，驱动器提示词里没有【长期记忆】，行为和以前一样（交接单照旧，它只用运行端的状态文件）。运行端只在 `--hosted` 且 `hello.backend` 为 `server` 时记日志，开发时直接起的 MCP、`--respawn-only` 都不记。
+- 记忆代码：旧 `mcp-server/src/memory.ts` 搬到 `client-runtime/src/memory.ts`（`MemoryStore`），旧路径只剩一行转出，Mineflayer 旧路径照用。上限在 `client-runtime/memory-limits.json`（各段字数沿用旧 `SECTION_LIMITS`、开局列多少条日志、写锁时长），运行端、驱动器、WebUI 读同一份。
+- 归属：`shared/players/<玩家>.md` 各角色共用；世界现状按世界放 `shared/worlds/<世界标识>.md`（转义同地点簿）；回忆 `bonds`、约定和想做的事 `goals`、最近几天 `digest`、日志 `journal/` 按角色放在 `<游戏名小写>/`。
+- 自动日志：运行端从事件里记聊天（Bot 自己说的话以服务端确认的 `self_chat` 为准，`since()` 不返回它，不叫醒模型）、进服、断开、死亡（`hello.lastDeath`，按时刻去重，只记一次）、收到的东西、睡觉（Bot 从醒到睡发一条 `sleep` 事件）、玩家上下线（有 `far-players` 时按附近实体加 `farPlayers` 比较，接管时的第一次只当基准，发 `player_joined`／`player_left`，不叫醒模型），任务按工具表里 `task` 类的结束回执记一句。挑什么记沿用旧 `journalLineFor`。
+- 模型工具：托管时多 `memory-note`、`memory-recall`（工具表 `read` 类，不占身体）。整理用的 `memory-context`、`memory-recall`、`memory-write` 只在 `--memory-only` 进程里发布，那个进程不连游戏。
+- 写：所有写都拿 `<记忆目录>/.write.lock`（同一台机器上多个托管、WebUI 删行共用），改段前备份到 `runtime/memory-backup/`。`memory-write` 每条只能新增、更新、删除，行号按非空行数；新增和更新要写类别（事实／玩家说／感受）和依据的日志游标，游标须真实存在；超上限且比原来长的拒绝；`through` 写进 `state.json`，不能往回退。
+- 交接单（驱动器 `buildHandoff`，不经模型）：换会话和接旧状态的首次启动时放进新会话第一轮。内容来自 `activity-<名字>.jsonl`（最后一个任务类工具调用、聊天）、`operations-<名字>.jsonl`（它的结果）、`posture-<名字>.json`（跟随还是等待、跟谁），每条带时间；玩家叫停（会话文件的 `lastStopAt`）之前的任务标「已取消，不要自己恢复」，叫停前的姿态和聊天不列。
+- 整理（驱动器 `startSideConsolidation`）：躺床、玩家都下线了、换会话前、启动时有没整理的日志，用同一个 Agent 和账号另起一个一次性会话，MCP 配置写到 `runtime/mcp-memory-<名字>.json`，只给记忆工具；不打断、不加长正在玩的会话。额度用完或认证失败按恢复时刻（认不出时用暂停时长）再来，其他失败最多再试几次；`state.json` 的 `consolidatedAt` 前进才算成功。三家（Claude、Codex、dsh）都能另起会话，没有退回会话内整理的情况。
