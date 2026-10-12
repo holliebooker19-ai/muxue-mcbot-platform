@@ -151,7 +151,7 @@ Observation 另带 `sitting`（Bot 是否骑着已安装座位适配认定的座
 - 跟丢（`away`）后不自动去找。
 
 表情和外观（2026-10-08，第 8j 步）：
-- `emote` `{name,source?,player?,seconds?}`。不带 source 是内置手势 wave（挥三下手）、nod（点头）、shake（摇头）、crouch（蹲起两次）、jump（跳一下）、spin（转一圈），约 1 秒，逐 tick 做，做完把朝向和姿势复原；player 先转向那位玩家（32 格内，否则 PLAYER_NOT_VISIBLE）。带 source 是附属模组登记的动画（`EmoteSource`），立即成功，result `{source,name,seconds}`；到 seconds（默认 6，1–30）、开始别的动作（send-chat、look-at、emote、set-appearance 除外）或身体被移除时，核心调来源的 `stop`。名字只能是 `[A-Za-z0-9_.:-]{1,64}`；没装的来源 UNSUPPORTED，来源不认的名字 INVALID_ARGUMENT。
+- `emote` `{name,source?,player?,seconds?}`。不带 source 是内置手势 wave（挥三下手）、nod（点头）、shake（摇头）、crouch（蹲起两次）、jump（跳一下）、spin（转一圈），约 1 秒，逐 tick 做，做完把朝向和姿势复原；player 先转向那位玩家（32 格内，否则 PLAYER_NOT_VISIBLE）。运行端 MCP 的 `emote` 另有 `times`（1–30，默认 1，只对内置手势；玩家说做几下就填几）：运行端连着发几次 `emote`，上一下 succeeded 才发下一下，服务端协议不变、`times` 不发给服务端；叫停或某一下没 succeeded 就停，结果里 `done` 是做完的下数。带 source 是附属模组登记的动画（`EmoteSource`），立即成功，result `{source,name,seconds}`；到 seconds（默认 6，1–30）、开始别的动作（send-chat、look-at、emote、set-appearance 除外）或身体被移除时，核心调来源的 `stop`。名字只能是 `[A-Za-z0-9_.:-]{1,64}`；没装的来源 UNSUPPORTED，来源不认的名字 INVALID_ARGUMENT。
 - `set-appearance` `{source,choice}`：套用附属模组登记的外观（`AppearanceSource`），choice 必须在来源当前的 `choices` 里。只给托管宿主用：运行端带 `--appearance <source>=<choice>`（WebUI 配置页选）时，每次接管后调一次，失败只在 stderr 提示；MCP 不发布这个动作。
 - hello 多两项：`emotes:{builtin:[...],sources:[{id,hint}]}` 和 `appearances:[{id,choices:[...]}]`（只列已安装的来源）。
 - Observation 多 `weather:{natural,sky,raining,thundering}`（natural 是有昼夜的维度，sky 是头顶看得见天）。运行端据此发 `scene` 唤醒事件：露天时太阳下山（dayTime 进入 11800–13000）、开始下雨、开始打雷各一次，下雨时不报日落；接管后的第一次观察只当基准，从下界等维度回来也重新当基准。

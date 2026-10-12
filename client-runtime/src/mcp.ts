@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z, type ZodRawShape } from 'zod';
-import { BodyError, COMPANION_MINING_RANGE, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
+import { BodyError, COMPANION_MINING_RANGE, EMOTE_SECONDS, TRAVEL_MAX_BLOCKS, TRAVEL_TIMEOUT_MS, type Body, type ActionArguments, type ActionName, type Observation } from './body.js';
 import { EventJournal, type GameEvent } from './events.js';
 import type { PlayerStop } from './player-stop.js';
 import { ContainerTasks } from './tasks.js';
@@ -284,14 +284,41 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     const gestures = body.hello.emotes?.builtin ?? [];
     const sources = body.hello.emotes?.sources ?? [];
     const sourceText = sources.length ? ` Add-on animations (pass source): ${sources.map(s => `${s.id}${s.hint ? ` - ${s.hint}` : ''}`).join('; ')}; they play for seconds (default 6) until you do something else.` : '';
-    register('emote', `A short gesture others see: ${gestures.join(', ')}; player: face them first. Don't overuse it.${sourceText} Without name: just turn to look at player or x/y/z.`, {
+    /**
+     * Built-in gestures back to back, one act at a time: the next one goes out only after the last has succeeded (the body
+     * takes one emote at a time). A stop refuses the next act (CANCELLED, body.act) and a gesture that ends otherwise ends the run;
+     * after the first one completed, a later error returns what was done instead of failing the whole call.
+     */
+    const repeatGesture = async (args: import('./body.js').ActionArguments['emote'], times: number) => {
+      let operation: import('./body.js').Operation | undefined;
+      let done = 0;
+      for (let turn = 0; turn < times; turn++) {
+        try { operation = await waitGesture(await body.act('emote', args)); }
+        catch (error) {
+          if (done === 0) throw error;
+          return { ...operationResult(operation!), done, times, stopped: error instanceof BodyError ? error.code : 'INTERNAL', reason: error instanceof Error ? error.message : String(error) };
+        }
+        if (operation.status !== 'succeeded') break;
+        done++;
+      }
+      return { ...operationResult(operation!), done, times };
+    };
+    /** A gesture is about a second; this waits the 3 seconds the single emote always waited. Player chat does not end the wait (the repeats finish; a halt does). */
+    const waitGesture = async (operation: import('./body.js').Operation) => {
+      const end = Date.now() + 3000;
+      while (operation.status === 'running' && Date.now() < end) { await new Promise(resolve => setTimeout(resolve, 250)); operation = await body.operation(operation.operationId); }
+      return operation;
+    };
+    register('emote', `A short gesture others see: ${gestures.join(', ')}; player: face them first. Don't overuse it. When the player asks for several (e.g. "nod three times"), pass times with that count (built-in gestures only).${sourceText} Without name: just turn to look at player or x/y/z.`, {
       name: z.string().regex(/^[A-Za-z0-9_.:-]{1,64}$/).optional().describe(sources.length ? 'Gesture, or the animation of source' : 'Gesture'),
       ...(sources.length ? { source: z.enum(sources.map(s => s.id) as [string, ...string[]]).optional() } : {}),
       player: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(),
-      seconds: z.number().min(1).max(30).optional().describe('Add-on animation length'),
+      seconds: z.number().min(EMOTE_SECONDS.min).max(EMOTE_SECONDS.max).optional().describe('Add-on animation length'),
+      // Capped by the same EMOTE_SECONDS.max: a built-in gesture takes about a second, so 30 seconds is 30 gestures.
+      times: z.number().int().min(1).max(EMOTE_SECONDS.max).optional().describe('Built-in gesture repeats, back to back (default 1)'),
       x: coordinate.optional(), y: coordinate.optional(), z: coordinate.optional(),
       say: z.string().min(1).max(256).optional(),
-    }, async ({ say, x, y, z: zz, ...args }) => {
+    }, async ({ say, x, y, z: zz, times, ...args }) => {
       if (say) await body.act('send-chat', { message: say });
       if (!args.name) {
         // Only looking: the plain look-at action, which a follow keeps driving through.
@@ -300,9 +327,14 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
         if (!at) throw new BodyError('INVALID_ARGUMENT', '给 name 做动作，或给 player／x、y、z 转过去看');
         return operationResult(await body.act('look-at', at));
       }
-      const operation = await body.act('emote', args as import('./body.js').ActionArguments['emote']);
-      const done = await settle(operation, 3000);
-      return operationResult(done);
+      const repeats = times ?? 1;
+      if (args.source !== undefined) {
+        if (repeats > 1) throw new BodyError('INVALID_ARGUMENT', 'times 只用于内置动作；附属动画一次播一段');
+        const operation = await body.act('emote', args as import('./body.js').ActionArguments['emote']);
+        const done = await settle(operation, 3000);
+        return operationResult(done);
+      }
+      return repeatGesture(args as import('./body.js').ActionArguments['emote'], repeats);
     });
   }
   /**

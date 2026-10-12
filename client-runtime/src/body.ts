@@ -207,6 +207,11 @@ export interface StopOptions {
 /** travel-to limits as the protocol table has them (farthest 2000 blocks; timeoutMs 5000..900000): the one place the runtime reads them from. */
 export const TRAVEL_MAX_BLOCKS = 2000;
 export const TRAVEL_TIMEOUT_MS = { min: 5000, max: 900000 } as const;
+/**
+ * emote seconds: how long an add-on animation plays (server-body.ts and mcp.ts both check them). A built-in gesture takes about
+ * a second, so the same cap also bounds its repeats (mcp.ts emote `times`).
+ */
+export const EMOTE_SECONDS = { min: 1, max: 30 } as const;
 /** pickup-item timeoutMs limits (the server-body.ts schema); the death recovery asks within them. */
 export const PICKUP_TIMEOUT_MS = { min: 500, max: 30000 } as const;
 /**

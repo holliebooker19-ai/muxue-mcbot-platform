@@ -67,6 +67,50 @@ test('a gesture while following goes straight to the server: the posture gives w
   assert.equal(f.server.current.action, 'follow');
 });
 
+test('emote times repeats a built-in gesture through the MCP tool: one act per turn, the count comes back, add-on animations take no times', async t => {
+  const { body, acts } = await setup(t);
+  const c = await client(t, body);
+  const three = await call(c, 'emote', { name: 'nod', player: 'muxue', times: 3 });
+  assert.equal(three.status, 'succeeded');
+  assert.equal(three.done, 3);
+  assert.equal(three.times, 3);
+  assert.deepEqual(acts().map(act => [act.name, act.args]), [0, 1, 2].map(() => ['emote', { name: 'nod', player: 'muxue' }]), 'times never reaches the server');
+  assert.equal((await call(c, 'emote', { name: 'wave' })).done, 1, 'default is one');
+  assert.equal((await c.callTool({ name: 'emote', arguments: { name: 'wave', source: YSM.id, times: 2 } })).isError, true, 'add-on animations play once');
+  assert.equal((await c.callTool({ name: 'emote', arguments: { name: 'wave', times: 31 } })).isError, true, 'at most 30, the seconds cap');
+  assert.equal(acts().length, 4, 'refused calls send nothing');
+});
+
+test('emote times waits for each gesture and a stop ends the run, reporting how many were done', async t => {
+  const { body, mock, acts } = await setup(t);
+  const c = await client(t, body);
+  const act = mock.handlers.act;
+  let emotes = 0;
+  // The second gesture is still running on the server until the body is stopped.
+  mock.handlers.act = params => { const op = act(params); if (params.name === 'emote' && ++emotes === 2) op.status = 'running'; return op; };
+  const pending = call(c, 'emote', { name: 'shake', times: 4 });
+  while (acts().length < 2) await new Promise(resolve => setTimeout(resolve, 20));
+  await body.stop({});
+  const stopped = await pending;
+  assert.equal(stopped.done, 1, 'the first gesture finished, the second was cut short');
+  assert.equal(stopped.status, 'cancelled');
+  assert.equal(acts().length, 2, 'nothing new went out after the stop');
+});
+
+test('emote times after a completed gesture returns the count and the refusal instead of failing the call', async t => {
+  const { body, mock, acts } = await setup(t);
+  const c = await client(t, body);
+  const act = mock.handlers.act;
+  let emotes = 0;
+  mock.handlers.act = params => { if (params.name === 'emote' && ++emotes === 2) throw Object.assign(new Error('busy'), { code: 'BUSY' }); return act(params); };
+  const partial = await call(c, 'emote', { name: 'jump', times: 3 });
+  assert.equal(partial.done, 1);
+  assert.equal(partial.stopped, 'BUSY');
+  assert.equal(acts().length, 2);
+  mock.handlers.act = () => { throw Object.assign(new Error('busy'), { code: 'BUSY' }); };
+  assert.equal((await c.callTool({ name: 'emote', arguments: { name: 'jump', times: 2 } })).isError, true, 'a refusal before anything was done stays an error');
+});
+
 test('scene hints: sunset, rain and thunder once each, only under the open sky; the first observation is a baseline', () => {
   const events = new EventJournal(undefined, 'ServerBot');
   const sky = { natural: true, sky: true, raining: false, thundering: false };
