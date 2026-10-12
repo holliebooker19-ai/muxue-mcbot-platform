@@ -46,19 +46,23 @@ function playDir(api, { persona = true } = {}) {
   fs.writeFileSync(connectionFile, JSON.stringify({ protocol: 2, backend: 'server', endpoint: api.endpoint, token: 'test-only-token', worldId: 'world-a', username: 'ServerTest' }));
   const configFile = path.join(dir, 'mcp.json');
   fs.writeFileSync(configFile, JSON.stringify({ mcpServers: { minecraft: { command: process.execPath, args: ['not-executed.mjs', '--body', 'server', '--connection-file', connectionFile, '--world-id', 'world-a', '--username', 'ServerTest'] } } }));
-  const memory = path.join(dir, 'memory'), agentDir = path.join(memory, 'servertest');
+  // 约定、摘要、日志、整理进度按世界放（client-runtime/src/memory.ts）；回忆、人设、玩家档案不分世界
+  const memory = path.join(dir, 'memory'), agentDir = path.join(memory, 'servertest'), worldDir = path.join(agentDir, 'worlds', 'world-a');
   if (persona) {
-    fs.mkdirSync(path.join(agentDir, 'journal'), { recursive: true });
+    fs.mkdirSync(path.join(worldDir, 'journal'), { recursive: true });
     fs.writeFileSync(path.join(agentDir, 'persona.md'), '说话简短，喜欢樱花。');
     fs.writeFileSync(path.join(agentDir, 'bonds.md'), '- [事实] 和 tester 一起盖了仓库 〔2026-10-11#3〕\n');
-    fs.writeFileSync(path.join(agentDir, 'goals.md'), '- [玩家说] 答应 tester 明天去挖矿 〔2026-10-11#5〕\n');
-    fs.writeFileSync(path.join(agentDir, 'digest.md'), '- 2026-10-11：砍树、盖仓库\n');
+    fs.writeFileSync(path.join(worldDir, 'goals.md'), '- [玩家说] 答应 tester 明天去挖矿 〔2026-10-11#5〕\n');
+    fs.writeFileSync(path.join(worldDir, 'digest.md'), '- 2026-10-11：砍树、盖仓库\n');
+    // 别的世界的约定不该带进这个世界的系统提示
+    fs.mkdirSync(path.join(agentDir, 'worlds', 'world-b'), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, 'worlds', 'world-b', 'goals.md'), '- [玩家说] 答应 tester 去别的世界看海 〔2026-10-10#1〕\n');
     fs.mkdirSync(path.join(memory, 'shared', 'players'), { recursive: true });
     fs.writeFileSync(path.join(memory, 'shared', 'players', 'tester.md'), '叫他小测\n');
     fs.mkdirSync(path.join(memory, 'shared', 'worlds'), { recursive: true });
     fs.writeFileSync(path.join(memory, 'shared', 'worlds', 'world-a.md'), '家在河边\n');
     const now = new Date();
-    fs.writeFileSync(path.join(agentDir, 'journal', `${dateOf(now)}.md`), `# ${dateOf(now)}\n\n- ${two(now.getHours())}:${two(now.getMinutes())} tester: 我们去砍树吧\n`);
+    fs.writeFileSync(path.join(worldDir, 'journal', `${dateOf(now)}.md`), `# ${dateOf(now)}\n\n- ${two(now.getHours())}:${two(now.getMinutes())} tester: 我们去砍树吧\n`);
   }
   // 上次托管留下的记录：模型调过的任务、运行端记的结果、跟随状态、聊天
   const F = runtimeFiles(runtime, 'ServerTest'), t0 = Date.now() - 10 * 60000;
@@ -70,7 +74,7 @@ function playDir(api, { persona = true } = {}) {
   ].map((x) => JSON.stringify(x)).join('\n') + '\n');
   fs.writeFileSync(path.join(runtime, 'operations-ServerTest.jsonl'), JSON.stringify({ session: 'old', timestamp: t0 + 60000, operation: { operationId: 'op', name: 'gather-resources', status: 'cancelled', summary: '捡到 40 个 oak_log，被打断' } }) + '\n');
   fs.writeFileSync(F.posture, JSON.stringify({ action: 'follow', player: 'tester', guard: true, at: t0 + 90000 }));
-  return { dir, runtime, configFile, memory, agentDir, F };
+  return { dir, runtime, configFile, memory, agentDir, worldDir, F };
 }
 
 function startDriver(play, agent, extraEnv = {}, extraArgs = []) {
@@ -79,7 +83,7 @@ function startDriver(play, agent, extraEnv = {}, extraArgs = []) {
   const driver = spawn(process.execPath, [path.join(ROOT, 'scripts/companion.mjs'), '--agent', agent, '--body', 'server', '--name', 'ServerTest', '--nickname', '小克',
     '--mcp-config', play.configFile, '--headless', '--memory-agent', 'servertest', ...extraArgs], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env,
     COMPANION_RUNTIME_DIR: play.runtime, COMPANION_MEMORY_DIR: play.memory, COMPANION_AGENT_CMD: JSON.stringify([process.execPath, path.join(HERE, 'fixtures/fake-server-agent.mjs')]),
-    FAKE_SERVER_AGENT: agent, FAKE_AGENT_LOG: agentLog, FAKE_AGENT_CLOSE_DELAY_MS: '100', FAKE_AGENT_MEMORY: play.agentDir, ...extraEnv } });
+    FAKE_SERVER_AGENT: agent, FAKE_AGENT_LOG: agentLog, FAKE_AGENT_CLOSE_DELAY_MS: '100', FAKE_AGENT_MEMORY: play.worldDir, ...extraEnv } });
   driver.stdout.on('data', (d) => { output += d; }); driver.stderr.on('data', (d) => { output += d; });
   const exit = new Promise((r) => driver.once('exit', r));
   return { driver, exit, agentLog, output: () => output, log: () => records(agentLog), turns: () => records(agentLog).filter((r) => r.kind === 'turn') };
@@ -109,11 +113,12 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`ServerBody 记忆/${agent}
     assert.match(startup.text, /本轮只确认准备好并结束/);
     // ② 常驻档案在系统提示里（Claude：--append-system-prompt；Codex：developerInstructions；dsh 的补丁见下面的单元测试）
     const playing = d.log().find((r) => r.kind === 'start' || r.kind === 'thread');
-    const system = agent === 'claude' ? (() => { const argv = d.log().find((r) => r.kind === 'start').argv; return argv[argv.indexOf('--append-system-prompt') + 1]; })()
+    const system = agent === 'claude' ? (() => { const argv = d.log().find((r) => r.kind === 'start' && !r.argv.some((x) => /mcp-memory-/.test(String(x)))).argv; return argv[argv.indexOf('--append-system-prompt') + 1]; })()
       : agent === 'codex' ? (await waitFor(() => d.log().find((r) => r.kind === 'thread' && /不复制 components/.test(r.developerInstructions ?? '')), 'codex thread')).developerInstructions : '';
     void playing;
     if (system) {
       for (const text of ['说话简短，喜欢樱花', '叫他小测', '和 tester 一起盖了仓库', '答应 tester 明天去挖矿', '砍树、盖仓库', '家在河边', '【长期记忆】', 'memory-recall']) assert.ok(system.includes(text), `${text} 在系统提示里`);
+      assert.ok(!system.includes('去别的世界看海'), '别的世界的约定不带进来');
       assert.match(system, /不复制 components/, '游戏规则照旧');
     }
     // ③ 上次还有没整理的日志：另起一个进程整理，只挂 --memory-only
@@ -128,7 +133,7 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`ServerBody 记忆/${agent}
     assert.equal(tidy.pid, memorySession.pid);
     assert.match(tidy.text, /托管刚启动/); assert.match(tidy.text, /evidence/); assert.match(tidy.text, /through/);
     await waitFor(() => /整理记忆完成/.test(d.output()), '整理完成');
-    assert.ok(JSON.parse(fs.readFileSync(path.join(play.agentDir, 'state.json'), 'utf8')).consolidatedAt > 0);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(play.worldDir, 'state.json'), 'utf8')).consolidatedAt > 0);
     if (agent === 'claude') {
       const argv = d.log().find((r) => r.kind === 'start' && r.pid === memorySession.pid).argv;
       const prompt = argv[argv.indexOf('--append-system-prompt') + 1];
@@ -160,7 +165,7 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`ServerBody 记忆/${agent}
 
 test('ServerBody 记忆/claude：躺上床另起会话整理；额度用完时等暂停结束再试，不算失败', async () => {
   const api = await controlMock(), play = playDir(api);
-  fs.writeFileSync(path.join(play.agentDir, 'state.json'), JSON.stringify({ consolidatedAt: 0 }));
+  fs.writeFileSync(path.join(play.worldDir, 'state.json'), JSON.stringify({ consolidatedAt: 0 }));
   const d = startDriver(play, 'claude', { FAKE_AGENT_CONSOLIDATE: 'quota-once', COMPANION_QUOTA_PAUSE_MS: '1500' });
   try {
     await waitFor(() => /额度用完/.test(d.output()), '第一次整理碰到额度');
@@ -169,8 +174,8 @@ test('ServerBody 记忆/claude：躺上床另起会话整理；额度用完时�
     assert.equal(tidies.length, 2); assert.notEqual(tidies[0].pid, tidies[1].pid, '每次都是一次性的新进程');
     // 躺上床（运行端的 sleep 事件）：有没整理的日志就再整理一次
     const now = new Date();
-    fs.appendFileSync(path.join(play.agentDir, 'journal', `${dateOf(now)}.md`), `- ${two(now.getHours())}:${two(now.getMinutes())} tester: 晚安\n`);
-    fs.writeFileSync(path.join(play.agentDir, 'state.json'), JSON.stringify({ consolidatedAt: 1 }));
+    fs.appendFileSync(path.join(play.worldDir, 'journal', `${dateOf(now)}.md`), `- ${two(now.getHours())}:${two(now.getMinutes())} tester: 晚安\n`);
+    fs.writeFileSync(path.join(play.worldDir, 'state.json'), JSON.stringify({ consolidatedAt: 1 }));
     fs.appendFileSync(play.F.events, JSON.stringify({ session: 'bed', seq: 1, timestamp: Date.now(), type: 'sleep', text: 'ServerTest 躺上床睡着了。' }) + '\n');
     await waitFor(() => d.turns().filter((r) => r.text.includes('【整理记忆】')).length === 3, '躺床整理');
     assert.match(d.turns().filter((r) => r.text.includes('【整理记忆】'))[2].text, /你躺上床了/);

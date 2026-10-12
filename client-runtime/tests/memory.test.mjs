@@ -43,7 +43,7 @@ async function hostedRuntime(t, { persona = true, hosted = true } = {}) {
     '--controller-id', randomUUID(), '--memory-dir', memory, '--memory-agent', 'serverbot', ...(hosted ? ['--hosted'] : [])], stderr: 'pipe' });
   let stderr = ''; transport.stderr?.on('data', chunk => { stderr += chunk; });
   const client = new Client({ name: 'memory-test', version: '1' }); await client.connect(transport); t.after(() => client.close());
-  return { dir, memory, mock, client, journal: () => { try { return fs.readFileSync(path.join(memory, 'serverbot', 'journal', `${today()}.md`), 'utf8'); } catch { return ''; } }, stderr: () => stderr };
+  return { dir, memory, mock, client, journal: () => { try { return fs.readFileSync(path.join(memory, 'serverbot', 'worlds', 'test-world', 'journal', `${today()}.md`), 'utf8'); } catch { return ''; } }, stderr: () => stderr };
 }
 
 test('托管 ServerBody 有人设：程序自动记聊天、自己说的话和进服；memory-note 记一笔、memory-recall 按关键词查到（真实运行端进程）', async t => {
@@ -84,7 +84,7 @@ test('死过一次：接管时把服务端记的死亡按死的时间记一次�
     await client.listTools(); await client.close(); await mock.close();
   }
   const d = new Date(at), date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const journal = fs.readFileSync(path.join(shared, 'memory', 'serverbot', 'journal', `${date}.md`), 'utf8');
+  const journal = fs.readFileSync(path.join(shared, 'memory', 'serverbot', 'worlds', 'test-world', 'journal', `${date}.md`), 'utf8');
   assert.equal(journal.match(/\[我死了\] ServerBot被骷髅射杀/g)?.length, 1, journal);
   assert.match(journal, new RegExp(`- ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} \\[我死了\\]`), '按死的时间记');
 });
@@ -107,14 +107,15 @@ test('整理会话（--memory-only）：只有记忆工具；按行号新增、�
   const store = new MemoryStore(memory, 'serverbot', path.join(dir, 'backup'), () => new Date(), { worldId: '新世界' });
   fs.mkdirSync(path.join(memory, 'serverbot'), { recursive: true }); fs.writeFileSync(path.join(memory, 'serverbot', 'persona.md'), '人设');
   fs.mkdirSync(path.join(memory, 'shared', 'players'), { recursive: true }); fs.writeFileSync(path.join(memory, 'shared', 'players', 'Alex.md'), '# Alex\n叫她小A\n');
-  fs.writeFileSync(path.join(memory, 'serverbot', 'goals.md'), '- 帮 Alex 盖仓库\n- 去看海\n');
+  const world = path.join(memory, 'serverbot', 'worlds', '新世界');
+  fs.mkdirSync(world, { recursive: true }); fs.writeFileSync(path.join(world, 'goals.md'), '- 帮 Alex 盖仓库\n- 去看海\n');
   store.append('Alex: 我最喜欢樱花'); store.append('[任务] gather-resources succeeded：捡到 64 个 oak_log'); store.append('Alex: 仓库盖好啦');
   const transport = new StdioClientTransport({ command: process.execPath, args: [path.resolve('dist/main.js'), '--memory-only', '--memory-dir', memory, '--memory-agent', 'serverbot', '--world-id', '新世界', '--runtime-dir', dir], stderr: 'pipe' });
   const client = new Client({ name: 'memory-only', version: '1' }); await client.connect(transport); t.after(() => client.close());
   assert.deepEqual((await client.listTools()).tools.map(tool => tool.name).sort(), ['memory-context', 'memory-recall', 'memory-write'], '不给游戏工具');
   const context = text(await client.callTool({ name: 'memory-context', arguments: {} }));
   assert.match(context, /## Alex 的档案（shared\/players\/Alex\.md）\n1\| # Alex\n2\| 叫她小A/);
-  assert.match(context, /## 想做的事（serverbot\/goals\.md）\n1\| - 帮 Alex 盖仓库\n2\| - 去看海/);
+  assert.match(context, /## 想做的事（serverbot\/worlds\/新世界\/goals\.md）\n1\| - 帮 Alex 盖仓库\n2\| - 去看海/, '约定按世界放');
   assert.match(context, /世界现状（shared\/worlds\/新世界\.md）/, '世界现状按世界分');
   const page = text(await client.callTool({ name: 'memory-recall', arguments: { since: 'last', limit: 2 } }));
   const d = today();
@@ -129,17 +130,42 @@ test('整理会话（--memory-only）：只有记忆工具；按行号新增、�
     { action: 'delete', line: 1 }, { action: 'update', line: 2, kind: 'feel', text: '想和 Alex 去看海', evidence: [`${d}#3`] },
   ] } });
   assert.match(text(goals), /1\| - \[感受\] 想和 Alex 去看海 〔\d{4}-\d\d-\d\d#3〕/);
-  assert.equal(fs.readdirSync(path.join(dir, 'memory-backup')).filter(f => f.startsWith('serverbot-goals-')).length, 1, '改前备份（runtime 下）');
+  assert.equal(fs.readdirSync(path.join(dir, 'memory-backup')).filter(f => f.startsWith('serverbot-新世界-goals-')).length, 1, '改前备份（runtime 下，名字带世界）');
   const player = await client.callTool({ name: 'memory-write', arguments: { section: 'player', player: 'Alex', changes: [{ action: 'add', kind: 'said', text: '最喜欢樱花', evidence: [`${d}#1`] }] } });
-  assert.match(text(player), /3\| - \[玩家说\] 最喜欢樱花/);
-  assert.equal(fs.existsSync(path.join(memory, 'serverbot', 'state.json')), false, '没带 through 不算整理完');
+  assert.match(text(player), new RegExp(`3\\| - \\[玩家说\\] 最喜欢樱花 〔新世界 ${d}#1〕`), '玩家档案不分世界，每行注明世界');
+  assert.equal(fs.existsSync(path.join(world, 'state.json')), false, '没带 through 不算整理完');
   const done = await client.callTool({ name: 'memory-write', arguments: { section: 'digest', changes: [{ action: 'add', kind: 'fact', text: `${d}：砍了 64 个原木，帮 Alex 盖好了仓库`, evidence: [`${d}#2`, `${d}#3`] }], through: `${d}#3` } });
   assert.match(text(done), new RegExp(`日志已整理到 ${d}#3`));
-  assert.equal(JSON.parse(fs.readFileSync(path.join(memory, 'serverbot', 'state.json'), 'utf8')).through, `${d}#3`);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(world, 'state.json'), 'utf8')).through, `${d}#3`, '整理进度按世界放');
+  assert.match(fs.readFileSync(path.join(world, 'digest.md'), 'utf8'), new RegExp(`〔${d}#2,${d}#3〕`), '摘要按世界放，不另注世界');
   assert.equal(text(await client.callTool({ name: 'memory-recall', arguments: { since: 'last' } })), '上次整理之后没有新日志');
   const back = await client.callTool({ name: 'memory-write', arguments: { section: 'digest', changes: [], through: `${d}#1` } });
   assert.match(text(back), /不能往回退/);
   assert.equal(fs.readFileSync(path.join(memory, 'serverbot', 'persona.md'), 'utf8'), '人设', '人设不改');
+});
+
+test('记忆按世界隔离：约定、摘要、日志、整理进度只属于一个世界；回忆、玩家档案、人设所有世界共用，回忆注明世界', t => {
+  const dir = temp(t), memory = path.join(dir, 'memory'), backup = path.join(dir, 'backup');
+  const a = new MemoryStore(memory, 'serverbot', backup, () => new Date(), { worldId: 'sp-家园' });
+  const b = new MemoryStore(memory, 'serverbot', backup, () => new Date(), { worldId: 'survival:2' });
+  a.append('Alex: 明天帮我盖仓库');
+  const cursor = `${today()}#1`;
+  a.edit('goals', [{ action: 'add', kind: 'said', text: '答应 Alex 明天盖仓库', evidence: [cursor] }]);
+  a.edit('bonds', [{ action: 'add', kind: 'fact', text: '和 Alex 在河边盖了家', evidence: [cursor] }], { through: cursor });
+  assert.equal(b.journalLines().length, 0, '别的世界看不到这里的日志');
+  assert.equal(b.pendingPage().total, 0);
+  assert.equal(b.readState().through, null, '整理进度按世界');
+  const other = b.context({ stable: true });
+  assert.doesNotMatch(other, /答应 Alex 明天盖仓库/, '别的世界不带这里的约定');
+  assert.match(other, new RegExp(`和 Alex 在河边盖了家 〔sp-家园 ${today()}#1〕`), '回忆跨世界，注明是哪个世界的事');
+  assert.ok(fs.existsSync(path.join(memory, 'serverbot', 'worlds', 'survival%3a2')) === false, '没写过的世界不建目录');
+  b.append('Alex: 这是新世界');
+  assert.ok(fs.existsSync(path.join(memory, 'serverbot', 'worlds', 'survival%3a2', 'journal')), 'Windows 不能用的字符转义（同 worldFileName）');
+  assert.deepEqual(b.recall({ query: '盖仓库' }).hits.map(h => h.source), [], '查不到别的世界的日志和约定');
+  assert.equal(b.recall({ query: '河边' }).hits.length, 1, '回忆查得到');
+  const legacy = new MemoryStore(memory, 'serverbot', backup);
+  assert.equal(legacy.journalLines().length, 0, '旧路径（不给世界）仍用角色目录下的 journal');
+  assert.equal(legacy.sectionFile('goals'), path.join(memory, 'serverbot', 'goals.md'));
 });
 
 test('按条改的上限：不能超过这段的上限；原来就超的手写档案只许变短', t => {

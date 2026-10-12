@@ -1,13 +1,15 @@
 // 记忆：分层的 Markdown 文件，按 docs/memory_plan.md 设计，不依赖任何 harness 的导入机制。
 // 旧 Mineflayer 路径（mcp-server/src/memory.ts 转出这里）和 ServerBody 运行端共用这一份。
-//   <memoryDir>/shared/world.md              世界现状（覆盖写；ServerBody 按世界分：shared/worlds/<世界>.md）
-//   <memoryDir>/shared/players/<名字>.md      玩家档案（多个角色共用）
+//   <memoryDir>/shared/world.md              世界现状（覆盖写；ServerBody 按世界分：shared/worlds/<世界>.md，同一世界的角色共用）
+//   <memoryDir>/shared/players/<名字>.md      玩家档案（多个角色、所有世界共用）
 //   <memoryDir>/<agent>/persona.md           核心人设（只读，改前要问玩家）
-//   <memoryDir>/<agent>/bonds.md             长期回忆
+//   <memoryDir>/<agent>/bonds.md             长期回忆（所有世界共用；ServerBody 每行注明是哪个世界的事）
 //   <memoryDir>/<agent>/goals.md             想做的事（ServerBody 也放答应玩家的事：约定）
 //   <memoryDir>/<agent>/digest.md            最近几天的摘要
 //   <memoryDir>/<agent>/journal/YYYY-MM-DD.md 事件日志（程序自动写 + memory-note）
 //   <memoryDir>/<agent>/state.json           上次整理的时间（驱动器也读它）
+// ServerBody（给了世界标识）时，约定、摘要、日志、整理进度只属于这个世界，放在 <memoryDir>/<agent>/worlds/<世界>/ 下，
+// 文件名同上（goals.md、digest.md、journal/、state.json）；到了别的世界不会提这里的家、去兑现这里的约定（docs/memory_plan.md）。
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -120,7 +122,11 @@ export function parseWhen(text: string, endOfDay = false): number {
  * 中文世界名照原样。驱动器 scripts/companion.mjs 的 worldMemoryFile 用同样的写法。
  */
 export function worldFileName(worldId: string): string {
-  return `${worldId.replace(/[%<>:"/\\|?*\u0000-\u001f]/g, c => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'))}.md`;
+  return `${worldKey(worldId)}.md`;
+}
+/** 世界标识做文件名、目录名时的写法（见 worldFileName）。按世界放的记忆目录 <agent>/worlds/<这个>/ 也用它。 */
+export function worldKey(worldId: string): string {
+  return `${worldId.replace(/[%<>:"/\\|?*\u0000-\u001f]/g, c => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'))}`;
 }
 
 /** 整理时一条改动：新增、更新（按 memory-context 里的行号）、删除；没提到的就是不动。 */
@@ -134,10 +140,14 @@ export interface MemoryChange {
   evidence?: string[];
 }
 export const CHANGE_KINDS = { fact: '事实', said: '玩家说', feel: '感受' } as const;
+/** 所有世界共用、但内容是在某个世界发生的段：ServerBody 每行注明世界。 */
+const CROSS_WORLD_SECTIONS: readonly EditableSection[] = ['bonds', 'player'];
 
 export class MemoryStore {
   readonly agentDir: string;
   readonly sharedDir: string;
+  /** 按世界放的那部分（约定、摘要、日志、整理进度）所在的目录；没有世界标识时就是 agentDir */
+  readonly worldDir: string;
   readonly journalDir: string;
 
   constructor(
@@ -146,17 +156,19 @@ export class MemoryStore {
     // 备份目录（runtime 下），不进 git
     private readonly backupDir: string,
     private readonly now: () => Date = () => new Date(),
-    // ServerBody：世界现状按世界分（地点也按世界分，在 runtime/places）；不给就是旧的 shared/world.md
+    // ServerBody：约定、摘要、日志、整理进度、世界现状按世界分（地点也按世界分，在 runtime/places）；不给就是旧的不分世界的写法
     private readonly options: { worldId?: string } = {}
   ) {
     if (!/^[a-z0-9_-]+$/i.test(agent)) throw new Error(`记忆目录名只能用英文、数字、下划线：${agent}`);
     this.agentDir = path.join(rootDir, agent);
     this.sharedDir = path.join(rootDir, 'shared');
-    this.journalDir = path.join(this.agentDir, 'journal');
+    this.worldDir = options.worldId ? path.join(this.agentDir, 'worlds', worldKey(options.worldId)) : this.agentDir;
+    this.journalDir = path.join(this.worldDir, 'journal');
   }
 
   sectionFile(section: WritableSection | 'persona'): string {
     if (section === 'world') return this.options.worldId ? path.join(this.sharedDir, 'worlds', worldFileName(this.options.worldId)) : path.join(this.sharedDir, 'world.md');
+    if (section === 'goals' || section === 'digest') return path.join(this.worldDir, `${section}.md`);
     return path.join(this.agentDir, `${section}.md`);
   }
 
@@ -170,7 +182,7 @@ export class MemoryStore {
   }
 
   private stateFile(): string {
-    return path.join(this.agentDir, 'state.json');
+    return path.join(this.worldDir, 'state.json');
   }
 
   private read(file: string): string {
@@ -223,7 +235,7 @@ export class MemoryStore {
   }
 
   private writeState(state: MemoryState): void {
-    fs.mkdirSync(this.agentDir, { recursive: true });
+    fs.mkdirSync(this.worldDir, { recursive: true });
     const tmp = `${this.stateFile()}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(state) + '\n');
     try {
@@ -270,7 +282,7 @@ export class MemoryStore {
       const file = this.sectionFile(section);
       const old = this.read(file);
       let backup: string | null = null;
-      if (old.trim()) backup = this.backup(section, old);
+      if (old.trim()) backup = this.backup(this.backupName(section), old);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, text + '\n');
       if (target) this.writeState({ consolidatedAt: this.now().getTime(), through: cursorOf(target) });
@@ -313,7 +325,9 @@ export class MemoryStore {
         const count = this.entriesOf(c.date).length;
         if (c.index < 1 || c.index > count) throw new Error(`依据 ${cursor} 不存在（${c.date} 一共 ${count} 条）`);
       }
-      return `- [${CHANGE_KINDS[change.kind]}] ${body} 〔${evidence.join(',')}〕`;
+      // 回忆、玩家档案不分世界：依据前写上世界，到了别的世界也知道是哪里的事、游标该去哪个世界的日志找
+      const where = this.options.worldId && CROSS_WORLD_SECTIONS.includes(section) ? `${this.options.worldId} ` : '';
+      return `- [${CHANGE_KINDS[change.kind]}] ${body} 〔${where}${evidence.join(',')}〕`;
     };
     return this.withLock('write', () => {
       const old = this.read(file);
@@ -334,7 +348,7 @@ export class MemoryStore {
       if (text.length > limit && text.length > oldChars) throw new Error(`${title}最多 ${limit} 字，改完 ${text.length} 字。先合并、删掉过时的`);
       let backup: string | null = null;
       if (changes.length) {
-        if (old.trim()) backup = this.backup(section === 'player' ? `player-${opts.player}` : section, old);
+        if (old.trim()) backup = this.backup(section === 'player' ? `player-${opts.player}` : this.backupName(section), old);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         const tmp = `${file}.${process.pid}.tmp`;
         fs.writeFileSync(tmp, text ? text + '\n' : '');
@@ -343,6 +357,11 @@ export class MemoryStore {
       if (target) this.writeState({ consolidatedAt: this.now().getTime(), through: cursorOf(target) });
       return { file, backup, chars: text.length, through: target ? cursorOf(target) : null, text };
     });
+  }
+
+  // 按世界放的段，备份名带上世界，免得不同世界的约定混在一起轮换
+  private backupName(section: WritableSection): string {
+    return this.options.worldId && (section === 'goals' || section === 'digest') ? `${worldKey(this.options.worldId)}-${section}` : section;
   }
 
   private backup(section: string, text: string): string {

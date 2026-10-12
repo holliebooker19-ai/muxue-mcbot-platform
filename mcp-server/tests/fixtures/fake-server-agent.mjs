@@ -1,6 +1,6 @@
 // Offline Claude/Codex/dsh(ACP) protocol peer with a simulated MCP lease owner; no model or game.
 // The driver's memory tidy-up session (MCP args with --memory-only) takes no body: it only records itself, and with
-// FAKE_AGENT_MEMORY (<memory>/<agent>) a 【整理记忆】 turn writes state.json as a finished tidy-up would.
+// FAKE_AGENT_MEMORY (<memory>/<agent>/worlds/<world>, where ServerBody keeps state.json) a 【整理记忆】 turn writes state.json as a finished tidy-up would.
 // FAKE_AGENT_CONSOLIDATE=quota-once: the first tidy-up turn answers with a usage-limit error (counted across processes).
 import fs from 'node:fs';
 import path from 'node:path';

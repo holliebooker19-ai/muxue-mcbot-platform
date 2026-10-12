@@ -245,9 +245,9 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
       if (opts.memoryDir && !isAbsPath(opts.memoryDir)) return send(res, 200, { ok: false, error: '记忆目录须为完整路径' });
       const env = { runtime };
       if (p === '/api/memory/view') return send(res, 200, viewMemory(opts, env));
-      if (p === '/api/memory/day') return send(res, 200, readDay(opts, String(body.date || ''), env));
+      if (p === '/api/memory/day') return send(res, 200, readDay(opts, String(body.date || ''), env, String(body.world || '')));
       if (p === '/api/memory/delete-line') return send(res, 200, deleteLine(opts, String(body.section || ''), body.line, String(body.text ?? ''), env));
-      if (p === '/api/memory/delete-day') return send(res, 200, deleteDay(opts, String(body.date || ''), env));
+      if (p === '/api/memory/delete-day') return send(res, 200, deleteDay(opts, String(body.date || ''), env, String(body.world || '')));
       return send(res, 404, { error: 'not found' });
     }
     if (p === '/api/profiles/save') {

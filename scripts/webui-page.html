@@ -971,17 +971,18 @@ async function loadMemory() {
   days.append(dh);
   if (!r.days.length) days.append(el('div', 'mem-empty', '暂无日志'));
   for (const day of r.days) {
-    const row = el('div', 'mem-line day'), view = el('button', 'small ghost', memDay === day.date ? '收起' : '查看'), del = el('button', 'small danger', '删除此日');
+    const key = day.world + '/' + day.date, label = (day.worldName ? day.worldName + '　' : '') + day.date;
+    const row = el('div', 'mem-line day'), view = el('button', 'small ghost', memDay === key ? '收起' : '查看'), del = el('button', 'small danger', '删除此日');
     view.type = del.type = 'button';
-    view.onclick = () => { memDay = memDay === day.date ? '' : day.date; loadMemory(); };
+    view.onclick = () => { memDay = memDay === key ? '' : key; loadMemory(); };
     del.onclick = async () => {
-      if (!confirm('删除 ' + day.date + ' 的全部日志（' + day.count + ' 条）？删除前将自动备份')) return;
-      const d = await post('/api/memory/delete-day', { ...q, date: day.date });
-      if (!d.ok) alert(d.error); if (memDay === day.date) memDay = ''; loadMemory();
+      if (!confirm('删除 ' + label + ' 的全部日志（' + day.count + ' 条）？删除前将自动备份')) return;
+      const d = await post('/api/memory/delete-day', { ...q, world: day.world, date: day.date });
+      if (!d.ok) alert(d.error); if (memDay === key) memDay = ''; loadMemory();
     };
-    row.append(el('span', '', day.date + '　' + day.count + ' 条'), view, del); days.append(row);
-    if (memDay === day.date) {
-      const d = await post('/api/memory/day', { ...q, date: day.date });
+    row.append(el('span', '', label + '　' + day.count + ' 条'), view, del); days.append(row);
+    if (memDay === key) {
+      const d = await post('/api/memory/day', { ...q, world: day.world, date: day.date });
       for (const line of d.ok ? d.lines : [d.error]) days.append(el('div', 'mem-line', line));
     }
   }
