@@ -50,8 +50,15 @@ import { randomUUID } from 'node:crypto';
 import { createServerBodyControl, respawnIfDead, lastDeath } from './server-body-control.mjs';
 import { rcon, tellrawCommand } from './rcon.mjs';
 import { getAgentProtocol, claudeContextTokens, AGENT_NAMES, agentsFor, agentConfigDir } from './agents/process-protocols.mjs';
+import { ROOT, parseArgs, runtimeDirOf, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
+import { stripAnsi, pidAlive, readJson, writeFileAtomic, jsonLines } from './driver/files.mjs';
+import { resolveMemory, readMcpConfig, writeHostedMcpConfig, writeMemoryMcpConfig } from './driver/mcp-config.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// 测试和夹具脚本从这里 import 的名字（实现已经搬到 scripts/driver/）
+export { parseArgs, runtimeFiles, argValue, bodySessionScope } from './driver/args.mjs';
+export { stripAnsi, pidAlive } from './driver/files.mjs';
+export { resolveMemory, hostedMcpConfig, readMcpConfig, writeHostedMcpConfig } from './driver/mcp-config.mjs';
+
 
 // 需要叫醒 agent 的事件；reflex（自动进食/反击）、presence（上下线说明）等只在下次一起带上
 export const WAKE_TYPES = new Set(['chat', 'whisper', 'hurt', 'low_health', 'death', 'player_joined', 'player_left',
@@ -87,72 +94,6 @@ export const COMPACT_KEEP = '摘要里保留：玩家的要求和你答应的事
 export const COMPACT_PROMPT = `把到现在为止的对话压缩成一份交接摘要，给接下来接着陪玩家玩的你自己看。${COMPACT_KEEP}`;
 
 // ---------------- 可单独测试的小函数 ----------------
-
-export function parseArgs(argv) {
-  const args = {
-    agent: 'gemini', body: 'mineflayer', effort: '', model: '', idleMinutes: 0, name: '', nickname: '', mcpConfig: '', configDir: '', headless: false,
-    mcHost: '127.0.0.1', mcPort: 25565, serverCheckSeconds: 30, serverGoneMinutes: 10, serverWaitMinutes: 15, maxRestarts: 10,
-    memoryDir: process.env.COMPANION_MEMORY_DIR ? path.resolve(process.env.COMPANION_MEMORY_DIR) : '', memoryAgent: '',
-    resumeWindowMinutes: 50, rotateTokens: 200000, consolidateFloorMinutes: 30,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    const next = () => argv[++i];
-    if (a === '--agent') args.agent = next();
-    else if (a === '--body') args.body = next();
-    else if (a === '--name') args.name = next();
-    else if (a === '--nickname') args.nickname = next();
-    else if (a === '--effort') args.effort = next();
-    else if (a === '--model') args.model = next();
-    else if (a === '--idle-minutes') args.idleMinutes = Number(next()) || 0;
-    else if (a === '--mcp-config') args.mcpConfig = path.resolve(next());
-    else if (a === '--config-dir') args.configDir = path.resolve(next());
-    else if (a === '--headless') args.headless = true;
-    else if (a === '--reconnect') args.reconnect = true;
-    else if (a === '--mc-host') args.mcHost = next();
-    else if (a === '--mc-port') args.mcPort = Number(next());
-    else if (a === '--server-check-seconds') args.serverCheckSeconds = Number(next());
-    else if (a === '--server-gone-minutes') args.serverGoneMinutes = Number(next());
-    else if (a === '--server-wait-minutes') args.serverWaitMinutes = Number(next());
-    else if (a === '--max-restarts') args.maxRestarts = Number(next());
-    else if (a === '--memory-dir') args.memoryDir = path.resolve(next());
-    else if (a === '--memory-agent') args.memoryAgent = next();
-    else if (a === '--resume-window-min') args.resumeWindowMinutes = Number(next());
-    else if (a === '--rotate-tokens') args.rotateTokens = Number(next());
-    else if (a === '--consolidate-floor-min') args.consolidateFloorMinutes = Number(next());
-    else throw new Error(`未知参数：${a}`);
-  }
-  if (!AGENT_NAMES.includes(args.agent)) throw new Error(`--agent 只能是 ${AGENT_NAMES.join('、')}`);
-  if (!['mineflayer', 'client', 'server'].includes(args.body)) throw new Error('--body 只能是 mineflayer、client 或 server');
-  const protocol = getAgentProtocol(args.agent);
-  const bodyLabel = { mineflayer: 'Mineflayer', client: 'ClientBody', server: 'ServerBody' }[args.body];
-  if (!protocol.bodies.includes(args.body)) throw new Error(`${bodyLabel} 托管入口目前仅接通 ${agentsFor(args.body).join('、')}；其他 Agent 可使用独立 MCP，托管支持待后续验收`);
-  if (args.body !== 'mineflayer') args.serverCheckSeconds = 0;
-  args.effort ||= protocol.defaultEffort || '';
-  args.name ||= protocol.defaultName;
-  if (!/^[A-Za-z0-9_]{1,16}$/.test(args.name)) throw new Error('--name 必须是 1～16 位英文、数字或下划线');
-  args.nickname ||= protocol.defaultNickname;
-  if (args.configDir && !protocol.defaultConfigDir) throw new Error(`--config-dir 不支持 ${protocol.label}`);
-  return args;
-}
-
-export function runtimeFiles(runtimeDir, name) {
-  return {
-    events: path.join(runtimeDir, `events-${name}.jsonl`),
-    cursor: path.join(runtimeDir, `cursor-${name}.txt`),
-    consumed: path.join(runtimeDir, `consumed-${name}.txt`),
-    heartbeat: path.join(runtimeDir, `companion-${name}.json`),
-    lock: path.join(runtimeDir, `companion-${name}.lock`),
-    log: path.join(runtimeDir, `companion-${name}.log`),
-    activity: path.join(runtimeDir, `activity-${name}.jsonl`),
-    stop: path.join(runtimeDir, `companion-${name}.stop`),
-    halt: path.join(runtimeDir, `companion-${name}.halt`),
-    session: path.join(runtimeDir, `session-${name}.json`),
-    botLock: path.join(runtimeDir, `bot-${name}.lock`),
-    // 运行端写的持续状态（跟随／等待／保护）；重连时由运行端自己读、自己恢复（client-runtime/src/posture.ts），驱动器只在叫停和真正退出时删
-    posture: path.join(runtimeDir, `posture-${name}.json`),
-  };
-}
 
 // 服务端给的死亡消息可能带命名牌上的字，只当资料，去掉控制字符并截短
 const plainText = (text, max) => String(text ?? '').replace(/[\u0000-\u001f\u007f§]/g, ' ').trim().slice(0, max);
@@ -231,40 +172,6 @@ export function completeServerChat(e, { name, nickname }) {
   if (/^把/.test(body) && !/(?:给|放|拿|取|移|丢|交|搬|送|装|放进|放到).+/.test(body.slice(1))) return false;
   return /(?:查询|查看|检查|看看|观察|跟随|跟着|跟我|过来|回来|走到|移动到|拿|取|给|交|送|丢|挖|放|建|打开|关闭|开箱|关箱|拾取|捡|说|回答|帮我|在哪|在干|为什么|怎么|多少|有没有|能不能).+/.test(body)
     || /[?？]$/.test(body) || /^(?:你好|嗨|hello|hi|在吗)[\s!！。.,，]*$/i.test(body);
-}
-
-export function stripAnsi(s) {
-  return String(s).replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-export function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === 'EPERM';
-  }
-}
-
-function readJson(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-// 先写临时文件再改名，读的一方不会读到半截；改名失败（Windows 上文件正被读）就直接覆盖
-function writeFileAtomic(file, text) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  try {
-    fs.writeFileSync(tmp, text);
-    fs.renameSync(tmp, file);
-  } catch {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* 忽略 */ }
-    fs.writeFileSync(file, text);
-  }
 }
 
 // extra 是给 WebUI 看的状态（昵称、身体、是否正在推理），锁判断只用 pid 和 updatedAt
@@ -562,13 +469,6 @@ function handoffTime(t, now) {
   const hm = `${two(d.getHours())}:${two(d.getMinutes())}`;
   return d.toDateString() === n.toDateString() ? hm : `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${hm}`;
 }
-function jsonLines(file) {
-  let text = '';
-  try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
-  const out = [];
-  for (const line of text.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch { /* 跳过坏行 */ } }
-  return out;
-}
 const OPERATION_WORDS = { succeeded: '做完了', failed: '没做成', cancelled: '取消了', unknown: '结果不明' };
 const POSTURE_WORDS = { follow: (p) => `跟着 ${p.player}`, wait: () => '原地等待', guard: (p) => `保护 ${p.player}`, seated: () => '坐着' };
 
@@ -637,97 +537,6 @@ export function newSessionHeader(reason) {
 // 接着旧会话、但 agent 进程和 MCP 服务端换过了（驱动器重启、agent 崩溃后重启）：告诉角色重新进服是正常的
 export function resumeHeader(reason) {
   return `【驱动器提示】${reason}，接着原来的会话，对话都还在。MCP 服务端也跟着重启了：你会自动重新进服，这次重新进服是正常的，不用查原因、不用重新打招呼；跟随、陪挖、后台任务都断了，需要的话重新开。`;
-}
-
-// 参数列表里某个选项的值（--name value 或 --name=value）
-export function argValue(list, name) {
-  for (let i = 0; i < list.length; i++) {
-    if (list[i] === name) return list[i + 1];
-    if (typeof list[i] === 'string' && list[i].startsWith(`${name}=`)) return list[i].slice(name.length + 1);
-  }
-  return undefined;
-}
-
-// 明确比较资料范围，防止换身体或世界后接着旧上下文操作；不使用哈希。
-export function bodySessionScope(args, mcpArgs) {
-  if (!['client', 'server'].includes(args.body)) return null;
-  const worldId = argValue(mcpArgs, '--world-id');
-  const connectionFile = argValue(mcpArgs, '--connection-file');
-  if (!worldId || !connectionFile) throw new Error('Body 配置必须指定 --world-id 和 --connection-file');
-  const resolved = path.resolve(connectionFile);
-  return { body: args.body, worldId, connectionFile: process.platform === 'win32' ? resolved.toLowerCase() : resolved, username: args.name,
-    ...(args.body === 'server' && getAgentProtocol(args.agent).serverPolicy ? { agentPolicy: getAgentProtocol(args.agent).serverPolicy } : {}) };
-}
-
-function setArg(list, name, value) {
-  const out = [];
-  for (let i = 0; i < list.length; i++) {
-    if (list[i] === name) { i++; continue; }
-    if (typeof list[i] === 'string' && list[i].startsWith(`${name}=`)) continue;
-    out.push(list[i]);
-  }
-  out.push(name, value);
-  return out;
-}
-
-// 驱动器和 MCP 服务端共用的记忆位置：驱动器命令行（或 COMPANION_MEMORY_DIR）> MCP 配置里的参数 > 默认
-export function resolveMemory(args, mcpArgs = [], root = ROOT) {
-  // 新的独立试玩身份不自动继承 .mcp.json 中小克的长期记忆。
-  const protocol = getAgentProtocol(args.agent);
-  if (protocol.identity === 'independent') return {
-    memoryDir: args.memoryDir || path.join(root, 'runtime', `${args.agent}-memory`),
-    memoryAgent: args.memoryAgent || args.name.toLowerCase(),
-  };
-  const fromMcpDir = argValue(mcpArgs, '--memory-dir');
-  const memoryDir = args.memoryDir || (fromMcpDir ? path.resolve(root, fromMcpDir) : path.join(root, 'memory'));
-  const memoryAgent = args.memoryAgent || argValue(mcpArgs, '--memory-agent') || protocol.memoryAgent;
-  return { memoryDir, memoryAgent };
-}
-
-// 托管用的 MCP 配置：复制一份，给 minecraft 服务的参数加上 --hosted，并写明记忆位置
-// （只有带 --hosted 的 MCP 服务端才写 runtime/events-<名字>.jsonl 等文件、才认托管心跳）
-export function hostedMcpConfig(config, serverName = 'minecraft', memory = null, identity = null) {
-  const copy = JSON.parse(JSON.stringify(config ?? {}));
-  const server = copy.mcpServers?.[serverName];
-  if (!server) throw new Error(`MCP 配置里没有 ${serverName} 服务`);
-  // strict-mcp-config still loads every server in the supplied file. Game mode
-  // must not inherit a filesystem/shell server from a developer's MCP config.
-  if (identity?.body === 'server') copy.mcpServers = { [serverName]: server };
-  let list = Array.isArray(server.args) ? server.args : [];
-  if (!list.includes('--hosted')) list.push('--hosted');
-  if (memory) {
-    list = setArg(list, '--memory-dir', memory.memoryDir);
-    list = setArg(list, '--memory-agent', memory.memoryAgent);
-  }
-  if (identity) {
-    list = setArg(list, '--username', identity.name);
-    list = setArg(list, '--nickname', identity.nickname);
-    list = setArg(list, '--runtime-dir', identity.runtimeDir);
-    if (identity.body) list = setArg(list, '--body', identity.body);
-    if (identity.controllerId) list = setArg(list, '--controller-id', identity.controllerId);
-    const bots = new Set((argValue(list, '--bot-players') || 'Claude,Gemini').split(','));
-    bots.add(identity.name);
-    list = setArg(list, '--bot-players', [...bots].join(','));
-  }
-  server.args = list;
-  return copy;
-}
-
-export function readMcpConfig(sourceFile) {
-  try {
-    return JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
-  } catch (e) {
-    throw new Error(`读不了 MCP 配置 ${sourceFile}：${e.message}`);
-  }
-}
-
-// 读取 sourceFile，生成 runtime/mcp-hosted-<名字>.json，返回它的路径
-export function writeHostedMcpConfig(sourceFile, runtimeDir, name, memory = null, identity = null) {
-  const config = readMcpConfig(sourceFile);
-  const file = path.join(runtimeDir, `mcp-hosted-${name}.json`);
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  writeFileAtomic(file, JSON.stringify(hostedMcpConfig(config, 'minecraft', memory, identity), null, 2) + '\n');
-  return file;
 }
 
 export function probeTcp(host, port, timeoutMs = 3000) {
@@ -832,7 +641,7 @@ function main() {
     console.error(`找不到 ${agentProtocol.label} 配置目录：${args.configDir}`);
     process.exit(2);
   }
-  const RUNTIME = process.env.COMPANION_RUNTIME_DIR ? path.resolve(process.env.COMPANION_RUNTIME_DIR) : path.join(ROOT, 'runtime');
+  const RUNTIME = runtimeDirOf();
   const F = runtimeFiles(RUNTIME, args.name);
   // 记忆位置：驱动器和 MCP 服务端共用。claude 先看 MCP 配置里写的参数；agy 用全局配置，只能按驱动器参数或默认
   const MCP_SOURCE = args.mcpConfig || path.join(ROOT, '.mcp.json');
@@ -1261,19 +1070,6 @@ function main() {
   // 同一 Agent、同一账号起一个一次性的进程：MCP 只挂运行端的 --memory-only（只有记忆工具，没有身体、没有游戏工具），
   // 送一轮【整理记忆】，结束就关。正在玩的会话照常回应，上下文不变长。成功 = state.json 的整理时间变了（模型带 through 写了）。
 
-  /** 整理会话的 MCP：托管配置里的运行端换成 --memory-only，记忆位置、世界照旧。 */
-  function memoryServerConfig() {
-    const list = Array.isArray(hostedServer?.args) ? hostedServer.args : [];
-    // 运行端脚本（第一个不是选项的参数）和它前面的都留着，后面的身体参数都不要
-    const script = list.findIndex((a) => typeof a === 'string' && !a.startsWith('-'));
-    const memoryArgs = [...list.slice(0, script + 1), '--memory-only', '--memory-dir', MEMORY.memoryDir, '--memory-agent', MEMORY.memoryAgent,
-      ...(WORLD_ID ? ['--world-id', WORLD_ID] : []), '--runtime-dir', RUNTIME];
-    const server = { ...hostedServer, args: memoryArgs };
-    const configFile = path.join(RUNTIME, `mcp-memory-${args.name}.json`);
-    writeFileAtomic(configFile, JSON.stringify({ mcpServers: { minecraft: server } }, null, 2) + '\n');
-    return { server, configFile };
-  }
-
   function startSideConsolidation(reason, attempts = 0) {
     if (!serverMemory || shuttingDown || sideConsolidation || !hostedServer) return;
     const status = memoryStatus(MEMORY_WORLD_DIR);
@@ -1287,7 +1083,7 @@ function main() {
     if (Date.now() < pausedUntil) { sideRetry = { reason, attempts, at: pausedUntil }; return; }
     sideRetry = null;
     let config;
-    try { config = memoryServerConfig(); } catch (e) { info(`整理记忆没能开始：${e.message}`); return; }
+    try { config = writeMemoryMcpConfig(hostedServer, { memory: MEMORY, worldId: WORLD_ID, runtimeDir: RUNTIME, name: args.name }); } catch (e) { info(`整理记忆没能开始：${e.message}`); return; }
     const rules = SIDE_CONSOLIDATE_RULES, instructions = sideConsolidationInstructions(MEMORY_AGENT_DIR);
     let cmd, a;
     if (process.env.COMPANION_AGENT_CMD && agentProtocol.createConnection) {
