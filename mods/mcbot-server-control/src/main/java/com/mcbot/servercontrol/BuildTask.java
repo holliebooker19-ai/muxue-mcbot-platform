@@ -59,6 +59,13 @@ final class BuildTask implements BodyTask {
         "distance","persistent","extended","enabled","triggered","lit","attached","disarmed","conditional","signal_fire","has_book","has_record","bottom",
         "leaves","stage","age","level","power","note","instrument","moisture","honey_level","hatch","eggs","pickles","candles","layers","bites","rotation",
         "mode","inverted","locked","delay","tilt");
+    /**
+     * Left out of the state, these still take the /setblock default and are compared: a log given as oak_log stands
+     * upright, a stair or slab sits low. Unchecked, the click decided them (a log clicked on a wall's side went in lying).
+     * Facing has no natural default and is compared only when given. (A door's half and a chest's type share the names;
+     * their defaults, lower and single, are what a sneaking click puts there anyway.)
+     */
+    static final Set<String> IMPLIED=Set.of("axis","half","type");
     private final ControlSession.Operation operation;
     private final BodyPlayer player;
     private final ControlSession session;
@@ -130,6 +137,7 @@ final class BuildTask implements BodyTask {
             if(state.hasProperty(BlockStateProperties.SLAB_TYPE)&&state.getValue(BlockStateProperties.SLAB_TYPE)==SlabType.DOUBLE)throw error("UNSUPPORTED","Double slabs are not placed yet; use the full block at "+pos.toShortString());
             List<Property<?>> checked=new ArrayList<>();
             for(Property<?> property:parsed.properties().keySet())if(!AUTO.contains(property.getName()))checked.add(property);
+            for(Property<?> property:state.getProperties())if(IMPLIED.contains(property.getName())&&!checked.contains(property))checked.add(property);
             BlockPos extra=null;
             if(state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF))extra=pos.above();
             else if(state.getBlock() instanceof BedBlock)extra=pos.relative(state.getValue(BedBlock.FACING));
@@ -652,8 +660,8 @@ final class BuildTask implements BodyTask {
         // Planning over and over without moving (a half-built floor the planner keeps routing into): drop the spot early.
         if(stallAt==null||at.distanceToSqr(stallAt)>0.25){stallAt=at;stallSince=now();}
         else if(now()-stallSince>STALL_MS){unreachableSpots.add(spotCell(spot));if(navigation!=null)note("not moving: "+navigation.diagnostics());giveUp(work,"not moving");return;}
-        if(navigation==null){NativeNavigation.conditions(player);if(!player.onGround())return;navigation=new NativeNavigation(player,session,operation).roomy().tolerateDamage().drops(dropWalk?safeDrop():0);} // tick() judges damage
-        try{navigation.tick(spot,goal);}
+        if(navigation==null){NativeNavigation.conditions(player);if(!player.onGround())return;navigation=new NativeNavigation(player,session,operation).roomy().tolerateDamage().drops(dropWalk?safeDrop():0);ledgesNoted=0;} // tick() judges damage
+        try{navigation.tick(spot,goal);if(navigation!=null&&navigation.ledges()>ledgesNoted){ledgesNoted=navigation.ledges();note(navigation.lastLedge());}}
         catch(Protocol.Error failure) {
             // No way by steps: up on a roof or an awning, a player jumps down. Once per walk, no further than leaves half the health.
             if(failure.code.equals("NO_PATH")&&!dropWalk&&safeDrop()>3&&spot.y<player.getY()-3){dropWalk=true;navigation.stop();navigation=null;note("no way by steps: may jump down up to "+safeDrop());return;}
@@ -723,6 +731,7 @@ final class BuildTask implements BodyTask {
     }
     private Predicate<Vec3> walkGoal;
     private boolean dropWalk;
+    private int ledgesNoted;
     /** How far the body may jump down and land with at least half its health (fall damage is the fall less three). */
     private int safeDrop(){return Math.min(8,(int)Math.floor(player.getHealth()-player.getMaxHealth()/2)+2);} // one block of margin: a step off an edge falls a little further
     private static String label(Object work){return work instanceof Target t?t.pos().toShortString():work instanceof BlockPos p?p.toShortString():"?";}

@@ -92,8 +92,13 @@ final class TravelTask implements BodyTask {
         var box=player.getBoundingBox().move(feet.subtract(player.position()));
         for(int bx=(int)Math.floor(box.minX);bx<=(int)Math.floor(box.maxX);bx++)for(int bz=(int)Math.floor(box.minZ);bz<=(int)Math.floor(box.maxZ);bz++)
             if(NavigationDoors.handDoor(player.serverLevel().getBlockState(new BlockPos(bx,(int)Math.floor(feet.y+0.01),bz))))return false;
-        Vec3 from=feet.add(0,0.5,0),to=new Vec3(x,(y!=null?y:feet.y)+0.5,z);
+        Vec3 from=feet.add(0,0.5,0),to=new Vec3(x,(y!=null?y:feet.y)+0.5,z),level=new Vec3(x,feet.y+0.5,z);
         if(from.distanceTo(to)<0.3)return true;
+        // Also at the body's own height: a y given a block low puts the spot inside the ground, and the line to it hits the
+        // floor (10-12: 0.8 off with tolerance 4, failed NO_PATH). A wall between blocks both lines.
+        return clear(from,to)||clear(from,level);
+    }
+    private boolean clear(Vec3 from,Vec3 to) {
         return player.serverLevel().clip(new ClipContext(from,to,ClipContext.Block.COLLIDER,ClipContext.Fluid.NONE,player)).getType()==HitResult.Type.MISS;
     }
     JsonObject progress() {

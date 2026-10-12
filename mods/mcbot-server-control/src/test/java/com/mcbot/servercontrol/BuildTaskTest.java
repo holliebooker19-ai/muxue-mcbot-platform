@@ -32,6 +32,9 @@ final class BuildTaskTest {
         check(BuildTask.pitch(new Vec3(1,-1,0))>44&&BuildTask.pitch(new Vec3(1,-1,0))<46,"Looking down is a positive pitch");
         check(BuildTask.AUTO.contains("shape")&&BuildTask.AUTO.contains("waterlogged")&&!BuildTask.AUTO.contains("facing")&&!BuildTask.AUTO.contains("half")&&!BuildTask.AUTO.contains("axis")&&!BuildTask.AUTO.contains("hinge"),
             "Neighbour-decided properties are not compared; facing, half, axis and hinge are");
+        check(BuildTask.IMPLIED.containsAll(java.util.List.of("axis","half","type"))&&!BuildTask.IMPLIED.contains("facing")&&!BuildTask.IMPLIED.contains("hinge"),
+            "Axis, half and type left out still take the default and are compared; facing and hinge only when given");
+        check(BuildTask.IMPLIED.stream().noneMatch(BuildTask.AUTO::contains),"Nothing implied is also neighbour-decided");
         System.out.println("BuildTaskTest: "+checks+" checks passed (click geometry only; placement in a world not tested)");
     }
 }

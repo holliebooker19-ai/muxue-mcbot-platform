@@ -36,6 +36,17 @@ final class NativeNavigation {
      * falls once its centre is 0.8 out); back up to RUN_UP for another run.
      */
     static final double TAKEOFF_FROM=0.05,EDGE=0.6,LAND_MIN=1.6,LAND_MAX=2.4,RUN_UP=-0.3;
+    /**
+     * Caught on the edge of a step up (jumping in place, a side of the body against the corner): after LEDGE_MS of that,
+     * back to the middle of the take-off block and come at the step straight, as a player does, instead of jumping on
+     * until the stuck timer replans (10-12 playtest: it jumped a while, then took another way). At most REALIGNS per step.
+     */
+    static final long LEDGE_MS=700,REALIGN_MS=1200;
+    static final int REALIGNS=2;
+    private Vec3 ledgeNode,realignTo;
+    private long ledgeSince,realignUntil;
+    private int realigns,ledges;
+    private String lastLedge;
     /** Swimming out: shores are looked for this far around, and one that brings no progress this long is dropped. */
     static final int SHORE_RANGE=10;
     static final long SWIM_STUCK_MS=4000;
@@ -120,10 +131,35 @@ final class NativeNavigation {
         Vec3 next=route.get(index);
         if(!allowed.test(next))throw error("OUT_OF_REACH","Next navigation node left its authorized region");
         if(doors.tick(feet,route,index))return false;
+        if(realignTo!=null){realign(feet,now);return false;}
+        if(caught(feet,next,now))return false;
         if(index>0&&leap(route.get(index-1),next))leap(feet,route.get(index-1),next);
         else{backing=false;steer(feet,next);}
         return false;
     }
+    /** Up against a step it keeps failing to jump onto: start backing to the middle of the take-off block. */
+    private boolean caught(Vec3 feet,Vec3 next,long now) {
+        if(!next.equals(ledgeNode)){ledgeNode=next;ledgeSince=0;realigns=0;}
+        boolean against=body.horizontalCollision&&next.y-feet.y>body.maxUpStep()&&Math.hypot(next.x-feet.x,next.z-feet.z)<1.5;
+        if(!against){if(body.onGround())ledgeSince=0;return false;} // in the air the push against it may lapse for a tick
+        if(ledgeSince==0){ledgeSince=now;return false;}
+        if(now-ledgeSince<LEDGE_MS||!body.onGround()||realigns>=REALIGNS)return false;
+        realigns++;ledges++;ledgeSince=0;
+        Vec3 from=index>0?route.get(index-1):null;
+        realignTo=from!=null&&Math.abs(from.y-feet.y)<0.6&&Math.hypot(from.x-feet.x,from.z-feet.z)<1.2?from:new Vec3(Math.floor(feet.x)+0.5,feet.y,Math.floor(feet.z)+0.5);
+        lastLedge=String.format("caught on the step up to %.0f %.0f %.0f at %.1f %.1f %.1f: back to the middle and straight at it",Math.floor(next.x),next.y,Math.floor(next.z),feet.x,feet.y,feet.z);
+        realignUntil=now+REALIGN_MS;body.stopInput();return true;
+    }
+    /** Walk (no jumping) to the middle of the take-off block; from there the ordinary steering comes at the step straight. */
+    private void realign(Vec3 feet,long now) {
+        Vec3 d=realignTo.subtract(feet);double gap=d.horizontalDistance();
+        if(body.onGround()&&gap<0.15||now>realignUntil){body.stopInput();realignTo=null;return;}
+        body.jumpInput(false);body.sprintInput(false);
+        body.moveInput(d.x,d.z,(float)Math.min(1,gap/0.4));
+    }
+    /** Times it was caught on a step edge and realigned, and the last one, for a caller's trace. */
+    int ledges(){return ledges;}
+    String lastLedge(){return lastLedge;}
     /** Two route points two blocks apart on one level are a gap leap (vanilla nodes are never more than one block apart). */
     static boolean leap(Vec3 from,Vec3 to){return Math.abs(to.y-from.y)<0.01&&to.subtract(from).horizontalDistance()>1.9;}
     record Leap(boolean back,boolean jump){}
@@ -282,7 +318,7 @@ final class NativeNavigation {
         Vec3 last=points.getLast();
         if(path.canReach()&&goal.test(destination)&&allowed.test(destination)&&last.subtract(destination).horizontalDistance()<=FINAL_APPROACH&&Math.abs(last.y-destination.y)<0.6)points.add(destination);
         if(points.size()==1&&reached(feet,points.getFirst())&&!goal.test(feet)&&!path.canReach())throw error("NO_PATH","No loaded walkable route makes progress toward the destination");
-        route=points;index=0;target=destination;lastPlan=now;lastProgress=now;progress=feet;routePoints=points.size();
+        route=points;index=0;realignTo=null;ledgeNode=null;target=destination;lastPlan=now;lastProgress=now;progress=feet;routePoints=points.size();
     }
     /** The straight final step stays on solid floor: no hole under its middle or its end. */
     private boolean floored(Vec3 feet,Vec3 to){
@@ -315,7 +351,7 @@ final class NativeNavigation {
         body.stopInput();totalReplans++;if(++replans>MAX_REPLANS)throw error("BLOCKED","Navigation finite obstacle/stuck replan budget exhausted");
         route=null;lastPlan=now;
     }
-    void stop(){stopped=true;route=null;body.stopInput();}
+    void stop(){stopped=true;route=null;realignTo=null;body.stopInput();}
     /** A guarding body fights while it walks: damage is expected, not a sign of an unsafe route. */
     NativeNavigation tolerateDamage(){damageTolerated=true;return this;}
     /** Damage is expected while `when` holds (a guard duty protects the player this follows); afterwards only new damage counts. */
@@ -335,14 +371,14 @@ final class NativeNavigation {
     NativeNavigation sprint(){sprint=true;return this;}
     private boolean sprint;
     /** Someone else drove the body meanwhile: forget the old route and start fresh from where it stands now. */
-    void reset(){route=null;replans=0;shore=null;swimTries=0;badShores.clear();progress=replanAnchor=body.position();lastProgress=clock();body.stopInput();}
+    void reset(){route=null;realignTo=null;replans=0;shore=null;swimTries=0;badShores.clear();progress=replanAnchor=body.position();lastProgress=clock();body.stopInput();}
     private final NavigationDoors doors=new NavigationDoors(this::bodyRef);
     private BodyPlayer bodyRef(){return body;}
     /** The caller decided the walk is over: shut the doors opened on the way that the body is out of. */
     void closeDoorsBehind(){doors.arrived();}
     private static JsonObject point(Vec3 p){return p==null?null:obj("x",p.x,"y",p.y,"z",p.z);}
     JsonObject diagnostics(){return obj("planner","vanilla-walk","plans",plans,"obstacleReplans",totalReplans,"routePoints",routePoints,"visitedLimit",visitedLimit,
-        "searchMs",searchNanos/1_000_000d,"maxSearchMs",maxSearchNanos/1_000_000d,"jumped",jumped,"leaps",leaps,"doorsOpened",doors.opened,"doorsClosed",doors.closed,"swims",swims,
+        "searchMs",searchNanos/1_000_000d,"maxSearchMs",maxSearchNanos/1_000_000d,"jumped",jumped,"leaps",leaps,"ledges",ledges,"doorsOpened",doors.opened,"doorsClosed",doors.closed,"swims",swims,
         "next",route!=null&&index<route.size()?point(route.get(index)):null,"feet",point(body.position()),"motion",point(body.getDeltaMovement()),
         "onGround",body.onGround(),"stage",shore!=null?"swim":route==null?"planning":body.onGround()?"walk":"air");}
 

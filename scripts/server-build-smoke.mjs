@@ -148,7 +148,8 @@ try {
     check('转 90° 盖：楼梯朝向跟着转（朝南→朝西、朝北→朝东），屋脊沿 z', turned.status === 'succeeded' && bad.length === 0, { turned, bad: bad.slice(0, 8) });
   }
   if (want('door')) {
-    // 一面 3 宽 3 高的圆石墙，中间下面两格留门洞放橡木门（朝南、门轴在左），墙南面上方挂火把，墙顶一根横放的原木。
+    // 一面 3 宽 3 高的圆石墙，中间下面两格留门洞放橡木门（朝南、门轴在左），墙南面上方挂火把，墙顶一根横放的原木；
+    // 墙西边贴着一根不写朝向的原木柱（10-12 试玩：点在墙侧面放成了横的），要按 /setblock 默认竖着放。
     const o = D;
     const wall = [];
     for (let x = 0; x <= 2; x++) for (let y = 0; y <= 2; y++) if (!(x === 1 && y < 2)) wall.push({ x: o.x + x, y: o.y + y, z: o.z, block: 'cobblestone' });
@@ -156,8 +157,9 @@ try {
       { x: o.x + 1, y: o.y, z: o.z, block: 'oak_door[facing=south,half=lower,hinge=left]' },
       { x: o.x + 2, y: o.y + 1, z: o.z + 1, block: 'wall_torch[facing=south]' },
       ...[0, 1, 2].map(x => ({ x: o.x + x, y: o.y + 3, z: o.z, block: 'oak_log[axis=x]' })),
+      ...[0, 1, 2].map(y => ({ x: o.x - 1, y: o.y + y, z: o.z, block: 'oak_log' })),
     ];
-    await fixture('give Claude minecraft:cobblestone 7'); await fixture('give Claude minecraft:oak_door 1'); await fixture('give Claude minecraft:torch 1'); await fixture('give Claude minecraft:oak_log 3');
+    await fixture('give Claude minecraft:cobblestone 7'); await fixture('give Claude minecraft:oak_door 1'); await fixture('give Claude minecraft:torch 1'); await fixture('give Claude minecraft:oak_log 6');
     await fixture('give Claude minecraft:dirt 8');
     const built = await build('door', { blocks });
     const expect = [
@@ -166,9 +168,10 @@ try {
       { x: o.x + 1, y: o.y + 1, z: o.z, state: 'oak_door[facing=south,half=upper,hinge=left]' },
       { x: o.x + 2, y: o.y + 1, z: o.z + 1, state: 'wall_torch[facing=south]' },
       ...[0, 1, 2].map(x => ({ x: o.x + x, y: o.y + 3, z: o.z, state: 'oak_log[axis=x]' })),
+      ...[0, 1, 2].map(y => ({ x: o.x - 1, y: o.y + y, z: o.z, state: 'oak_log[axis=y]' })),
     ];
     const bad = await wrongCells(expect);
-    check('门（朝南、门轴在左，上半自动出现）、墙上火把朝南、横放原木都对', built.status === 'succeeded' && bad.length === 0, { built, bad });
+    check('门（朝南、门轴在左，上半自动出现）、墙上火把朝南、横放原木、不写朝向的原木柱竖着，都对', built.status === 'succeeded' && bad.length === 0, { built, bad });
   }
   // --house <蓝图 JSON>：整栋按层分段盖（每段先 dryRun 看缺什么、补料，再 build，没盖完接着调），最后逐格核对；只记录不判定。
   // 图纸只从本机路径读，报告里不存方块清单。
@@ -213,8 +216,10 @@ try {
         }
         const result = await build(`house-${low}-${high}-${call}`, { blocks }, 620000);
         slice.calls.push({ status: result.status, summary: result.summary, ms: result.ms, placed: result.result.placed, scaffoldUsed: result.result.scaffoldUsed, helpersUsed: result.result.helpersUsed, skippedWhy: result.result.skippedWhy, wrongState: result.result.wrongState?.length });
+        slice.calls.at(-1).trace = result.result.trace;
         if (result.status === 'succeeded' || !/TIMEOUT/.test(result.summary ?? '')) break;
       }
+      slice.dirtAfter = await count('minecraft:dirt'); // 开始给了 64：少的就是垫脚没捡回来的
       houseReport.slices.push(slice); report.house = houseReport; await save();
     }
     // Properties the neighbours decide (pane and fence links, stair corners...) are not what build promises: not compared.

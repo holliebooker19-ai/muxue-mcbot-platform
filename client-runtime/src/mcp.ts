@@ -422,7 +422,7 @@ export function createMcpServer(rawBody: Body, events: EventJournal, options: { 
     const shelf = options.blueprints;
     const point = z.object({ x: coordinate, y: coordinate, z: coordinate });
     const design = {
-      blocks: z.array(z.object({ x: coordinate.int(), y: coordinate.int(), z: coordinate.int(), block: z.string().min(1).max(256).describe('/setblock style: oak_stairs[facing=east,half=bottom], oak_door[facing=west,hinge=left] (lower half), white_bed[facing=south] (foot); "air" clears') })).max(4096).optional(),
+      blocks: z.array(z.object({ x: coordinate.int(), y: coordinate.int(), z: coordinate.int(), block: z.string().min(1).max(256).describe('/setblock style: oak_stairs[facing=east,half=bottom], oak_door[facing=west,hinge=left] (lower half), white_bed[facing=south] (foot); left out, axis is y (logs upright) and half/type bottom; "air" clears') })).max(4096).optional(),
       shapes: z.array(z.object({
         shape: z.enum(['fill', 'hollow', 'walls', 'line', 'roof']).describe('roof: gable roof of the stairs block; from/to is its bottom layer, one wider than the walls'),
         from: point, to: point, block: z.string().min(1).max(256),
