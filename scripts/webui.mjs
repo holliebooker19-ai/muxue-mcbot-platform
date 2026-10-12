@@ -13,6 +13,7 @@ import { AGENTS, MODES, SESSION_OPTIONS, accountDirs, appearanceChoices, applyTo
 import { addGameDir, connectionFileOf, findGames, gameOnline, gameSupport, gameType, importYsmModel, listGames, localAppearances, MODEL_IMPORT_MAX, modelLabels, readGameConfig, readPersona, removeGameDir, writePersona } from './webui-games.mjs';
 import { createPluginJobs, disabledPlugins, inspectPlugins, loadCatalog, planPlugin, setPluginAi } from './webui-plugins.mjs';
 import { gameRunState, javaProcesses, runMessage } from './game-processes.mjs';
+import { deleteDay, deleteLine, readDay, viewMemory } from './webui-memory.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NAME_RE = /^[A-Za-z0-9_]{1,16}$/;
@@ -155,7 +156,7 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
     }
     if (!authed) return send(res, 403, { error: 'unauthorized' });
     if (req.method === 'POST' && !allowedOrigin(req.headers.origin)) return send(res, 403, { error: 'origin not allowed' });
-    if (url.pathname.startsWith('/api/profiles') || url.pathname.startsWith('/api/games') || url.pathname.startsWith('/api/persona') || url.pathname === '/api/memory' || url.pathname === '/api/models' || url.pathname.startsWith('/api/appearances') || url.pathname.startsWith('/api/plugins')) {
+    if (url.pathname.startsWith('/api/profiles') || url.pathname.startsWith('/api/games') || url.pathname.startsWith('/api/persona') || url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/') || url.pathname === '/api/models' || url.pathname.startsWith('/api/appearances') || url.pathname.startsWith('/api/plugins')) {
       handleProfiles(req, res, url).catch((e) => send(res, 400, { ok: false, error: e.message }));
       return;
     }
@@ -237,6 +238,18 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
       return send(res, 200, readPersona(opts));
     }
     if (p === '/api/memory') return send(res, 200, inspectMemory(String(body.dir || ''), String(body.agent || 'claude')));
+    // 「记忆」页：只看和删（删前备份到 runtime/memory-backup），不提供编辑（webui-memory.mjs）
+    if (p.startsWith('/api/memory/')) {
+      const opts = { agent: String(body.agent || ''), memoryDir: body.memoryDir ? expandHome(String(body.memoryDir)) : '', username: String(body.username || '') };
+      if (!AGENTS[opts.agent]) return send(res, 400, { ok: false, error: '不支持的 Agent' });
+      if (opts.memoryDir && !isAbsPath(opts.memoryDir)) return send(res, 200, { ok: false, error: '记忆目录须为完整路径' });
+      const env = { runtime };
+      if (p === '/api/memory/view') return send(res, 200, viewMemory(opts, env));
+      if (p === '/api/memory/day') return send(res, 200, readDay(opts, String(body.date || ''), env));
+      if (p === '/api/memory/delete-line') return send(res, 200, deleteLine(opts, String(body.section || ''), body.line, String(body.text ?? ''), env));
+      if (p === '/api/memory/delete-day') return send(res, 200, deleteDay(opts, String(body.date || ''), env));
+      return send(res, 404, { error: 'not found' });
+    }
     if (p === '/api/profiles/save') {
       // 先校验，再把 Bot 名和端口写进游戏（世界开着时要重进才生效）；独立身份的人设按名字放，改名时带过去
       const input = normalizeProfile(body);
