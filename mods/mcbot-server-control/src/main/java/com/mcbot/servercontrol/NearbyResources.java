@@ -63,6 +63,12 @@ final class NearbyResources {
                 matches.add(new Candidate(pos,state,Vec3.atCenterOf(pos).distanceTo(options.center())));
             }
         }
+        // Logs with no crown (a house wall, a fence) are no tree: a plain scan leaves them out, as a whole-tree one does (TreeScan).
+        int builtLogs=0;
+        if(whole==null&&mining==null&&matches.stream().anyMatch(c->ResourceCatalog.kind(c.state())==ResourceCatalog.Kind.LOG)){
+            Set<BlockPos> wild=TreeScan.wild(body.serverLevel(),options.center(),options.radius(),selection);int before=matches.size();
+            matches.removeIf(c->ResourceCatalog.kind(c.state())==ResourceCatalog.Kind.LOG&&!wild.contains(c.position()));builtLogs=before-matches.size();
+        }
         if(whole==null) matches.sort(Comparator.comparingDouble(Candidate::distance).thenComparingInt(c->c.position().getX()).thenComparingInt(c->c.position().getY()).thenComparingInt(c->c.position().getZ()));
         Set<BlockPos> tree=new HashSet<>(mining==null&&whole==null?treeAbove(body,origin,options,selection,matches):Set.of());
         // Safety and line-of-sight checks cost terrain reads: run them nearest first, one past the limit to report truncation.
@@ -107,7 +113,7 @@ final class NearbyResources {
             candidates.add(value);
         }
         return obj("dimension",body.serverLevel().dimension().location().toString(),"center",position(options.center()),"candidates",candidates,
-            "truncated",found.size()>options.maxResults()||exhausted||whole!=null&&whole.truncated(),"wholeTree",whole!=null,"budget",obj("radius",options.radius(),"below",BELOW,"above",ABOVE,"treeAbove",TREE_ABOVE,"treeLogs",tree.size(),"matches",matches.size(),"visited",visited,"maxVisited",MAX_VISITED,"unloaded",unloaded,"rejected",rejected,"loadedOnly",true,"blockReads",geometry.reads(),"maxBlockReads",FlatApproach.MAX_READS));
+            "truncated",found.size()>options.maxResults()||exhausted||whole!=null&&whole.truncated(),"wholeTree",whole!=null,"budget",obj("radius",options.radius(),"below",BELOW,"above",ABOVE,"treeAbove",TREE_ABOVE,"treeLogs",tree.size(),"builtLogs",builtLogs,"matches",matches.size(),"visited",visited,"maxVisited",MAX_VISITED,"unloaded",unloaded,"rejected",rejected,"loadedOnly",true,"blockReads",geometry.reads(),"maxBlockReads",FlatApproach.MAX_READS));
     }
     /**
      * Logs above the scan band connected (26-neighbourhood) to a requested log found in it, appended to the
