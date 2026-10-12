@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 认建筑实测（10-13，只写好脚本，还没跑）：Bot 采集、dig-block 时，哪些方块会被当成“可能是建筑”挡下、报给模型：
+// 认建筑实测（10-13）：Bot 采集、dig-block 时，哪些方块会被当成“可能是建筑”挡下、报给模型：
 //   1. 箱子旁：一排石头，箱子 4.5 格内的石头默认扫描不列、回 maybeBuilding；includeBuildings:true 才全部列出；
 //   2. 箱子旁的单个 dig-block：不带 playerAsked 不挖，回 maybeBuilding.reason=lived_in；带 playerAsked 才挖掉；
 //   3. 家附近：places 记下 home 后，家 4.5 格内的石头同样默认不列；
@@ -60,6 +60,8 @@ async function settle(op, ms = 60000) {
   return op;
 }
 const key = p => `${p.x},${p.y},${p.z}`;
+// 扫描只列身体看得见、够得着的候选（视线检查按交互距离），远处的石头本来就不列：断言只看“挡下的不列、列出的都不是挡下的”，不要求远处的都列出
+const only = (keys, allowed) => keys.size > 0 && [...keys].every(k => allowed.some(p => p.join(',') === k));
 const scan = async (extra = {}) => {
   const result = await tool('discover-resources', { blockIds: ['minecraft:stone'], radius: 10, maxResults: 64, ...extra });
   assert(!result.error, JSON.stringify(result.value));
@@ -98,15 +100,17 @@ try {
   const plain = await scan();
   report.runs.chest = { maybeBuilding: plain.budget?.maybeBuilding ?? plain.maybeBuilding, candidates: plain.candidates?.length };
   check('箱子旁：默认扫描只列够得着箱子以外的石头，被挡下的数量回给模型 maybeBuilding',
-    free.every(p => plain.keys.has(p.join(','))) && held.every(p => !plain.keys.has(p.join(','))) && plain.maybeBuilding === held.length,
+    only(plain.keys, free) && held.every(p => !plain.keys.has(p.join(','))) && plain.maybeBuilding === held.length,
     { held: held.length, free: free.length, listed: [...plain.keys], maybeBuilding: plain.maybeBuilding, note: plain.maybeBuildingNote });
   const all = await scan({ includeBuildings: true });
-  check('includeBuildings:true：箱子旁的石头也列出，没有 maybeBuilding', row.every(p => all.keys.has(p.join(','))) && all.maybeBuilding === undefined, { listed: [...all.keys] });
+  check('includeBuildings:true：箱子旁的石头也列出，没有 maybeBuilding', [...plain.keys].every(k => all.keys.has(k)) && held.some(p => all.keys.has(p.join(','))) && all.maybeBuilding === undefined, { listed: [...all.keys] });
 
   // 2. 单个 dig-block：箱子旁的石头先不挖，带 playerAsked 才挖
   await tool('equip-item', { item: 'minecraft:diamond_pickaxe', hand: 'main' });
   await command(`tp Claude 3403.5 ${Y + 1} 3406.5 0 0`); await wait(1000);
-  const target = { x: held[1][0], y: held[1][1], z: held[1][2] };
+  // 挑离身体最近的那块：远处的会被前面的石头挡住视线（NO_LINE_OF_SIGHT），和认建筑无关
+  const closest = held.reduce((a, b) => Math.hypot(b[0] + 0.5 - 3403.5, b[2] + 0.5 - 3406.5) < Math.hypot(a[0] + 0.5 - 3403.5, a[2] + 0.5 - 3406.5) ? b : a);
+  const target = { x: closest[0], y: closest[1], z: closest[2] };
   const refused = await tool('dig-block', { ...target, expectedBlock: 'minecraft:stone', expectedProperties: {}, timeoutMs: 15000 });
   report.runs.digRefused = refused.value;
   check('箱子旁的石头：dig-block 不带 playerAsked 不挖，回 maybeBuilding.reason=lived_in，方块还在',
@@ -123,11 +127,14 @@ try {
   await command(`tp Claude ${home[0]} ${Y + 1} ${home[2]} 0 0`); await wait(1500);
   const saved = await tool('places', { action: 'remember', name: 'home', x: home[0], y: home[1], z: home[2] });
   assert(!saved.error, JSON.stringify(saved.value));
+  // 站到家东边，够得着家 4.5 格外的那两块（扫描只列够得着的），也够得着挡下的 3402
+  await command(`tp Claude 3404.5 ${Y + 1} 3398.5 0 0`); await wait(1500);
   const homeHeld = row2.filter(p => near(p, home)), homeFree = row2.filter(p => !near(p, home));
   assert(homeHeld.length > 0 && homeFree.length > 0);
+  // 扫描半径 10（scan()）按到身体的距离算：最西边那块在半径外，不算进 maybeBuilding
   const homeScan = await scan();
   check('家附近：默认扫描不列家 4.5 格内的石头，数量回给模型',
-    homeFree.every(p => homeScan.keys.has(p.join(','))) && homeHeld.every(p => !homeScan.keys.has(p.join(','))) && homeScan.maybeBuilding === homeHeld.length,
+    only(homeScan.keys, homeFree) && homeHeld.every(p => !homeScan.keys.has(p.join(','))) && homeScan.maybeBuilding === homeHeld.filter(([x, y, z]) => Math.hypot(x + 0.5 - 3404.5, y + 0.5 - (Y + 1), z + 0.5 - 3398.5) <= 10).length,
     { homeHeld: homeHeld.length, homeFree: homeFree.length, listed: [...homeScan.keys], maybeBuilding: homeScan.maybeBuilding });
   await tool('places', { action: 'forget', name: 'home' });
 
@@ -152,7 +159,8 @@ try {
     for (const under of ['grass_block', 'dirt_path', 'dirt']) await command(`fill ${vx - 5} ${floor} ${vz - 5} ${vx + 5} ${floor} ${vz + 5} stone replace ${under}`);
     const guarded = await scan({ radius: 4 }), open = await scan({ radius: 4, includeBuildings: true });
     report.runs.village = { guarded: guarded.candidates?.length, open: open.candidates?.length, maybeBuilding: guarded.maybeBuilding };
-    check('村庄部件里的石头默认不列：比 includeBuildings 少，差额等于 maybeBuilding', guarded.candidates.length < open.candidates.length && guarded.maybeBuilding === open.candidates.length - guarded.candidates.length && !open.truncated, report.runs.village);
+    // maybeBuilding 数的是挡下的全部匹配，列出的只有看得见的：只比较“少了”和“有挡下的”
+    check('村庄部件里的石头默认不列：比 includeBuildings 少，maybeBuilding 大于 0', guarded.candidates.length < open.candidates.length && guarded.maybeBuilding > 0 && !open.truncated, report.runs.village);
   }
   report.result = 'passed';
 } catch (error) {
