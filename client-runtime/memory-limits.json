@@ -1,0 +1,14 @@
+{
+  "$comment": "长期记忆的上限（docs/memory_plan.md）。运行端 src/memory.ts 和驱动器 scripts/companion.mjs 都读这一份（驱动器按文件读，打包要求 scripts 不引用目录以外的模块）。sectionLimits：每段最多多少字，开局整段放进提示词，超了就让整理的人先合并；玩家档案用 goals 的上限（同是开局常驻的短清单）。contextJournalLines：开局上下文里列多少条没整理的日志，交接单列多少句最近的聊天。 writeLock：改各段时的跨进程写锁（<记忆目录>/.write.lock）等多久、多旧算没人用了，WebUI 删行时用同一把锁。",
+  "sectionLimits": {
+    "digest": 3500,
+    "goals": 1500,
+    "bonds": 4000,
+    "world": 3000
+  },
+  "contextJournalLines": 15,
+  "writeLock": {
+    "waitMs": 3000,
+    "staleMs": 10000
+  }
+}

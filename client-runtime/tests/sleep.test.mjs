@@ -68,7 +68,8 @@ test('a nearby player going to bed and the body getting up are model events; the
   seen({ entities: [player('Steve', true), player('muxue', true)], sleeping: true });
   seen({ entities: [player('muxue', false)], sleeping: false });
   const fresh = events.since(1);
-  assert.deepEqual(fresh.map(e => [e.type, e.text]), [['player_sleep', 'muxue 上床睡觉了。'], ['woke', 'ServerBot 已起床（天亮、受伤或被叫醒）。']]);
+  // sleep (the body itself lying down) comes along with the next turn and is when the driver tidies the memory (docs/memory_plan.md).
+  assert.deepEqual(fresh.map(e => [e.type, e.text]), [['player_sleep', 'muxue 上床睡觉了。'], ['sleep', 'ServerBot 躺上床睡着了。'], ['woke', 'ServerBot 已起床（天亮、受伤或被叫醒）。']]);
   seen({ entities: [player('muxue', true)] });
   assert.equal(events.since(1).at(-1).type, 'player_sleep', 'getting back into bed is news again');
 });

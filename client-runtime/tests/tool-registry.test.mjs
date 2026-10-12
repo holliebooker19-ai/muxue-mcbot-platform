@@ -9,7 +9,8 @@ import { TOOLS, toolInfo, looksOnly, resumable } from '../dist/tool-registry.js'
 import { mockServerControl } from './mock-server-control.mjs';
 
 test('the tool table: every entry is complete, and only the agreed tasks carry on after an interruption (design 8.2)', () => {
-  assert.equal([...TOOLS.values()].filter(info => !info.clientOnly).length, 45, 'ServerBody tools after the merge (docs/tool_consolidation_plan.md)');
+  assert.equal([...TOOLS.values()].filter(info => !info.clientOnly).length, 49, 'ServerBody tools after the merge (docs/tool_consolidation_plan.md), and the four memory tools (docs/memory_plan.md)');
+  assert.deepEqual([...TOOLS].filter(([name]) => name.startsWith('memory-')).map(([name, info]) => [name, info.kind, info.needsIdle]), [['memory-note', 'read', false], ['memory-recall', 'read', false], ['memory-context', 'read', false], ['memory-write', 'read', false]], 'memory touches no body');
   assert.deepEqual([...TOOLS].filter(([, info]) => info.clientOnly).map(([name]) => name).sort(), ['click-slot', 'close-container', 'follow-player', 'get-container', 'get-position', 'list-inventory', 'look-at', 'move-to-position', 'open-container', 'read-chat'], 'kept for the old ClientBody only');
   for (const [name, info] of TOOLS) {
     assert.ok(['read', 'chat', 'control', 'action', 'task'].includes(info.kind), name);

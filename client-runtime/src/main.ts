@@ -27,6 +27,10 @@ import { useGiftGear } from './gift-gear.js';
 import { loadPluginPolicy } from './plugins.js';
 import { Scheduler } from './scheduler.js';
 import { PlayerStop } from './player-stop.js';
+import { MemoryStore, serverJournalLine, operationJournalLine } from './memory.js';
+import { memoryTools } from './memory-tools.js';
+import { TOOLS, toolInfo } from './tool-registry.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { fileURLToPath } from 'node:url';
 
 async function main(): Promise<void> {
@@ -36,11 +40,14 @@ async function main(): Promise<void> {
     'connection-file': { type: 'string' }, username: { type: 'string' }, 'world-id': { type: 'string' },
     nickname: { type: 'string' }, 'runtime-dir': { type: 'string', default: 'runtime' }, 'bot-players': { type: 'string', default: '' },
     'memory-dir': { type: 'string' }, 'blueprint-dir': { type: 'string' }, 'memory-agent': { type: 'string' }, hosted: { type: 'boolean', default: false },
+    // The driver's one-shot tidy-up session (docs/memory_plan.md): only the memory tools, no body, no game tools.
+    'memory-only': { type: 'boolean', default: false },
     guard: { type: 'string', default: 'on' }, 'guard-radius': { type: 'string' }, 'guard-low-health': { type: 'string' }, 'guard-bow': { type: 'string', default: 'on' }, 'guard-shield': { type: 'string', default: 'on' },
     appearance: { type: 'string' },
     // Plugins (compat.json adapter ids) the hosting person turned off for the agent; compat.json defaults to the one next to client-runtime.
     'disabled-plugins': { type: 'string', default: '' }, 'compat-file': { type: 'string' },
   } });
+  if (values['memory-only']) { await serveMemoryOnly(values); return; }
   const guardDefaults = guardSetting(values);
   if (!['client', 'server'].includes(values.body!)) throw new Error('--body 只允许 client 或 server');
   const bodyLabel = values.body === 'server' ? 'ServerBody' : 'ClientBody';
@@ -122,6 +129,10 @@ async function main(): Promise<void> {
     if (body.hello.capabilities.includes('gift-receipts')) events.useGifts();
     // Hosted ServerBody: play guides come with the first use instead of the startup prompt, and again after the driver compacts.
     if (values.hosted && body.hello.backend === 'server') events.useGuides(new GuideBook(GUIDES, () => hostedCompactions(heartbeatFile)));
+    // Hosted ServerBody with a persona in the memory directory: the program journals what happens; the model gets memory-note / memory-recall.
+    // Other processes that open this MCP (a development session) are not hosted and never write the journal.
+    const memory = values.hosted && body.hello.backend === 'server' ? openMemory(values, runtimeDir) : undefined;
+    if (memory) journalInto(memory, events, values['world-id']!, body.hello.lastDeath);
     const first = await body.observe(); events.ingest(first);
     // Furnaces loaded and left: tracked per world, checked when due, a machine event when done (8b).
     const machines = body.hello.capabilities.includes('smelt-item') ? new MachineWatch(new MachineBook(runtimeDir, values['world-id']), body, events) : undefined;
@@ -151,7 +162,7 @@ async function main(): Promise<void> {
       ? new PlayerStop({ events, names: [values.username, values.nickname], scheduler, stopCurrent, companion, reflexes, log: text => process.stderr.write(`${text}\n`) })
       : undefined;
     if (playerStop) events.onPlayerChat((player, message) => playerStop.hear(player, message));
-    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, meetWatch, playerStop, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
+    server = createMcpServer(body, events, { chatFloor: lease?.chatCursor, companion, gather, tasks, survival, reflexes, stopCurrent, places, machines, meetWatch, playerStop, memory, blueprints: new BlueprintShelf(path.resolve(values['blueprint-dir'] ?? path.join(runtimeDir, 'blueprints'))) });
     monitor = new RuntimeMonitor(body, events, {
       ...(values.hosted ? { heartbeatFile } : {}),
       companion,
@@ -179,6 +190,42 @@ async function main(): Promise<void> {
     if (values.hosted && !body) logClaimFailure(path.join(runtimeDir, `activity-${values.username}.jsonl`), error as Error);
     await shutdown(error as Error);
   }
+}
+/**
+ * The long-term memory of this character (docs/memory_plan.md), on only when the driver passed a memory directory and the character has
+ * a persona there, as the driver decides (scripts/companion.mjs memoryOn). World notes are per world. Backups go under the runtime directory.
+ */
+function openMemory(values: Record<string, unknown>, runtimeDir: string): MemoryStore | undefined {
+  const dir = values['memory-dir'] as string | undefined, agent = values['memory-agent'] as string | undefined;
+  if (!dir || !agent || !fs.existsSync(path.join(path.resolve(dir), agent, 'persona.md'))) return undefined;
+  return new MemoryStore(path.resolve(dir), agent, path.join(runtimeDir, 'memory-backup'), () => new Date(), { worldId: values['world-id'] as string | undefined });
+}
+/** What the program writes into the journal by itself: the events journalLineFor keeps, finished tasks, and the last death once. */
+function journalInto(memory: MemoryStore, events: EventJournal, worldId: string, death: import('./body.js').LastDeath | undefined): void {
+  const write = (line: string | null, at?: Date) => { if (!line) return; try { memory.append(line, at); } catch (error) { process.stderr.write(`写记忆日志失败：${(error as Error).message}\n`); } };
+  events.onEvent(event => write(serverJournalLine(event.type, event.text, worldId)));
+  const tasks = new Set([...TOOLS].filter(([, info]) => info.kind === 'task').flatMap(([name, info]) => [name, ...info.runsAs]));
+  events.onOperation(operation => write(operationJournalLine(operation, tasks)));
+  // The death the body came back from (hello): at its own time, once (a restart sees the same death again).
+  if (death && Number.isFinite(death.at) && !memory.journalLines(death.at, death.at).some(entry => entry.line.includes('[我死了]')))
+    write(`[我死了] ${(death.message ?? '').replace(/[\u0000-\u001f\u007f§]/g, ' ').trim() || '（没有死因记录）'}`, new Date(death.at));
+}
+/** --memory-only: the tidy-up session's MCP server. No body, no lock, no heartbeat: it reads and writes the memory files only. */
+async function serveMemoryOnly(values: Record<string, unknown>): Promise<void> {
+  const runtimeDir = path.resolve((values['runtime-dir'] as string) ?? 'runtime');
+  const memory = openMemory(values, runtimeDir);
+  if (!memory) throw new Error('--memory-only 需要 --memory-dir、--memory-agent，并且记忆目录里有这个角色的 persona.md');
+  const server = new McpServer({ name: 'mcbot-memory', version: '0.1.0' });
+  for (const tool of memoryTools(memory, 'consolidate')) {
+    toolInfo(tool.name);
+    server.registerTool(tool.name, { description: tool.description, inputSchema: tool.schema }, async (args: unknown) => {
+      try { return { content: [{ type: 'text' as const, text: await tool.handler(args) }] }; }
+      catch (error) { return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ code: 'ERROR', message: (error as Error).message }) }] }; }
+    });
+  }
+  const transport = new StdioServerTransport();
+  process.stdin.once('end', () => { void server.close(); });
+  await server.connect(transport);
 }
 /**
  * The look the hosting person picked (WebUI → --appearance <source>=<choice>), applied each time control is taken so a

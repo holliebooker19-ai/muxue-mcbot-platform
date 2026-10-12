@@ -8,7 +8,8 @@ import { CODEX_SERVER_TOOLS } from '../../scripts/agents/codex-app-server.mjs';
 import { isGameTool, gameToolName } from '../../scripts/agents/dsh-acp.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const source = fs.readFileSync(path.join(ROOT, 'client-runtime/src/mcp.ts'), 'utf8');
+// 记忆工具写在 memory-tools.ts（mcp.ts 和整理会话的 --memory-only 都从那里注册）。
+const source = ['mcp.ts', 'memory-tools.ts'].map((file) => fs.readFileSync(path.join(ROOT, 'client-runtime/src', file), 'utf8')).join('\n');
 const registry = JSON.parse(fs.readFileSync(path.join(ROOT, 'client-runtime/tool-registry.json'), 'utf8')).tools;
 
 // register('name', ...) 与批量任务表里的 { name: 'xxx', description: ... } 都是对外工具。

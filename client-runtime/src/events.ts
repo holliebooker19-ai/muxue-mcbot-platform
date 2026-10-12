@@ -42,6 +42,9 @@ export class EventJournal {
   private tracedOperations = new Set<string>();
   private operationListeners: ((operation: Operation) => void)[] = [];
   private chatListeners: ((player: string, message: string) => void)[] = [];
+  private eventListeners: ((event: GameEvent) => void)[] = [];
+  /** Players online (in sight or far-players), for player_joined / player_left; undefined until the first observation that lists far players. */
+  private online?: Set<string>;
   private sleepers?: Set<string>;
   private asleep?: boolean;
   private home?: () => Place | undefined;
@@ -71,12 +74,15 @@ export class EventJournal {
   useGuides(book: GuideBook): void { this.guideBook = book; }
   get guides(): GuideBook | undefined { return this.guideBook; }
   add(type: string, text: string, operationId?: string): GameEvent {
+    const said = text;
     const guide = this.guideBook?.forEvent(type, text);
     if (guide) text = `${text}\n${guide}`;
     const record = { session: this.session, seq: ++this.seq, timestamp: Date.now(), type, text, ...(operationId ? { operationId } : {}) };
     this.records.push(record);
     if (this.records.length > 200) this.records.shift();
     if (this.logFile) fs.appendFileSync(this.logFile, JSON.stringify(record) + '\n');
+    // Listeners (the memory journal) get what happened, without the play guide that came along for the model.
+    for (const listener of this.eventListeners) { try { listener({ ...record, text: said }); } catch { /* a listener never breaks the events */ } }
     for (const wake of this.waiters) wake();
     this.waiters.clear();
     return record;
@@ -103,6 +109,8 @@ export class EventJournal {
     if (operation.status === 'running') return;
     this.traceOperation(operation);
   }
+  /** Called with every event as it is added (hosted ServerBody: the long-term memory journal, memory.ts). */
+  onEvent(listener: (event: GameEvent) => void): void { this.eventListeners.push(listener); }
   /** Called with every player chat line once it is an event (a player halting the body in chat, player-stop.ts). */
   onPlayerChat(listener: (player: string, message: string) => void): void { this.chatListeners.push(listener); }
   /** Called once with every finished operation, whichever way its result arrived (machine bookkeeping). */
@@ -146,13 +154,16 @@ export class EventJournal {
     for (const chat of observation.chat) {
       if (chat.seq <= (this.chatCursor ?? 0)) continue;
       this.chatCursor = Math.max(this.chatCursor ?? 0, chat.seq);
-      if (chat.username && (chat.username === this.username || this.botPlayers.includes(chat.username))) continue;
+      // The body's own line, now that the server broadcast it: kept for the record (journal, the driver's handoff), never handed to the model (since()).
+      if (chat.username && chat.username === this.username) { this.add('self_chat', chat.message); continue; }
+      if (chat.username && this.botPlayers.includes(chat.username)) continue;
       // Unknown plugin/system chat retains its text, but cannot become an authenticated player command.
       this.add(chat.username ? 'chat' : 'system_chat', chat.username ? `${chat.username}: ${chat.message}` : chat.message);
       if (chat.username) for (const listener of this.chatListeners) { try { listener(chat.username, chat.message); } catch { /* a listener never breaks ingesting */ } }
     }
     this.chatCursor = Math.max(this.chatCursor ?? 0, observation.chatCursor);
     this.ingestSleep(observation);
+    this.ingestPresence(observation);
     this.ingestBedtime(observation);
     this.ingestScene(observation);
   }
@@ -261,7 +272,23 @@ export class EventJournal {
     this.sleepers = sleepers;
     if (observation.sleeping === undefined) return;
     if (this.asleep === true && !observation.sleeping) this.add('woke', `${observation.username} 已起床（天亮、受伤或被叫醒）。`);
+    // Getting into bed is not news for the model (it asked for it); the driver tidies the memory then (docs/memory_plan.md).
+    if (this.asleep === false && observation.sleeping) this.add('sleep', `${observation.username} 躺上床睡着了。`);
     this.asleep = observation.sleeping;
+  }
+  /**
+   * Players coming and going (far-players lists everyone out of sight, so with the ones in sight it is everyone online). Only with
+   * far-players: without it a player walking out of sight is not a player leaving. The first such observation is a baseline.
+   */
+  private ingestPresence(observation: Observation): void {
+    if (!observation.farPlayers) { this.online = undefined; return; }
+    const self = (name: string) => name === this.username || name === observation.username || this.botPlayers.includes(name);
+    const now = new Set([...observation.entities.filter(entity => entity.type === 'minecraft:player').map(entity => entity.name), ...observation.farPlayers.map(player => player.name)].filter(name => !self(name)));
+    const before = this.online;
+    this.online = now;
+    if (!before) return;
+    for (const name of now) if (!before.has(name)) this.add('player_joined', `${name} 上线了。`);
+    for (const name of before) if (!now.has(name)) this.add('player_left', now.size ? `${name} 下线了。` : `${name} 下线了（现在没有玩家在线）。`);
   }
   /** Hosted: the driver reads this journal and skips what the model already got (cursor and consumed files). */
   get hosted(): boolean { return !!this.consumedFile; }
@@ -277,7 +304,7 @@ export class EventJournal {
     if (this.consumedFile) fs.writeFileSync(this.consumedFile, `${this.session} ${seq}`);
   }
   since(cursor: number, types?: string[], exclude?: ReadonlySet<number>): GameEvent[] {
-    return this.records.filter(event => event.seq > cursor && (!types || types.includes(event.type)) && !exclude?.has(event.seq)
+    return this.records.filter(event => event.seq > cursor && event.type !== 'self_chat' && (!types || types.includes(event.type)) && !exclude?.has(event.seq)
       && !(['task', 'companion'].includes(event.type) && event.operationId && this.deliveredOperations.has(event.operationId)));
   }
   async wait(cursor: number, timeoutMs: number, types?: string[], exclude?: ReadonlySet<number>): Promise<GameEvent[]> {
