@@ -5,6 +5,7 @@
 //           FAKE_AGENT_MEMORY 记忆目录（<memory>/xiaoke）：收到【整理记忆】时写 state.json，假装整理完成
 //           FAKE_AGENT_CONSOLIDATE = ok（默认）| noop（整理轮不写 state，像没带 through）| quota-once（第一次整理轮报额度错误）
 //                                  | crash-once（第一次整理轮直接退出）
+//           FAKE_AGENT_CHAT_QUOTA=once 第一次带【游戏事件】的轮报额度错误（Claude 会话额度的说法），没动工具
 //           FAKE_AGENT_IGNORE_CLOSE=1 stdin 关了也不退出（测试强制结束进程树）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,11 +19,12 @@ const record = (obj) => { if (logFile) fs.appendFileSync(logFile, JSON.stringify
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + '\n');
 // 「第一次」要跨进程算：记在日志目录的标记文件里
 const onceFlag = logFile ? `${logFile}.${consolidate}.done` : null;
-const firstTime = () => {
-  if (!onceFlag || fs.existsSync(onceFlag)) return false;
-  fs.writeFileSync(onceFlag, '');
+const firstTime = (flag = onceFlag) => {
+  if (!flag || fs.existsSync(flag)) return false;
+  fs.writeFileSync(flag, '');
   return true;
 };
+const chatQuotaFlag = logFile && process.env.FAKE_AGENT_CHAT_QUOTA === 'once' ? `${logFile}.chat-quota.done` : null;
 
 record({ kind: 'start', argv: process.argv.slice(2), configDir: process.env.CLAUDE_CONFIG_DIR ?? null });
 if (mode === 'crash') {
@@ -43,6 +45,10 @@ rl.on('line', (line) => {
   if (isConsolidate && consolidate === 'crash-once' && firstTime()) {
     record({ kind: 'crash' });
     process.exit(1);
+  }
+  if (chatQuotaFlag && text.includes('【游戏事件】') && firstTime(chatQuotaFlag)) {
+    emit({ type: 'result', is_error: true, subtype: 'success', result: "You've hit your session limit" });
+    return;
   }
   const quota = mode === 'error' || (isConsolidate && consolidate === 'quota-once' && firstTime());
   // 工具结果回来一次，再出最终回复

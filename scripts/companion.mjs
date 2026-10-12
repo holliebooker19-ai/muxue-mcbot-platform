@@ -377,9 +377,24 @@ export function busyAck({ busy, turnStartedAt, now, ackedTurn, wakes, minMs = 60
 // 本轮报错的文字看起来像额度或登录问题
 export function classifyError(text) {
   const t = String(text ?? '');
-  if (/usage limit|rate.?limit|quota|credit balance|limit reached|overloaded|429|额度/i.test(t)) return 'quota';
+  if (/usage limit|rate.?limit|quota|credit balance|limit reached|hit your .*limit|overloaded|429|额度/i.test(t)) return 'quota';
   if (/log ?in|logged out|authenticat|unauthori[sz]ed|401|403|oauth|api key|token (has )?expired|invalid.*key/i.test(t)) return 'auth';
   return 'error';
+}
+
+// 额度报错里写的恢复时刻（Claude："You've hit your session limit · resets 8:10pm (Asia/Tokyo)"），按本机时间算；
+// 已经过了就是明天这个时候。认不出返回 0
+export function quotaResetAt(text, now) {
+  const m = /resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i.exec(String(text ?? ''));
+  if (!m) return 0;
+  let hour = Number(m[1]);
+  const minute = Number(m[2] ?? 0), half = m[3]?.toLowerCase();
+  if (half === 'pm' && hour < 12) hour += 12;
+  if (half === 'am' && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) return 0;
+  const at = new Date(now);
+  at.setHours(hour, minute, 0, 0);
+  return at.getTime() > now ? at.getTime() : at.getTime() + 24 * 3600 * 1000;
 }
 
 // 服务器状态：连上过之后连续 goneMs 连不上 → 'gone'；启动后 waitMs 内一直没连上 → 'never'
@@ -739,6 +754,8 @@ function main() {
   let busy = false;
   let turnStartedAt = 0;
   let currentTool = '', busyAckedTurn = 0;
+  // 这一轮送出去的事件和输入、这一轮有没有动过工具：额度或登录报错时没动过工具就原样再送一次
+  let turnInput = null, turnUsedTool = false;
   let playerStopTimer = null;
   let conversationId = '';
   let session = '';
@@ -955,6 +972,8 @@ function main() {
     busy = true;
     turnStartedAt = Date.now();
     currentTool = '';
+    turnUsedTool = false;
+    if (kind !== 'normal') turnInput = null;
     activity('turn_start', { turnKind: kind });
     lastInputAt = turnStartedAt;
     lastActivity = Date.now();
@@ -973,8 +992,10 @@ function main() {
     if (error) {
       out(`\x1b[31m本轮出错：${error}\x1b[0m`);
       if (errorKind === 'quota') {
-        notifyGame('quota', '额度好像用完了，暂时回不了话，过一会儿再试');
-        pausedUntil = Date.now() + QUOTA_PAUSE_MS;
+        const resetAt = quotaResetAt(error, Date.now());
+        const clock = resetAt ? new Date(resetAt).toTimeString().slice(0, 5) : '';
+        notifyGame('quota', clock ? `额度用完了，${clock} 恢复，到时候接着回` : '额度好像用完了，暂时回不了话，过一会儿再试');
+        pausedUntil = resetAt || Date.now() + QUOTA_PAUSE_MS;
       } else if (errorKind === 'auth') {
         notifyGame('auth', `登录好像失效了，要在电脑上检查 ${PROVIDER} 的登录`);
         pausedUntil = Date.now() + QUOTA_PAUSE_MS;
@@ -984,6 +1005,13 @@ function main() {
     } else {
       restartCount = 0;
     }
+    // 额度、登录问题：这一轮还没动过工具就等于没处理，暂停结束后把玩家的话原样再送一次
+    if ((errorKind === 'quota' || errorKind === 'auth') && turnKind === 'normal' && turnInput && !turnUsedTool) {
+      pendingEvents = [...turnInput.events, ...pendingEvents];
+      pendingUserLines = [...turnInput.userLines, ...pendingUserLines];
+      pendingNotes = [...turnInput.notes, ...pendingNotes];
+    }
+    turnInput = null;
     const kind = turnKind;
     turnKind = 'normal';
     let consolidated = false;
@@ -1297,7 +1325,7 @@ function main() {
           contextTokens = event.contextTokens; if (event.contextWindow > 0) contextWindow = event.contextWindow; break;
         case 'compacted': compactSeen = event; noteCompaction(); break;
         case 'text': printText(event.text, event.done); break;
-        case 'tool': currentTool = event.name || ''; info(`· ${event.name} ${JSON.stringify(event.input).slice(0, 120)}`, 'tool', { name: event.name, input: JSON.stringify(event.input ?? null).slice(0, 400) }); break;
+        case 'tool': currentTool = event.name || ''; turnUsedTool = true; info(`· ${event.name} ${JSON.stringify(event.input).slice(0, 120)}`, 'tool', { name: event.name, input: JSON.stringify(event.input ?? null).slice(0, 400) }); break;
         case 'completed': {
           saveSession();
           if (event.cancelled) {
@@ -1551,6 +1579,7 @@ function main() {
     parts.push(args.headless
       ? '按陪玩规则处理：需要回应就在游戏里说（CLI 输出没人看）并行动，不需要就直接结束本轮。'
       : '按陪玩规则处理：需要回应就在游戏里回应并行动，不需要就直接结束本轮。');
+    turnInput = { events: pendingEvents, userLines: pendingUserLines, notes: pendingNotes };
     pendingEvents = [];
     pendingUserLines = [];
     pendingNotes = [];

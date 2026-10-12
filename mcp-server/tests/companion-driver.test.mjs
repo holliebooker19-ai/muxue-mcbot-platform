@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   WAKE_TYPES, isWakeEvent, acquireLock, releaseLock, lockHolder, writeHeartbeat, rotateLog, stripAnsi,
-  createRateLimiter, classifyError, serverVerdict, runtimeFiles, parseArgs, pidAlive,
+  createRateLimiter, classifyError, quotaResetAt, serverVerdict, runtimeFiles, parseArgs, pidAlive,
   hostedMcpConfig, writeHostedMcpConfig, readSessionState, writeSessionState, isColdSession, resumableConversation,
   contextTokensOf, consolidationTrigger, consolidationDue, memoryStatus, consolidationPrompt, resolveMemory, effectiveConfigDir,
   providerOf, argValue,
@@ -156,6 +156,15 @@ test('小工具：去颜色、限频、错误分类、服务器判定、tellraw'
   assert.equal(classifyError('Invalid API key · Please run /login'), 'auth');
   assert.equal(classifyError('OAuth token has expired'), 'auth');
   assert.equal(classifyError('error_max_turns'), 'error');
+  // 10-12 晚试玩：Claude 的会话额度用完是这句话，原来没认出来、当成普通出错
+  const sessionLimit = "You've hit your session limit · resets 8:10pm (Asia/Tokyo)";
+  assert.equal(classifyError(sessionLimit), 'quota');
+  const evening = new Date(2026, 9, 12, 20, 9, 49).getTime();
+  assert.equal(quotaResetAt(sessionLimit, evening), new Date(2026, 9, 12, 20, 10).getTime(), '恢复时刻按本机时间算');
+  assert.equal(quotaResetAt(sessionLimit, new Date(2026, 9, 12, 21, 0).getTime()), new Date(2026, 9, 13, 20, 10).getTime(), '已经过了就是明天');
+  assert.equal(quotaResetAt('resets 12am', evening), new Date(2026, 9, 13, 0, 0).getTime());
+  assert.equal(quotaResetAt('resets 9am', evening), new Date(2026, 9, 13, 9, 0).getTime());
+  assert.equal(quotaResetAt('Claude AI usage limit reached|1790000000', evening), 0, '没写恢复时刻');
 
   const opts = { goneMs: 10 * 60000, waitMs: 15 * 60000 };
   const st = { everUp: false, lastUpAt: 0, startedAt: 0 };
@@ -207,7 +216,7 @@ async function fakeMcPort() {
   };
 }
 
-function setup({ mode = 'ok', rconPort, tokens, memory = false, consolidate = 'ok', ignoreClose = false, quotaPauseMs }) {
+function setup({ mode = 'ok', rconPort, tokens, memory = false, consolidate = 'ok', ignoreClose = false, quotaPauseMs, chatQuota = '' }) {
   const dir = tempDir('mcbot-companion-run-');
   // 记忆目录：默认是空目录（不启用整理）；memory: true 时放一个人设，启用整理
   const memoryDir = path.join(dir, 'memory');
@@ -234,6 +243,7 @@ function setup({ mode = 'ok', rconPort, tokens, memory = false, consolidate = 'o
     FAKE_AGENT_MEMORY: agentMemory,
     FAKE_AGENT_CONSOLIDATE: consolidate,
     FAKE_AGENT_IGNORE_CLOSE: ignoreClose ? '1' : '',
+    FAKE_AGENT_CHAT_QUOTA: chatQuota,
     ...(quotaPauseMs ? { COMPANION_QUOTA_PAUSE_MS: String(quotaPauseMs) } : {}),
   };
   const F = runtimeFiles(runtime, 'Claude');
@@ -776,6 +786,26 @@ test('冒烟：整理轮报额度错误时不换会话；暂停结束后先回�
     const t3 = await waitFor(() => s.turns()[3], 10000, '重新整理');
     assert.match(t3.text, /^【整理记忆】/);
     await waitFor(() => s.agentRecords().filter((r) => r.kind === 'start').length === 2, 15000, '整理确认后换会话');
+  } finally {
+    d.p.kill();
+    await mc.close();
+  }
+});
+
+test('冒烟：聊天轮报会话额度用完、没动工具：暂停结束后把那句话原样再送一次', async () => {
+  const mc = await fakeMcPort();
+  const s = setup({ chatQuota: 'once', quotaPauseMs: 3000 });
+  const d = runDriver(s.env, ['--headless', '--mc-port', String(mc.port)]);
+  try {
+    await waitFor(() => s.turns()[0], 10000, '启动轮');
+    appendEvent(s.F, 'chat', 'muxue: 嗯嗯 谢谢宝宝');
+    const t1 = await waitFor(() => s.turns()[1], 10000, '报额度错误的聊天轮');
+    assert.match(t1.text, /谢谢宝宝/);
+    await sleep(1500);
+    assert.equal(s.turns().length, 2, '暂停期间不再送');
+    const t2 = await waitFor(() => s.turns()[2], 10000, '暂停结束后再送');
+    assert.match(t2.text, /muxue: 嗯嗯 谢谢宝宝/, '没处理的那句话没丢');
+    assert.equal(t2.pid, t1.pid, '不换会话');
   } finally {
     d.p.kill();
     await mc.close();
