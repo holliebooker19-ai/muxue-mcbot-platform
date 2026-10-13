@@ -16,6 +16,7 @@ import { mockServerControl, serverCapabilities } from './mock-server-control.mjs
 import { observation } from './mock-control.mjs';
 import { installPosture } from './mock-posture.mjs';
 import { CompanionMode } from '../dist/companion-mode.js';
+import { BodyError } from '../dist/body.js';
 import { randomUUID } from 'node:crypto';
 
 const NAMES = ['Claude', '小克'];
@@ -130,6 +131,84 @@ test('"等一下" while following: the follow pauses where it is (companion-mode
   assert.match(events.since(0, ['player_stop'])[1].text, /跟随、等待和保护也都结束了/);
 });
 
+/** A real CompanionMode following Alex on the fake server (with posture), the way the hosted runtime wires PlayerStop; hear() is the real entry. */
+async function followSetup(t, { stopCurrentFails = false, afterStop } = {}) {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'player-stop-companion-'));
+  t.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
+  const mock = await mockServerControl();
+  mock.setState({ entities: [{ id: randomUUID(), name: 'Alex', type: 'minecraft:player', position: { x: 3, y: 64, z: 0 } }] });
+  const hello = mock.handlers.hello;
+  mock.handlers.hello = () => ({ ...hello(), capabilities: [...serverCapabilities, 'nearby-blocks'] });
+  const server = installPosture(mock);
+  const body = await ServerBody.connect({ connection: mock.connection, username: 'ServerBot', worldId: 'test-world', heartbeatIntervalMs: 60000 });
+  t.after(async () => { await body.close(); await mock.close(); });
+  const events = new EventJournal(runtime, 'ServerBot', [], 0), mode = new CompanionMode(body, events), logs = [];
+  const base = createActionStop(body, mode);
+  const stopCurrent = Object.assign(options => stopCurrentFails ? Promise.reject(new Error('stop did not reach the server')) : base(options).then(result => { afterStop?.(mode); return result; }), { generation: base.generation });
+  const playerStop = new PlayerStop({ events, names: NAMES, scheduler: Scheduler.of(body), stopCurrent, companion: mode, log: text => logs.push(text) });
+  const delivered = () => JSON.parse(fs.readFileSync(path.join(runtime, 'task-delivered-ServerBot.json'), 'utf8')).operationIds;
+  const journal = type => fs.readFileSync(path.join(runtime, 'events-ServerBot.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.type === type);
+  return { mock, server, body, events, mode, playerStop, logs, delivered, journal };
+}
+
+test('"等一下" while following: the server refusing the posture pause only degrades it: player_stop still goes out and says the follow was not stopped', async t => {
+  const f = await followSetup(t);
+  await f.mode.request({ action: 'follow', player: 'Alex' });
+  const posture = f.mock.handlers.posture;
+  f.mock.handlers.posture = (params, ctx) => { if (params.off) throw Object.assign(new Error('服务端暂时不收'), { code: 'BUSY' }); return posture(params, ctx); };
+  f.playerStop.hear('Alex', '等一下');
+  await until(() => f.events.since(0, ['player_stop']).length === 1);
+  const [event] = f.events.since(0, ['player_stop']);
+  assert.match(event.text, /Alex 说「等一下」：手上没有在做的事，但跟随没能先停住（BUSY：.*），服务端那边可能还在继续；先 get-status 看陪伴状态，要停用 companion-mode pause，保护照旧。/);
+  assert.doesNotMatch(event.text, /先停在原地/); assert.doesNotMatch(event.text, /companion-mode resume/, 'nothing was paused, so there is nothing to resume');
+  assert.equal(f.server.current.action, 'follow', 'the server still follows, as the event says');
+  assert.deepEqual([f.mode.snapshot().state, f.mode.snapshot().code], ['blocked', 'BUSY'], 'and the companion state carries the refusal');
+  assert.ok(f.logs.some(line => /跟随没能先停住/.test(line)));
+  // the structured fields the driver reads are unchanged
+  const [line] = f.journal('player_stop');
+  assert.equal(line.stop, 'pause'); assert.equal(line.player, 'Alex');
+});
+
+test('"等一下" while the model\'s own wait request is under way: the halt still ends with a player_stop, never silence', async t => {
+  const f = await followSetup(t);
+  await f.mode.request({ action: 'follow', player: 'Alex' });
+  const posture = f.mock.handlers.posture;
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  f.mock.handlers.posture = async (params, ctx) => { if (params.action === 'wait') await gate; return posture(params, ctx); };
+  const switching = f.mode.request({ action: 'wait' }).catch(error => error);
+  await until(() => f.mock.calls.some(call => call.method === 'posture' && call.params.action === 'wait'));
+  f.playerStop.hear('Alex', '等一下');
+  await until(() => f.events.since(0, ['player_stop']).length === 1);
+  release(); await switching;
+  const [event] = f.events.since(0, ['player_stop']);
+  assert.match(event.text, /Alex 说「等一下」.*跟随没能先停住（\w+：.*），服务端那边可能还在继续/, 'the model is told the posture may still run');
+  assert.equal(event.stop, 'pause'); assert.equal(event.player, 'Alex');
+});
+
+test('the body not stopping (stopCurrent throws) is still not confirmed: no player_stop, so the driver\'s fallback revokes control', async t => {
+  const f = await followSetup(t, { stopCurrentFails: true });
+  await f.mode.request({ action: 'follow', player: 'Alex' });
+  f.playerStop.hear('Alex', '等一下');
+  await until(() => f.logs.length === 1);
+  assert.match(f.logs[0], /玩家叫停没能确认：stop did not reach the server/);
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal(f.events.since(0, ['player_stop']).length, 0);
+  assert.equal(f.playerStop.holding(), false, 'the hold ends either way');
+});
+
+test('a halt does not mark an undelivered companion failure as delivered (snapshot, not read): the model still gets it', async t => {
+  // A failure that lands while the halt is under way: after the stop has cleared the old one, before the halt looks at the mode.
+  const operation = { operationId: 'op-lost', sessionId: 'server-session-1', name: 'travel-to', status: 'failed', summary: 'NO_PATH' };
+  const f = await followSetup(t, { afterStop: mode => mode.fail(new BodyError('PLAYER_NOT_VISIBLE', 'Alex 不见了'), operation) });
+  await f.mode.request({ action: 'follow', player: 'Alex' });
+  f.playerStop.hear('Alex', '等一下');
+  await until(() => f.events.since(0, ['player_stop']).length === 1);
+  assert.equal(f.events.since(0, ['companion']).some(event => event.operationId === 'op-lost'), true, 'the failure is queued for the model');
+  assert.deepEqual(f.delivered(), [], 'the halt delivered nothing');
+  // the status tool's read() is what delivers it (mcp.ts get-status)
+  f.mode.read();
+  assert.deepEqual(f.delivered(), ['op-lost']);
+});
 test('hosted: "停" is a cancel: the follow/wait and protection end too; other chat stops nothing', async t => {
   const { events, say, stops, journal } = await setup(t);
   say('muxue', '小克你停一下好吗');

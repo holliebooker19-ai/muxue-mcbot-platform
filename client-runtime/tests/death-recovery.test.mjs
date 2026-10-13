@@ -5,6 +5,9 @@ import { recoverAfterDeath, DropWatch } from '../dist/death-recovery.js';
 import { MAX_RESUMES } from '../dist/survival-reflexes.js';
 import { BodyError } from '../dist/body.js';
 import { companionFixture } from './companion-fixture.mjs';
+import { PlayerStop } from '../dist/player-stop.js';
+import { createActionStop } from '../dist/action-stop.js';
+import { Scheduler } from '../dist/scheduler.js';
 
 // After a death the runtime picks up what the body dropped (if it is still there, reachable and calm), then sets the posture the player
 // had asked for, and tells the model once. The numbers come from the server (despawnAt, remaining); the monsters are survival-state's own list.
@@ -250,6 +253,46 @@ test('the watch leaves the items while the model has the body, and after their t
   assert.equal(late.look(await f.body.observe()), false); assert.equal(f.acts().includes('pickup-item'), false);
 });
 
+test('the player\'s "停" voids the death\'s pick-up list: the watch no longer picks up; "等一下" does not', async t => {
+  // Through the real halt (PlayerStop.hear -> action stop -> CompanionMode), with the items still lying in sight.
+  const stopped = await setup(t), paused = await setup(t);
+  const halt = f => new PlayerStop({ events: f.events, names: ['小克'], scheduler: Scheduler.of(f.body), stopCurrent: createActionStop(f.body, f.mode), companion: f.mode });
+  const heard = f => f.events.since(0, ['player_stop']).length;
+  const arm = f => { const watch = new DropWatch({ body: f.body, companion: f.mode, events: f.events, now: () => NOW, sleep }); watch.arm(OVERWORLD, NOW + 4 * MINUTE); return watch; };
+  const watchStopped = arm(stopped), watchPaused = arm(paused);
+  halt(stopped).hear('Alex', '停'); halt(paused).hear('Alex', '等一下');
+  for (let i = 0; i < 400 && (!heard(stopped) || !heard(paused)); i++) await sleep();
+  assert.equal(stopped.mode.explicitStopCount(), 1, 'a cancel is an explicit end'); assert.equal(paused.mode.explicitStopCount(), 0, 'a pause is not');
+  assert.equal(watchStopped.look(await stopped.body.observe()), false);
+  assert.equal(watchPaused.look(await paused.body.observe()), true, 'after a pause the items are still to be picked up');
+  for (let i = 0; i < 400 && paused.ground.length; i++) await sleep();
+  assert.equal(paused.ground.length, 0);
+  assert.equal(stopped.acts().includes('pickup-item'), false); assert.equal(stopped.ground.length, 2, 'left lying');
+  // The list stays void for this death: later looks do nothing either, while a new death arms a fresh list.
+  assert.equal(watchStopped.look(await stopped.body.observe()), false); assert.equal(stopped.acts().includes('pickup-item'), false);
+  watchStopped.arm(OVERWORLD, NOW + 4 * MINUTE);
+  assert.equal(watchStopped.look(await stopped.body.observe()), true, 'a death after the stop is a new list');
+  for (let i = 0; i < 400 && stopped.ground.length; i++) await sleep();
+  assert.equal(stopped.ground.length, 0);
+  // the pick-ups give the lock back a moment after the last item is gone
+  for (const f of [paused, stopped]) { for (let i = 0; i < 400 && !/死后掉落/.test(f.note()); i++) await sleep(); f.lockFree(); }
+});
+
+test('a stop-action that ends the posture voids the list too; one that keeps it (keepCompanion) does not', async t => {
+  const f = await setup(t);
+  const watch = new DropWatch({ body: f.body, companion: f.mode, events: f.events, now: () => NOW, sleep });
+  watch.arm(OVERWORLD, NOW + 4 * MINUTE);
+  await f.mode.stop('keep', {});
+  assert.equal(watch.look(await f.body.observe()), true, 'a plain stop (the model changed its mind about a task) leaves the items to be picked up');
+  for (let i = 0; i < 400 && f.ground.length; i++) await sleep();
+  const again = await setup(t);
+  const second = new DropWatch({ body: again.body, companion: again.mode, events: again.events, now: () => NOW, sleep });
+  second.arm(OVERWORLD, NOW + 4 * MINUTE);
+  await again.end();
+  assert.equal(second.look(await again.body.observe()), false);
+  for (let i = 0; i < 400 && !/死后掉落/.test(f.note()); i++) await sleep();
+  f.lockFree(); again.lockFree();
+});
 test('a failed walk is told with the server\'s words and the posture is still set', async t => {
   const f = await setup(t);
   const act = f.mock.handlers.act;

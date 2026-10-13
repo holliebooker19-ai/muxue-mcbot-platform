@@ -9,6 +9,9 @@ import { ServerBody } from '../dist/server-body.js';
 import { createMcpServer } from '../dist/mcp.js';
 import { EventJournal } from '../dist/events.js';
 import { summarizeOperation } from '../dist/model-view.js';
+import { createActionStop } from '../dist/action-stop.js';
+import { SurvivalTasks } from '../dist/survival-tasks.js';
+import { SurvivalReflexes } from '../dist/survival-reflexes.js';
 import { mockServerControl, serverCapabilities } from './mock-server-control.mjs';
 
 const seeds = { slot: 2, id: 'minecraft:wheat_seeds', count: 5, components: {}, maxStackSize: 64 };
@@ -78,6 +81,28 @@ test('read-only queries never authorize action, while a real action or a non-sur
   await raw(c, 'tend-crops', {}); assert.equal(authorized, 1);
   await raw(c, 'breed-animals', { animal: 'minecraft:cow', survey: false }); assert.equal(authorized, 2);
   await raw(c, 'go-to', { x: 1, z: 1 }); assert.equal(authorized, 3);
+});
+
+test('set-reflexes armed:false only pauses the reflexes (until the next action or a stop-action), and its description says so', async t => {
+  const { body } = await setup(t, ['travel-to']);
+  const events = new EventJournal(), stopCurrent = createActionStop(body);
+  const reflexes = new SurvivalReflexes(body, new SurvivalTasks(body), events, { stopCurrent, ordinaryBusy: () => false });
+  const c = await client(t, body, events, { reflexes, stopCurrent });
+  const description = (await c.listTools()).tools.find(tool => tool.name === 'set-reflexes').description;
+  assert.match(description, /armed:false only pauses them until the next action or stop-action/);
+  assert.match(description, /autoEat\/autoDefend:false/);
+  assert.doesNotMatch(description, /disarms|rearms/, 'the old wording said stop-action disarms: the code rearms after a stop');
+  const set = async change => (await raw(c, 'set-reflexes', { expectedRevision: reflexes.read().revision, ...change })).body;
+  assert.equal((await set({ armed: false })).armed, false);
+  // stop-action ends what runs, not the reflexes (survival-reflexes.ts stop)
+  await raw(c, 'stop-action'); assert.equal(reflexes.read().armed, true);
+  assert.equal((await set({ armed: false })).armed, false);
+  // the next action rearms them
+  await raw(c, 'go-to', { x: 1, z: 1 }); assert.equal(reflexes.read().armed, true);
+  // really off is the policy switch, which neither a stop nor an action turns back on
+  assert.equal((await set({ autoEat: false })).autoEat, false);
+  await raw(c, 'stop-action'); await raw(c, 'go-to', { x: 1, z: 1 });
+  assert.equal(reflexes.read().autoEat, false); assert.equal(reflexes.read().armed, true);
 });
 
 test('wait-for-events with types confirms only the delivered contiguous prefix and never repeats a match', async t => {

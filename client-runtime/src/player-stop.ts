@@ -13,6 +13,8 @@ import type { Scheduler } from './scheduler.js';
  * ends what runs, the follow/wait and protection. The words are player-stop.json, which the hosting driver reads as well: if
  * no player_stop event follows a halt word in time, the driver falls back to revoking control. The event carries `stop` (the
  * kind) and `player`: a cancel is recorded by the driver as the last stop, so a later handoff marks the task before it cancelled.
+ * The event follows the body having stopped. Pausing the follow/wait on top of that may fail (the model's own request under way,
+ * the server refusing): that only degrades, the event says the posture may still run. The body not stopping sends no event.
  */
 export type StopKind = 'pause' | 'cancel';
 interface StopWords { pause: string[]; cancel: string[]; addressedPause: string[] }
@@ -66,12 +68,21 @@ export class PlayerStop {
     const { companion, reflexes, stopCurrent } = this.o;
     if (kind === 'cancel') await (reflexes ? reflexes.stop() : stopCurrent({ clearGuard: true, clearPosture: true }));
     else await (reflexes ? reflexes.stop({ keepCompanion: true }) : stopCurrent());
-    const mode = companion?.read();
+    // snapshot, not read(): read() marks a pending companion failure as delivered, and this event is not the tool result that carries it.
+    const mode = companion?.snapshot();
     const posed = kind === 'pause' && !!mode && (mode.state === 'following' || mode.state === 'waiting');
-    if (posed) await companion!.request({ action: 'pause' });
+    const what = mode?.state === 'following' ? '跟随' : '等待';
+    // The body has stopped by now. The pause of the posture is a courtesy: with the model's own follow/wait request still under way
+    // (BUSY) or the server refusing, it is not worth the driver revoking control (nothing confirmed in time), so the event says so.
+    let unpaused: string | undefined;
+    if (posed) {
+      try { await companion!.request({ action: 'pause' }); }
+      catch (error) { unpaused = `${(error as { code?: string }).code ? `${(error as { code: string }).code}：` : ''}${(error as Error).message}`; this.o.log?.(`玩家叫停：${what}没能先停住：${unpaused}`); }
+    }
     const stopped = work ? `${work} 停了` : '手上没有在做的事';
+    const paused = posed && unpaused === undefined;
     this.o.events.add('player_stop', kind === 'pause'
-      ? `${player} 说「${said}」：${stopped}${posed ? `，${mode!.state === 'following' ? '跟随' : '等待'}先停在原地` : ''}，保护照旧。对话没断：先简短应一声，等 ${player} 下一句；说继续就接着做（可续做的任务用同样参数再调一次${posed ? '，跟随／等待用 companion-mode resume' : ''}），别自己接着做。`
+      ? `${player} 说「${said}」：${stopped}${paused ? `，${what}先停在原地` : ''}${unpaused !== undefined ? `，但${what}没能先停住（${unpaused}），服务端那边可能还在继续；先 get-status 看陪伴状态，要停用 companion-mode pause` : ''}，保护照旧。对话没断：先简短应一声，等 ${player} 下一句；说继续就接着做（可续做的任务用同样参数再调一次${paused ? '，跟随／等待用 companion-mode resume' : ''}），别自己接着做。`
       : `${player} 说「${said}」：${stopped}，跟随、等待和保护也都结束了。旧任务取消，不要自己接着做；对话没断，等新的指令。`,
     // The driver records a cancel as the session's lastStopAt, at this event's timestamp: the body has stopped by now, and
     // action/task calls were refused since the halt word (holding), so every task begun before the halt is before it.

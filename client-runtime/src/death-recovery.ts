@@ -150,19 +150,21 @@ export async function recoverAfterDeath(env: Omit<Env, 'now' | 'sleep'> & Partia
 /**
  * The items of the last death until their time is up: whenever the body sees ones with the deathDrop tag (a player brought it there,
  * the follow passed by) and nothing else has the body, it picks them all up on the companion's lock, so the follow gives way meanwhile
- * instead of pulling it back between items. Each item is tried once; monsters there put it off to a later look.
+ * instead of pulling it back between items. Each item is tried once; monsters there put it off to a later look. An explicit end by
+ * the player (explicitStopCount moved on since arm: "停", stop-action, companion-mode stop) voids the list; a pause ("等一下") does not.
  */
 export class DropWatch {
-  private pending?: { dimension: string; despawnAt: number; tried: Set<string> };
+  private pending?: { dimension: string; despawnAt: number; tried: Set<string>; stops: number };
   private running = false;
   constructor(private readonly env: Omit<Env, 'now' | 'sleep' | 'watch'> & Partial<Pick<Env, 'now' | 'sleep'>>) {}
   private now(): number { return (this.env.now ?? Date.now)(); }
-  arm(dimension: string, despawnAt: number, tried = new Set<string>()): void { this.pending = { dimension, despawnAt, tried }; }
+  arm(dimension: string, despawnAt: number, tried = new Set<string>()): void { this.pending = { dimension, despawnAt, tried, stops: this.env.companion.explicitStopCount() }; }
   /** Each look of the monitor (CompanionMode.update); true while it picks up (or is about to). */
   look(state: Observation): boolean {
     const pending = this.pending;
     if (this.running) return true;
     if (!pending) return false;
+    if (this.env.companion.explicitStopCount() !== pending.stops) { this.pending = undefined; return false; }
     if (pending.despawnAt - this.now() < PICKUP_TIMEOUT_MS.min) { this.pending = undefined; return false; }
     if (state.dimension !== pending.dimension || !state.groundItems?.some(item => item.deathDrop === true && !pending.tried.has(item.entityId) && item.stack.components !== undefined)) return false;
     const { body, companion, events } = this.env;
@@ -170,7 +172,8 @@ export class DropWatch {
     this.running = true;
     void (async () => {
       try {
-        if (await hostileNear(body)) return;
+        // A stop during the look at the monsters would not fence the pick-up that starts after it (exclusive takes its epoch only then).
+        if (await hostileNear(body) || companion.explicitStopCount() !== pending.stops) return;
         const env = { body, sleep: this.env.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))) };
         const result = await companion.exclusive(({ token, check }) => pickUpHere(env, pending.despawnAt, () => this.now(), pending.tried, token, check));
         if (result.left === 0 && this.pending === pending) this.pending = undefined;
