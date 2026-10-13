@@ -174,7 +174,8 @@ export function createEventHandler({ args, agentProtocol, log, notifyGame, stop,
       stop().armPlayerStop(e);
       return;
     }
-    if (e.type === 'player_stop') stop().playerStopConfirmed();
+    // 运行端停好了：取消类的还要记下叫停时间（事件的 stop 字段，见 client-runtime/src/player-stop.ts）
+    if (e.type === 'player_stop') stop().playerStopConfirmed(e);
     // 独立试玩身份在旧身体上叫停：原地停下并中断推理（需要连接支持 stopActions），不换会话。
     if (agentProtocol.identity === 'independent' && isAddressedStop(e, args) && !lifecycle().shuttingDown) {
       stop().independentStop(e);

@@ -6,7 +6,13 @@ import { summarizeOperation } from './model-view.js';
 import type { Place } from './places.js';
 import type { GuideBook } from './guides.js';
 
-export interface GameEvent { session: string; seq: number; timestamp: number; type: string; text: string; operationId?: string }
+/**
+ * One line of events-<name>.jsonl. player_stop also carries `stop` (pause or cancel) and `player` (who said it), so the driver
+ * records a cancel as the session's lastStopAt without reading the Chinese text (player-stop.ts, docs/state_ownership.md item 2).
+ */
+export interface GameEvent { session: string; seq: number; timestamp: number; type: string; text: string; operationId?: string; stop?: 'pause' | 'cancel'; player?: string }
+/** Structured fields some events carry besides the text. */
+export type EventFields = Pick<GameEvent, 'operationId' | 'stop' | 'player'>;
 /** Items a player threw to the body, collected for a short window and told as one gift event. */
 interface PendingGift { items: Map<string, { id: string; count: number; extra: boolean; storedIn?: string }>; timer: ReturnType<typeof setTimeout> }
 /** One kind of item a player threw that went into the inventory (not a carried storage), as told to the gift handler. */
@@ -75,11 +81,13 @@ export class EventJournal {
   /** Play guides (guides.ts): the first event of a kind in a session carries what to do with it. Hosted only; tests opt in. */
   useGuides(book: GuideBook): void { this.guideBook = book; }
   get guides(): GuideBook | undefined { return this.guideBook; }
-  add(type: string, text: string, operationId?: string): GameEvent {
+  add(type: string, text: string, fields: string | EventFields = {}): GameEvent {
+    const { operationId, stop, player } = typeof fields === 'string' ? { operationId: fields } as EventFields : fields;
     const said = text;
     const guide = this.guideBook?.forEvent(type, text);
     if (guide) text = `${text}\n${guide}`;
-    const record = { session: this.session, seq: ++this.seq, timestamp: Date.now(), type, text, ...(operationId ? { operationId } : {}) };
+    const record: GameEvent = { session: this.session, seq: ++this.seq, timestamp: Date.now(), type, text, ...(operationId ? { operationId } : {}),
+      ...(stop ? { stop } : {}), ...(player ? { player } : {}) };
     this.records.push(record);
     if (this.records.length > 200) this.records.shift();
     if (this.logFile) fs.appendFileSync(this.logFile, JSON.stringify(record) + '\n');

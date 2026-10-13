@@ -7,7 +7,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { isAddressedStop, runtimeFiles, stopFollowup } from '../../scripts/companion.mjs';
+import { isAddressedStop, runtimeFiles, stopFollowup, readSessionState, buildHandoff } from '../../scripts/companion.mjs';
 import { createServerBodyControl } from '../../scripts/server-body-control.mjs';
 import { EventStore } from '../dist/event-store.js';
 
@@ -411,6 +411,75 @@ for (const channel of ['watch', 'journal']) test(`宿主/${channel}：叫停由�
     assert.equal(f.state.revokes, 0); assert.equal(f.state.claims, 1);
     assert.equal(records().filter(r => r.kind === 'start').length, 1, '同一个 Agent 进程');
     assert.equal(records().filter(r => r.kind === 'stdin_closing').length, 0);
+  } finally {
+    fs.writeFileSync(F.stop, '');
+    try { await waitFor(() => driver.exitCode !== null || driver.signalCode !== null, '宿主退出', 10000); }
+    catch { driver.kill('SIGKILL'); }
+    await exited; await f.close();
+  }
+});
+
+// 真实路径：驱动器进程（scripts/companion.mjs）读事件文件里的 player_stop → driver/events.mjs → stop.mjs playerStopConfirmed
+// → 会话文件 session-<名字>.json 的 lastStopAt；再用这个文件里的值拼交接单（buildHandoff）。运行端写事件的那一半在
+// client-runtime/tests/player-stop.test.mjs（事件文件里的 stop／player 字段）。
+test('宿主：原地取消（player_stop 带 stop:cancel）记下叫停时间，交接单把之前的任务标已取消；暂停不记，同一次不重复记，停止记录只附一次', async () => {
+  const f = await fixture();
+  const runtime = path.join(f.dir, 'runtime'); fs.mkdirSync(runtime);
+  const config = path.join(f.dir, 'mcp.json');
+  fs.writeFileSync(config, JSON.stringify({ mcpServers: { minecraft: { command: process.execPath,
+    args: ['not-executed.mjs', '--body', 'server', '--connection-file', f.scope.connectionFile, '--world-id', f.scope.worldId] } } }));
+  const F = runtimeFiles(runtime, f.scope.username), agentLog = path.join(f.dir, 'agent.jsonl');
+  const records = () => { try { return fs.readFileSync(agentLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse); } catch { return []; } };
+  const turns = () => records().filter(r => r.kind === 'turn');
+  let seq = 0, output = '';
+  const journal = (fields) => fs.appendFileSync(F.events, JSON.stringify({ session: 'regression-journal', seq: ++seq, timestamp: Date.now(), ...fields }) + '\n');
+  const stopAt = () => readSessionState(F.session).lastStopAt || 0;
+  const driver = spawn(process.execPath, [path.join(ROOT, 'scripts/companion.mjs'), '--agent', 'claude',
+    '--body', 'server', '--name', f.scope.username, '--nickname', '小克', '--mcp-config', config, '--headless'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env,
+      COMPANION_RUNTIME_DIR: runtime, COMPANION_MEMORY_DIR: path.join(f.dir, 'memory'),
+      COMPANION_AGENT_CMD: JSON.stringify([process.execPath, path.join(ROOT, 'mcp-server/tests/fixtures/fake-server-agent.mjs')]),
+      FAKE_SERVER_AGENT: 'claude', FAKE_AGENT_LOG: agentLog, FAKE_AGENT_CLOSE_DELAY_MS: '500',
+    },
+  });
+  driver.stdout.on('data', data => { output += data; }); driver.stderr.on('data', data => { output += data; });
+  const exited = new Promise((resolve, reject) => { driver.once('exit', resolve); driver.once('error', reject); });
+  try {
+    await waitFor(() => f.state.claims === 1 && turns().length === 1, '启动轮');
+    assert.equal(stopAt(), 0);
+    // 暂停：说继续还要接着做，不记
+    journal({ type: 'player_stop', stop: 'pause', player: 'tester', text: 'tester 说「等一下」：build 停了，保护照旧。' });
+    await waitFor(() => turns().some(r => r.text.includes('说「等一下」')), '暂停这一轮');
+    assert.equal(stopAt(), 0, '暂停不记叫停');
+    assert.doesNotMatch(turns().at(-1).text, /停止记录/);
+    await waitFor(() => (output.match(/本轮结束/g) ?? []).length >= 2, '暂停这一轮结束');
+    // 取消：这里没先发叫停词，驱动器没开确认计时器，也照样记
+    const cancelAt = Date.now() - 50;
+    fs.appendFileSync(F.events, JSON.stringify({ session: 'regression-journal', seq: ++seq, timestamp: cancelAt, type: 'player_stop', stop: 'cancel', player: 'tester',
+      text: 'tester 说「停」：build 停了，跟随、等待和保护也都结束了。旧任务取消，不要自己接着做；对话没断，等新的指令。' }) + '\n');
+    await waitFor(() => stopAt() === cancelAt, `取消记成会话文件里的 lastStopAt：${output}`);
+    await waitFor(() => turns().some(r => r.text.includes('说「停」')), '取消这一轮');
+    const cancelTurn = turns().find(r => r.text.includes('说「停」'));
+    assert.match(cancelTurn.text, /停止记录/, '记下后的那一轮附一次停止记录');
+    assert.match(output, /玩家取消了手上的事/);
+    assert.equal(f.state.revokes, 0, '原地取消不撤销控制'); assert.equal(records().filter(r => r.kind === 'start').length, 1);
+    await waitFor(() => (output.match(/本轮结束/g) ?? []).length >= 3, '取消这一轮结束');
+    // 之后的暂停、同一次取消（时间不比记下的晚）都不改
+    journal({ type: 'player_stop', stop: 'pause', player: 'tester', text: 'tester 说「等等」：手上没有在做的事，保护照旧。' });
+    fs.appendFileSync(F.events, JSON.stringify({ session: 'regression-journal', seq: ++seq, timestamp: cancelAt, type: 'player_stop', stop: 'cancel', player: 'tester', text: 'tester 说「停」：重复' }) + '\n');
+    journal({ type: 'chat', text: 'tester: 小克，查询位置 AFTER_CANCEL' });
+    await waitFor(() => turns().some(r => r.text.includes('AFTER_CANCEL')), '之后的一轮');
+    assert.equal(stopAt(), cancelAt, '暂停和重复的取消不改叫停时间');
+    assert.doesNotMatch(turns().find(r => r.text.includes('AFTER_CANCEL')).text, /停止记录/, '同一次叫停的停止记录不每轮都附');
+    assert.equal((output.match(/玩家取消了手上的事/g) ?? []).length, 1, '同一次取消只记一次');
+    // 换会话时用会话文件里的叫停时间拼交接单：叫停前开始的任务标已取消，之后的不标
+    const activityFile = path.join(f.dir, 'handoff-activity.jsonl'), none = path.join(f.dir, 'none');
+    const task = (t, name) => JSON.stringify({ t, kind: 'tool', name, input: '{}', world: f.scope.worldId }) + '\n';
+    fs.writeFileSync(activityFile, task(cancelAt - 5000, 'build'));
+    assert.match(buildHandoff({ activityFile, operationsFile: none, postureFile: none, worldId: f.scope.worldId, lastStopAt: stopAt(), now: cancelAt + 1000 }),
+      /最近的任务：.* build；.*玩家叫停，这个任务已取消，不要自己恢复/);
+    fs.writeFileSync(activityFile, task(cancelAt + 500, 'go-to'));
+    assert.doesNotMatch(buildHandoff({ activityFile, operationsFile: none, postureFile: none, worldId: f.scope.worldId, lastStopAt: stopAt(), now: cancelAt + 1000 }), /这个任务已取消/, '叫停之后开始的任务不标');
   } finally {
     fs.writeFileSync(F.stop, '');
     try { await waitFor(() => driver.exitCode !== null || driver.signalCode !== null, '宿主退出', 10000); }

@@ -56,8 +56,9 @@
 
 ### 2. 叫停时间 `lastStopAt` 有两套
 
-- 现状：驱动器的 `lastStopAt` 由会话持有（`createSession`，`driver/session.mjs:75`），写进 `session-<名字>.json`（`save`，`driver/session.mjs:79`），运行端读它判断姿态记录能不能接（`posture.ts:44`）。驱动器拿它写【停止记录】提示（`stopRecord`，`driver/prompts.mjs:161`，`driver/inbox.mjs:113`）和交接单的“已取消”（`buildHandoff`）。
-- 问题：驱动器只在**撤销控制**的叫停（`stopServerAgent`，`driver/stop.mjs:136`；WebUI 急停、运行端 10 秒没确认）和独立试玩身份叫停（`driver/stop.mjs:184`）时更新它。游戏里“停”由运行端原地停（`player-stop.ts:66`），驱动器收到 `player_stop` 只清计时器（`playerStopConfirmed`，`driver/stop.mjs:223`），**不更新** `lastStopAt`。所以原地取消之后换会话，交接单不会把被取消的任务标成“已取消”。
+- 现状：驱动器的 `lastStopAt` 由会话持有（`createSession`，`driver/session.mjs:75`），写进 `session-<名字>.json`（`save`，`driver/session.mjs:79`），运行端读它判断姿态记录能不能接（`posture.ts:44`）。驱动器拿它写【停止记录】提示（`stopRecord`，`driver/prompts.mjs:161`，`driver/inbox.mjs:119`）和交接单的“已取消”（`buildHandoff`）。
+- 原来的问题：驱动器只在**撤销控制**的叫停（`stopServerAgent`，`driver/stop.mjs:136`；WebUI 急停、运行端 10 秒没确认）和独立试玩身份叫停（`driver/stop.mjs:184`）时更新它；游戏里原地取消后换会话，交接单不会把被取消的任务标成“已取消”。
+- **10-13 已做**：运行端写 `player_stop` 时带上结构化字段 `stop`（`pause`／`cancel`）和 `player`（叫停的玩家）（`player-stop.ts:78`，`EventJournal.add` 的第三个参数，`events.ts:84`），驱动器不解析中文。驱动器收到 `player_stop` 时（`driver/events.mjs:178` → `playerStopConfirmed`，`driver/stop.mjs:228`）先清兜底计时器（有才清），再看 `stop`：`cancel` 才用**事件里的时间**（运行端停好身体的时候；叫停词之后运行端不再受理动作和任务，`mcp.ts:134` `holding()`，所以叫停前开始的任务都早于它）`markStop` 并存会话文件，同时把 `lastStopBy` 记成这位玩家；不比已记的晚就不记（同一句不重复记，也不把更晚的撤销叫停改回去）；`pause` 不记（说继续还要接着做）。计时器开没开不影响记不记。随之【停止记录】改成同一次叫停在同一个 Agent 进程里只附一次（`driver/inbox.mjs:119`，Agent 启动时 `agentStarted` 重置，额度／登录报错重送那一轮时也再附），原地取消后对话还在接着，不再每轮都附。
 - 应归：叫停的事实归**运行端**（它真正停了身体）；驱动器只读来写提示。会话文件里的 `lastStopAt` 是驱动器写给运行端看的跨层接口，现在先保留。
 
 ### 3. 叫停词识别有两份
@@ -126,7 +127,7 @@
 ## 后续建议（这次不做）
 
 1. 驱动器不再删姿态文件、不再自己判断姿态记录能不能接：叫停靠 `lastStopAt` 已经挡住；真正退出时改由驱动器通知运行端（或在会话文件里写“托管已结束”），由运行端删（第 1 条）。
-2. 原地叫停也让驱动器记 `lastStopAt`：收到 `cancel` 类的 `player_stop` 时更新（或由运行端写叫停记录、驱动器只读），交接单才能把原地取消的任务标成“已取消”（第 2 条）。
+2. ~~原地叫停也让驱动器记 `lastStopAt`~~ **10-13 已做**：`player_stop` 事件带 `stop`／`player` 字段，驱动器收到 `cancel` 时按事件时间记 `lastStopAt`，暂停不记；交接单因此把原地取消前的任务标成“已取消”（做法见第 2 条）。
 3. 叫停词识别加一张两边共用的用例表（第 3 条）。
 4. 两个 10 秒（`STOP_CONFIRM_MS`、`cancelTimeoutMs`）和心跳的 60 秒放进共用的 JSON（第 4、6 条）。
 5. 心跳的 `busy` 字段改名 `thinking`，WebUI 同步（第 5 条）。

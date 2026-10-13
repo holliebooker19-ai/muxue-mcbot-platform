@@ -11,7 +11,8 @@ import type { Scheduler } from './scheduler.js';
  * A player halting the body in chat (docs/companion_experience_review.md item 1). The hosted runtime does it in place, so the
  * agent and its conversation go on: pause stops what runs and pauses the follow/wait where it is (protection stays); cancel
  * ends what runs, the follow/wait and protection. The words are player-stop.json, which the hosting driver reads as well: if
- * no player_stop event follows a halt word in time, the driver falls back to revoking control.
+ * no player_stop event follows a halt word in time, the driver falls back to revoking control. The event carries `stop` (the
+ * kind) and `player`: a cancel is recorded by the driver as the last stop, so a later handoff marks the task before it cancelled.
  */
 export type StopKind = 'pause' | 'cancel';
 interface StopWords { pause: string[]; cancel: string[]; addressedPause: string[] }
@@ -71,6 +72,9 @@ export class PlayerStop {
     const stopped = work ? `${work} 停了` : '手上没有在做的事';
     this.o.events.add('player_stop', kind === 'pause'
       ? `${player} 说「${said}」：${stopped}${posed ? `，${mode!.state === 'following' ? '跟随' : '等待'}先停在原地` : ''}，保护照旧。对话没断：先简短应一声，等 ${player} 下一句；说继续就接着做（可续做的任务用同样参数再调一次${posed ? '，跟随／等待用 companion-mode resume' : ''}），别自己接着做。`
-      : `${player} 说「${said}」：${stopped}，跟随、等待和保护也都结束了。旧任务取消，不要自己接着做；对话没断，等新的指令。`);
+      : `${player} 说「${said}」：${stopped}，跟随、等待和保护也都结束了。旧任务取消，不要自己接着做；对话没断，等新的指令。`,
+    // The driver records a cancel as the session's lastStopAt, at this event's timestamp: the body has stopped by now, and
+    // action/task calls were refused since the halt word (holding), so every task begun before the halt is before it.
+    { stop: kind, player });
   }
 }

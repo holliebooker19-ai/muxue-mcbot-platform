@@ -36,6 +36,7 @@ export function createTurns({ args, agentProtocol, log, notifyGame, provider, st
   function startAgent() {
     agent.start();
     inTurn = false;
+    inbox.agentStarted();
   }
 
   function sendTurn(text, kind = 'normal') {

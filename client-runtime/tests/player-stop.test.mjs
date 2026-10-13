@@ -62,7 +62,9 @@ async function setup(t) {
   const say = (username, message) => { seq++; events.ingest(observation({ source: 'server-observed', username: 'ServerBot', sessionId: 'server-session-1', chat: [{ seq, username, message, time: Date.now() }], chatCursor: seq })); };
   const consumed = () => fs.readFileSync(path.join(runtime, 'consumed-ServerBot.txt'), 'utf8');
   const crafting = () => mock.calls.some(call => call.method === 'act' && call.params.name === 'craft-item');
-  return { events, c, say, consumed, stops, crafting };
+  // What the driver reads: the lines of events-<name>.jsonl (scripts/driver/events.mjs).
+  const journal = type => fs.readFileSync(path.join(runtime, 'events-ServerBot.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(e => e.type === type);
+  return { events, c, say, consumed, stops, crafting, journal };
 }
 
 test('hosted: a player speaking mid-craft ends the wait and comes with the result, and the driver will not tell it again', async t => {
@@ -85,7 +87,7 @@ test('hosted: a player speaking mid-craft ends the wait and comes with the resul
 });
 
 test('hosted: "等一下" stops the craft in place, nothing new starts until the model has heard it, then work goes on', async t => {
-  const { events, c, say, stops, crafting } = await setup(t);
+  const { events, c, say, stops, crafting, journal } = await setup(t);
   const call = c.callTool({ name: 'craft-item', arguments: { item: 'minecraft:stick', count: 4 } });
   await until(crafting);
   say('muxue', '嗯嗯');
@@ -94,6 +96,9 @@ test('hosted: "等一下" stops the craft in place, nothing new starts until the
   await until(() => events.since(0, ['player_stop']).length === 1);
   assert.deepEqual(stops, [{}], 'pause is the plain stop: the follow/wait and protection stay');
   assert.match(events.since(0, ['player_stop'])[0].text, /muxue 说「等一下」：craft-item 停了.*保护照旧.*别自己接着做/);
+  const [line] = journal('player_stop');
+  assert.equal(line.stop, 'pause', 'the event file says it was a pause: the driver does not record it as the last stop');
+  assert.equal(line.player, 'muxue');
   const refused = await c.callTool({ name: 'craft-item', arguments: { item: 'minecraft:stick', count: 4 } });
   assert.equal(refused.isError, true);
   assert.equal(JSON.parse(refused.content[0].text).code, 'CANCELLED');
@@ -126,7 +131,7 @@ test('"等一下" while following: the follow pauses where it is (companion-mode
 });
 
 test('hosted: "停" is a cancel: the follow/wait and protection end too; other chat stops nothing', async t => {
-  const { events, say, stops } = await setup(t);
+  const { events, say, stops, journal } = await setup(t);
   say('muxue', '小克你停一下好吗');
   await new Promise(r => setTimeout(r, 200));
   assert.equal(stops.length, 0);
@@ -134,4 +139,8 @@ test('hosted: "停" is a cancel: the follow/wait and protection end too; other c
   await until(() => events.since(0, ['player_stop']).length === 1);
   assert.deepEqual(stops, [{ clearGuard: true, clearPosture: true }]);
   assert.match(events.since(0, ['player_stop'])[0].text, /手上没有在做的事，跟随、等待和保护也都结束了。旧任务取消/);
+  const [line] = journal('player_stop');
+  assert.equal(line.stop, 'cancel', 'the event file says it was a cancel: the driver records it as the last stop');
+  assert.equal(line.player, 'muxue');
+  assert.equal(line.timestamp, events.since(0, ['player_stop'])[0].timestamp);
 });

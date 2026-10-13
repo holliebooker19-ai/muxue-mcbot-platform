@@ -29,6 +29,9 @@ export function createInbox({ args, agentProtocol, flush }) {
   let resumeNote = '';
   // 启动时把死掉的角色重生了：随下一轮带给 agent，不单独唤醒它
   let respawnNote = '';
+  // 这个 Agent 进程已经收到过哪一次叫停的【停止记录】（lastStopAt 的值）：游戏里原地取消后对话还在接着，
+  // 同一次叫停只附一次，不再每轮都附；新叫停或 Agent 重新启动（agentStarted）后再附一次
+  let toldStopAt = 0;
 
   function scheduleFlush(event = null) {
     const fast = args.body === 'server' && completeServerChat(event || {}, args);
@@ -75,6 +78,8 @@ export function createInbox({ args, agentProtocol, flush }) {
     handoff(text) { handoffNote = text; },
     resume(reason) { resumeNote = reason; },
     respawn(note) { respawnNote = note; },
+    /** 启动了新的 Agent 进程（新会话或接着旧会话）：上次叫停的【停止记录】在它的第一轮普通对话里再附一次 */
+    agentStarted() { toldStopAt = 0; },
     /** 叫停后重新启动 Agent：新会话、交接单、重启说明都不再带 */
     forgetSessionNotes() {
       newSessionNote = '';
@@ -110,7 +115,8 @@ export function createInbox({ args, agentProtocol, flush }) {
     takeTurn(header, { lastStopAt, session, markDelivered }) {
       const parts = header ? [header] : [];
       if (respawnNote) { parts.push(respawnNote); respawnNote = ''; }
-      if (lastStopAt) parts.push(stopRecord(lastStopAt));
+      const toldBefore = toldStopAt;
+      if (lastStopAt && lastStopAt !== toldStopAt) { parts.push(stopRecord(lastStopAt)); toldStopAt = lastStopAt; }
       if (pendingEvents.length) {
         // 驱动器已经把这些事件交给 agent，告诉 MCP 服务端不要在 wait-for-events 里重复返回（只记当前进程的序号）
         const current = pendingEvents.filter((e) => e.session === session);
@@ -124,7 +130,7 @@ export function createInbox({ args, agentProtocol, flush }) {
         parts.push(`【驱动器提示】\n${pendingNotes.join('\n')}`);
       }
       parts.push(turnClosing(args.headless));
-      turnInput = { events: pendingEvents, userLines: pendingUserLines, notes: pendingNotes };
+      turnInput = { events: pendingEvents, userLines: pendingUserLines, notes: pendingNotes, toldStopAt: toldBefore };
       pendingEvents = [];
       pendingUserLines = [];
       pendingNotes = [];
@@ -139,6 +145,8 @@ export function createInbox({ args, agentProtocol, flush }) {
         pendingEvents = [...turnInput.events, ...pendingEvents];
         pendingUserLines = [...turnInput.userLines, ...pendingUserLines];
         pendingNotes = [...turnInput.notes, ...pendingNotes];
+        // 这一轮等于没送到：停止记录下次也再附
+        toldStopAt = turnInput.toldStopAt;
       }
       turnInput = null;
     },

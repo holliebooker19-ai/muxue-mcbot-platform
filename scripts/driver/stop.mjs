@@ -219,12 +219,27 @@ export function createStopControl({ args, memoryOn, runtimeDir, files, log, agen
     /** 叫停正在收尾（撤销控制、结束 Agent，或等独立身份的原地停确认） */
     get cancelling() { return cancellingActions; },
     armPlayerStop,
-    /** 运行端发来 player_stop：它已经原地停下，不用兜底撤销 */
-    playerStopConfirmed() {
-      if (!playerStopTimer) return;
-      clearTimeout(playerStopTimer);
-      playerStopTimer = null;
-      info('运行端已原地停下，Agent 和对话照常');
+    /**
+     * 运行端发来 player_stop：它已经原地停下，不用兜底撤销。取消（事件的 stop 是 cancel）还要记成上次叫停，
+     * 换会话时交接单才把之前的任务标成已取消（docs/state_ownership.md 第 2 条）；暂停不记，玩家说继续还要接着做。
+     * 记事件里的时间（运行端停好的时候）：叫停词之后运行端就不再受理动作和任务（mcp.ts holding），之前开始的任务都早于它。
+     * 计时器有没有开（armPlayerStop 有几种情况不开）不影响记不记。
+     */
+    playerStopConfirmed(e = {}) {
+      if (playerStopTimer) {
+        clearTimeout(playerStopTimer);
+        playerStopTimer = null;
+        info('运行端已原地停下，Agent 和对话照常');
+      }
+      if (e.stop !== 'cancel') return;
+      const at = Number.isSafeInteger(e.timestamp) && e.timestamp > 0 ? e.timestamp : Date.now();
+      // 同一次叫停不重复记；已经记了更晚的叫停（比如撤销控制）也不往回改
+      if (at <= conversation.lastStopAt) return;
+      conversation.markStop(at);
+      // 和 lastStopAt 配对：上次叫停的是谁（stopFollowup 只在撤销控制后用，撤销时会重新记）
+      lastStopBy = typeof e.player === 'string' ? e.player : '';
+      conversation.save();
+      info('玩家取消了手上的事：记下叫停时间，之前的任务以后不恢复');
     },
     stopServerAgent,
     startQueuedServerTask,
