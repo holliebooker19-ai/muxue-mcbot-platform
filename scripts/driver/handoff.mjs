@@ -28,7 +28,9 @@ const POSTURE_WORDS = { follow: (p) => `跟着 ${p.player}`, wait: () => '原地
  */
 export function buildHandoff({ activityFile, operationsFile, postureFile, worldId = '', lastStopAt = 0, now = Date.now(), chatLines = MEMORY_LIMITS.contextJournalLines, tools = TOOL_TABLE }) {
   const here = (record) => !worldId || record?.world === worldId;
-  const activity = jsonLines(activityFile).filter(here);
+  // 活动记录满了会轮转成 .1（log.mjs rotateLog，驱动器启动时做，在拼交接单之前）：连同 .1 一起读（旧的在前），
+  // 轮转那一次的交接单才和没轮转时一样
+  const activity = [...jsonLines(`${activityFile}.1`), ...jsonLines(activityFile)].filter(here);
   const lines = [];
   const looksOnly = (input) => /"(?:survey|dryRun)":true|"action":"read"/.test(String(input ?? ''));
   const task = activity.filter((a) => a.kind === 'tool' && tools[a.name]?.kind === 'task' && !looksOnly(a.input)).at(-1);

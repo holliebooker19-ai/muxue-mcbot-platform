@@ -2,6 +2,7 @@
 // The driver's memory tidy-up session (MCP args with --memory-only) takes no body: it only records itself, and with
 // FAKE_AGENT_MEMORY (<memory>/<agent>/worlds/<world>, where ServerBody keeps state.json) a 【整理记忆】 turn writes state.json as a finished tidy-up would.
 // FAKE_AGENT_CONSOLIDATE=quota-once: the first tidy-up turn answers with a usage-limit error (counted across processes).
+// FAKE_AGENT_QUOTA_ONCE=<text>: the first turn containing that text answers with a usage-limit error (counted across processes).
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -47,6 +48,11 @@ function finish(text) {
     const flag=`${process.env.FAKE_AGENT_LOG}.consolidate-quota.done`;
     if(process.env.FAKE_AGENT_CONSOLIDATE==='quota-once'&&!fs.existsSync(flag)) {fs.writeFileSync(flag,'');text=`[error-quota] ${text}`;}
     else if(process.env.FAKE_AGENT_MEMORY) {fs.mkdirSync(process.env.FAKE_AGENT_MEMORY,{recursive:true});fs.writeFileSync(path.join(process.env.FAKE_AGENT_MEMORY,'state.json'),JSON.stringify({consolidatedAt:Date.now()}));}
+  }
+  const quotaOnce=process.env.FAKE_AGENT_QUOTA_ONCE;
+  if(quotaOnce&&text.includes(quotaOnce)) {
+    const flag=`${process.env.FAKE_AGENT_LOG}.quota-once.done`;
+    if(!fs.existsSync(flag)) {fs.writeFileSync(flag,'');text=`[error-quota] ${text}`;}
   }
   if(text.includes('[crash]')) {cleanup(); record({kind:'crash'}); process.exit(17);}
   if(text.includes('[hold]')) return;

@@ -11,6 +11,9 @@ import { isAddressedStop, runtimeFiles, stopFollowup, readSessionState, buildHan
 import { createServerBodyControl } from '../../scripts/server-body-control.mjs';
 import { createInbox } from '../../scripts/driver/inbox.mjs';
 import { EventStore } from '../dist/event-store.js';
+import { EventJournal } from '../../client-runtime/dist/events.js';
+import { observation } from '../../client-runtime/tests/mock-control.mjs';
+import { STOP_CONFIRM_MS } from '../../scripts/host-timing.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const CLAUDE = { name: 'Claude', nickname: '小克' };
@@ -420,6 +423,128 @@ for (const channel of ['watch', 'journal']) test(`宿主/${channel}：叫停由�
   }
 });
 
+// 真驱动器进程（scripts/companion.mjs，Claude 协议替身）接上 fixture() 的 v2 服务；setup(runtime, F) 在驱动器启动前摆文件
+async function hostedDriver(f, { env = {}, setup = () => {} } = {}) {
+  const runtime = path.join(f.dir, 'runtime'); fs.mkdirSync(runtime);
+  const config = path.join(f.dir, 'mcp.json');
+  fs.writeFileSync(config, JSON.stringify({ mcpServers: { minecraft: { command: process.execPath,
+    args: ['not-executed.mjs', '--body', 'server', '--connection-file', f.scope.connectionFile, '--world-id', f.scope.worldId] } } }));
+  const F = runtimeFiles(runtime, f.scope.username), agentLog = path.join(f.dir, 'agent.jsonl');
+  setup(runtime, F);
+  const records = () => { try { return fs.readFileSync(agentLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse); } catch { return []; } };
+  let seq = 0, output = '';
+  const driver = spawn(process.execPath, [path.join(ROOT, 'scripts/companion.mjs'), '--agent', 'claude',
+    '--body', 'server', '--name', f.scope.username, '--nickname', '小克', '--mcp-config', config, '--headless'], {
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env,
+      COMPANION_RUNTIME_DIR: runtime, COMPANION_MEMORY_DIR: path.join(f.dir, 'memory'),
+      COMPANION_AGENT_CMD: JSON.stringify([process.execPath, path.join(ROOT, 'mcp-server/tests/fixtures/fake-server-agent.mjs')]),
+      FAKE_SERVER_AGENT: 'claude', FAKE_AGENT_LOG: agentLog, FAKE_AGENT_CLOSE_DELAY_MS: '500', ...env,
+    },
+  });
+  driver.stdout.on('data', data => { output += data; }); driver.stderr.on('data', data => { output += data; });
+  const exited = new Promise((resolve, reject) => { driver.once('exit', resolve); driver.once('error', reject); });
+  return { runtime, F, records, turns: () => records().filter(r => r.kind === 'turn'), output: () => output,
+    count: (text) => output.split(text).length - 1,
+    // 运行端写的事件行（带 username，和 client-runtime/src/events.ts 一样）；一次可以写几行，驱动器同一次读到
+    journal: (...lines) => fs.appendFileSync(F.events, lines.map(fields => JSON.stringify({ session: 'regression-journal', seq: ++seq, timestamp: Date.now(), ...fields }) + '\n').join('')),
+    async close() {
+      fs.writeFileSync(F.stop, '');
+      try { await waitFor(() => driver.exitCode !== null || driver.signalCode !== null, '宿主退出', 10000); }
+      catch { driver.kill('SIGKILL'); }
+      await exited; await f.close();
+    } };
+}
+
+// 真实路径：同一句叫停先从事件文件到（同一次读取里运行端的 player_stop 也到了，计时器开了又清），控制通道的 watch 后拉到同一句
+// → stop.mjs armPlayerStop 配上对、不再开计时器；等过 STOP_CONFIRM_MS 也不撤销。玩家真的又说一遍，照常交给运行端
+test('宿主：叫停先经事件文件到、运行端已确认，控制通道后到的同一句不再开兜底计时器；再说一遍照常处理', async () => {
+  const f = await fixture();
+  const d = await hostedDriver(f);
+  try {
+    await waitFor(() => f.state.claims === 1 && d.turns().length === 1, '启动轮');
+    d.journal({ type: 'chat', username: 'tester', text: 'tester: 等一下' },
+      { type: 'player_stop', stop: 'pause', player: 'tester', text: 'tester 说「等一下」：build 停了，保护照旧。' });
+    await waitFor(() => d.output().includes('运行端已原地停下'), '事件文件这条路先到，运行端确认');
+    const watches = f.state.watches;
+    f.add('等一下');
+    await waitFor(() => f.state.watches >= watches + 2, '控制通道已拉到同一句');
+    await sleep(STOP_CONFIRM_MS + 2000);
+    assert.equal(d.count('同一句叫停从另一条路又到了一次'), 1, d.output());
+    assert.equal(f.state.revokes, 0, d.output());
+    assert.doesNotMatch(d.output(), /玩家叫停，运行端没确认停下/);
+    assert.equal(d.count('玩家叫停：交给运行端原地停下'), 1);
+    assert.equal(d.records().filter(r => r.kind === 'start').length, 1, '同一个 Agent 进程');
+    // 玩家又说了一遍：新的一次，照常交给运行端；控制通道的那份仍和它配对
+    d.journal({ type: 'chat', username: 'tester', text: 'tester: 停' });
+    await waitFor(() => d.count('玩家叫停：交给运行端原地停下') === 2, '新的一次叫停照常计时');
+    f.add('停');
+    await waitFor(() => d.count('同一句叫停从另一条路又到了一次') === 2, '新的一次的另一份也配上');
+    d.journal({ type: 'player_stop', stop: 'cancel', player: 'tester', text: 'tester 说「停」：旧任务取消。' });
+    await waitFor(() => d.count('运行端已原地停下') === 2, '运行端确认新的一次');
+    assert.equal(f.state.revokes, 0);
+  } finally { await d.close(); }
+});
+
+// 真实路径：运行端的 EventJournal（client-runtime/dist/events.js）把服务端聊天写进事件文件（chat 带 username）→ 驱动器读到叫停，
+// 运行端没确认 → STOP_CONFIRM_MS 后 stopServerAgent 撤销，lastStopBy 记成 tester → 控制通道里 tester 不点名的下一句也算新任务（stopFollowup）
+test('宿主：运行端写的聊天事件带玩家名，叫停经事件文件兜底撤销后，这位玩家不点名的下一句也算新任务', async () => {
+  const f = await fixture();
+  const d = await hostedDriver(f);
+  try {
+    await waitFor(() => f.state.claims === 1 && d.turns().length === 1, '启动轮');
+    const journal = new EventJournal(d.runtime, f.scope.username, [], 0);
+    journal.ingest(observation({ username: f.scope.username, source: 'server-observed', chatCursor: 1, chat: [{ seq: 1, time: 1, username: 'tester', message: '停' }] }));
+    const written = fs.readFileSync(d.F.events, 'utf8').trim().split('\n').map(JSON.parse).find(e => e.type === 'chat');
+    assert.equal(written.username, 'tester');
+    await waitFor(() => d.output().includes('身体控制已撤销，等待新的明确指令'), '运行端没确认，兜底撤销', 20000);
+    f.add('去挖点煤 FOLLOWUP_AFTER_STOP');
+    await waitFor(() => d.turns().some(r => r.text.includes('FOLLOWUP_AFTER_STOP')), `叫停的玩家不点名的下一句算新任务：${d.output()}`);
+    assert.match(d.turns().find(r => r.text.includes('FOLLOWUP_AFTER_STOP')).text, /停止后的新指令/);
+  } finally { await d.close(); }
+});
+
+// 真实路径：撤销后的新任务轮（stop.mjs startQueuedServerTask，不经收件箱 takeTurn）报额度错误、没动工具 → 暂停结束后 turns.mjs flush
+// 把这一轮整段再送；叫停前那一轮（[hold]）的输入不复活
+test('宿主：叫停撤销后的新任务轮碰上额度错误，暂停结束后原样再送新任务，叫停前的旧输入不复活', async () => {
+  const f = await fixture();
+  const d = await hostedDriver(f, { env: { FAKE_AGENT_QUOTA_ONCE: 'QUOTA_NEW_TASK', COMPANION_QUOTA_PAUSE_MS: '500' } });
+  try {
+    await waitFor(() => f.state.claims === 1 && d.turns().length === 1, '启动轮');
+    d.journal({ type: 'chat', username: 'tester', text: 'tester: 小克，跟着我 [hold]' });
+    await waitFor(() => d.turns().some(r => r.text.includes('[hold]')), 'Agent 忙且不结束回合');
+    d.journal({ type: 'chat', username: 'tester', text: 'tester: 小克，停下' });
+    await waitFor(() => d.output().includes('身体控制已撤销，等待新的明确指令'), '运行端没确认，兜底撤销', 20000);
+    f.add('小克，查询位置 QUOTA_NEW_TASK');
+    await waitFor(() => d.turns().filter(r => r.text.includes('QUOTA_NEW_TASK')).length === 2, `额度暂停后再送：${d.output()}`, 20000);
+    const [first, again] = d.turns().filter(r => r.text.includes('QUOTA_NEW_TASK'));
+    assert.equal(again.text, first.text, '原样再送');
+    assert.equal(again.pid, first.pid, '同一个 Agent 进程');
+    assert.match(d.output(), /本轮出错：Claude AI usage limit reached/);
+    await sleep(1000);
+    assert.equal(d.turns().filter(r => r.text.includes('[hold]')).length, 1, '叫停前那一轮的输入不复活');
+  } finally { await d.close(); }
+});
+
+// 真实路径：活动记录超过 5MB，驱动器启动时 rotateLog 把它挪成 .1，之后 startSession 拼交接单（handoff.mjs 连同 .1 读）；
+// 启动轮报额度错误、没动工具 → 暂停结束后启动说明和交接单整段再送
+test('宿主：活动记录轮转的那次启动，交接单照样有上次的任务；启动轮碰上额度错误，暂停结束后连同交接单再送', async () => {
+  const f = await fixture();
+  const d = await hostedDriver(f, { env: { FAKE_AGENT_QUOTA_ONCE: '【托管模式启动】', COMPANION_QUOTA_PAUSE_MS: '500' },
+    setup: (runtime, F) => {
+      const filler = JSON.stringify({ t: Date.now() - 60000, kind: 'event', type: 'presence', text: 'x'.repeat(5 * 1024 * 1024 + 10), world: f.scope.worldId });
+      const task = JSON.stringify({ t: Date.now() - 30000, kind: 'tool', name: 'build', input: '{}', world: f.scope.worldId });
+      fs.writeFileSync(F.activity, `${filler}\n${task}\n`);
+    } });
+  try {
+    await waitFor(() => d.turns().filter(r => r.text.includes('【托管模式启动】')).length === 2, `启动轮额度暂停后再送：${d.output()}`, 20000);
+    assert.ok(fs.existsSync(`${d.F.activity}.1`), '活动记录轮转过');
+    const [first, again] = d.turns().filter(r => r.text.includes('【托管模式启动】'));
+    assert.match(first.text, /【交接单】[\s\S]*最近的任务：.* build/, '轮转那次的交接单有上次的任务');
+    assert.equal(again.text, first.text, '启动说明和交接单原样再送');
+    assert.match(d.output(), /本轮出错：Claude AI usage limit reached/);
+  } finally { await d.close(); }
+});
+
 // 真实路径：驱动器进程（scripts/companion.mjs）读事件文件里的 player_stop → driver/events.mjs → stop.mjs playerStopConfirmed
 // → 会话文件 session-<名字>.json 的 lastStopAt；再用这个文件里的值拼交接单（buildHandoff）。运行端写事件的那一半在
 // client-runtime/tests/player-stop.test.mjs（事件文件里的 stop／player 字段）。
@@ -614,4 +739,21 @@ test('停止记录：同一次叫停只附一次；上下文压缩后、Agent �
   assert.match(turn(), /停止记录/, '新的 Agent 进程');
   inbox.finishTurn({ requeue: true });
   assert.match(turn(), /停止记录/, '额度／登录重送的那一轮等于没送到');
+});
+test('收件箱：叫停清掉进行中那一轮的输入，之后额度重送不复活旧输入；整轮（启动、新任务）重送整段、只送一次', () => {
+  const inbox = createInbox({ args: { body: 'server', headless: true }, agentProtocol: {}, flush: () => {} });
+  const ctx = { lastStopAt: 0, session: 's', markDelivered: () => {} };
+  inbox.addEvent({ session: 's', seq: 1, type: 'chat', text: 'tester: 去挖钻石', line: 'chat: tester: 去挖钻石' });
+  inbox.takeTurn('', ctx);
+  inbox.clear();
+  inbox.finishTurn({ requeue: true });
+  assert.equal(inbox.prepare({ session: 's', consumed: 0, receipt: null }), false, '旧输入不复活');
+  inbox.wholeTurnSent('启动说明\n\n【交接单】……', 'startup');
+  inbox.finishTurn({ requeue: true });
+  assert.equal(inbox.prepare({ session: 's', consumed: 0, receipt: null }), true);
+  assert.deepEqual(inbox.takeResend(), { text: '启动说明\n\n【交接单】……', kind: 'startup' });
+  assert.equal(inbox.takeResend(), null);
+  inbox.wholeTurnSent('新任务', 'normal');
+  inbox.finishTurn({ requeue: false });
+  assert.equal(inbox.takeResend(), null, '没出额度／登录错误不重送');
 });

@@ -107,10 +107,28 @@ export function createStopControl({ args, memoryOn, runtimeDir, files, log, agen
   let queuedServerTasks = [];
   let lastStopBy = '';
   let serverControl = null;
+  // 还没配上对的叫停：哪条路来的（events 事件文件／control 控制通道）、谁说的、驱动器收到的时间
+  let unpairedStops = [];
+
+  // 同一句公开聊天里的叫停会从事件文件和控制通道各到一次，先后不定；运行端可能在两次之间就发来 player_stop、清了计时器，
+  // 后到的那次不能再开计时器。两边的时间不是同一个钟（独立服务器时控制通道带的是服务器时间），只看驱动器收到的时间：
+  // 另一条路在 STOP_CONFIRM_MS 内来过同一位玩家、还没配上的叫停，就算同一句，一对一配掉。私聊只走事件文件，不配；
+  // 没带玩家名的旧事件也不配（照旧每次都开）
+  function sameStopFromOtherPath(event) {
+    if (event?.type !== 'chat' || typeof event.username !== 'string' || !event.username) return false;
+    const now = Date.now();
+    const from = Number.isSafeInteger(event.watchSeq) ? 'control' : 'events';
+    unpairedStops = unpairedStops.filter(stop => now - stop.at <= STOP_CONFIRM_MS);
+    const index = unpairedStops.findIndex(stop => stop.from !== from && stop.player === event.username);
+    if (index >= 0) { unpairedStops.splice(index, 1); return true; }
+    unpairedStops.push({ from, player: event.username, at: now });
+    return false;
+  }
 
   // 玩家在游戏里叫停（游戏聊天经事件文件或独立聊天通道，谁先到算谁）：运行端自己会停（src/player-stop.ts），
   // 这里只等它的 player_stop 确认；STOP_CONFIRM_MS 内没等到，就当运行端停不下来，撤销控制、结束这一轮 Agent
   function armPlayerStop(event, owner = null) {
+    if (sameStopFromOtherPath(event)) { info('同一句叫停从另一条路又到了一次，不再计时'); return; }
     if (lifecycle().shuttingDown || waitingNewServerTask || cancellingActions || playerStopTimer) return;
     info('玩家叫停：交给运行端原地停下，对话不断');
     playerStopTimer = setTimeout(() => {
@@ -127,6 +145,7 @@ export function createStopControl({ args, memoryOn, runtimeDir, files, log, agen
     if (cancellingActions) return;
     cancellingActions = true;
     waitingNewServerTask = true;
+    unpairedStops = [];
     serverControl?.capture();
     const bodyArtifacts = captureBodyArtifacts(runtimeDir, args.name, serverControl?.capture());
     const old = turns().detachAgent();
@@ -175,7 +194,8 @@ export function createStopControl({ args, memoryOn, runtimeDir, files, log, agen
     inbox.forgetSessionNotes();
     turns().startAgent();
     const prompt = startupPrompt(args, memoryOn, 'new-task');
-    turns().sendTurn(newTaskTurn(prompt, tasks.map(event => event.text)), 'normal');
+    // 这一轮报额度／登录错误、没动过工具时原样再送（不经 takeTurn，收件箱里没有它的输入）
+    turns().sendTurn(newTaskTurn(prompt, tasks.map(event => event.text)), 'normal', { resend: true });
   }
 
   // 独立试玩身份在旧身体上叫停：原地停下并中断推理（需要连接支持 stopActions），不换会话。

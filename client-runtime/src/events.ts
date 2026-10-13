@@ -9,10 +9,12 @@ import type { GuideBook } from './guides.js';
 /**
  * One line of events-<name>.jsonl. player_stop also carries `stop` (pause or cancel) and `player` (who said it), so the driver
  * records a cancel as the session's lastStopAt without reading the Chinese text (player-stop.ts, docs/state_ownership.md item 2).
+ * chat also carries `username` (who spoke): the driver records it as the activity line's sender and as the player who stopped,
+ * without splitting the "name: message" text.
  */
-export interface GameEvent { session: string; seq: number; timestamp: number; type: string; text: string; operationId?: string; stop?: 'pause' | 'cancel'; player?: string }
+export interface GameEvent { session: string; seq: number; timestamp: number; type: string; text: string; operationId?: string; stop?: 'pause' | 'cancel'; player?: string; username?: string }
 /** Structured fields some events carry besides the text. */
-export type EventFields = Pick<GameEvent, 'operationId' | 'stop' | 'player'>;
+export type EventFields = Pick<GameEvent, 'operationId' | 'stop' | 'player' | 'username'>;
 /** Items a player threw to the body, collected for a short window and told as one gift event. */
 interface PendingGift { items: Map<string, { id: string; count: number; extra: boolean; storedIn?: string }>; timer: ReturnType<typeof setTimeout> }
 /** One kind of item a player threw that went into the inventory (not a carried storage), as told to the gift handler. */
@@ -82,12 +84,12 @@ export class EventJournal {
   useGuides(book: GuideBook): void { this.guideBook = book; }
   get guides(): GuideBook | undefined { return this.guideBook; }
   add(type: string, text: string, fields: string | EventFields = {}): GameEvent {
-    const { operationId, stop, player } = typeof fields === 'string' ? { operationId: fields } as EventFields : fields;
+    const { operationId, stop, player, username } = typeof fields === 'string' ? { operationId: fields } as EventFields : fields;
     const said = text;
     const guide = this.guideBook?.forEvent(type, text);
     if (guide) text = `${text}\n${guide}`;
     const record: GameEvent = { session: this.session, seq: ++this.seq, timestamp: Date.now(), type, text, ...(operationId ? { operationId } : {}),
-      ...(stop ? { stop } : {}), ...(player ? { player } : {}) };
+      ...(stop ? { stop } : {}), ...(player ? { player } : {}), ...(username ? { username } : {}) };
     this.records.push(record);
     if (this.records.length > 200) this.records.shift();
     if (this.logFile) fs.appendFileSync(this.logFile, JSON.stringify(record) + '\n');
@@ -168,7 +170,8 @@ export class EventJournal {
       if (chat.username && chat.username === this.username) { this.add('self_chat', chat.message); continue; }
       if (chat.username && this.botPlayers.includes(chat.username)) continue;
       // Unknown plugin/system chat retains its text, but cannot become an authenticated player command.
-      this.add(chat.username ? 'chat' : 'system_chat', chat.username ? `${chat.username}: ${chat.message}` : chat.message);
+      if (chat.username) this.add('chat', `${chat.username}: ${chat.message}`, { username: chat.username });
+      else this.add('system_chat', chat.message);
       if (chat.username) for (const listener of this.chatListeners) { try { listener(chat.username, chat.message); } catch { /* a listener never breaks ingesting */ } }
     }
     this.chatCursor = Math.max(this.chatCursor ?? 0, observation.chatCursor);

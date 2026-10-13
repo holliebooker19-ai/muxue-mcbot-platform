@@ -16,8 +16,10 @@ export function createInbox({ args, agentProtocol, flush }) {
   let pendingEvents = [];
   let pendingUserLines = [];
   let pendingNotes = [];
-  // 这一轮送出去的事件和输入：额度或登录报错时没动过工具就原样再送一次
+  // 这一轮送出去的事件和输入：额度或登录报错时没动过工具就原样再送一次。不经 takeTurn 拼的整轮（启动轮、叫停后的新任务轮）
+  // 记的是整段话和轮的种类（{ text, kind }），要再送时放进 resendTurn，下次 flush 原样先送
   let turnInput = null;
+  let resendTurn = null;
   let batchTimer = null;
   let batchStartedAt = 0;
   let batchDeadline = 0;
@@ -67,11 +69,13 @@ export function createInbox({ args, agentProtocol, flush }) {
     trimEvents() { if (pendingEvents.length > MAX_PENDING_EVENTS) pendingEvents = pendingEvents.slice(-MAX_PENDING_EVENTS); },
     addUserLine(line) { pendingUserLines.push(line); },
     addNote(text) { pendingNotes.push(text); },
-    /** 叫停：没送出去的都作废 */
+    /** 叫停：没送出去的都作废，进行中那一轮的输入和等着再送的整轮也不再送（旧输入不能在额度暂停后复活） */
     clear() {
       pendingEvents = [];
       pendingUserLines = [];
       pendingNotes = [];
+      turnInput = null;
+      resendTurn = null;
     },
 
     newSession(reason) { newSessionNote = reason; },
@@ -101,7 +105,7 @@ export function createInbox({ args, agentProtocol, flush }) {
     prepare({ session, consumed, receipt }) {
       pendingEvents = pendingEvents.filter((e) => (e.session !== session || e.seq > consumed) && !taskAlreadyDelivered(e, receipt));
       const hasWake = pendingEvents.some((e) => wakesAgent(e, args.body));
-      return hasWake || pendingUserLines.length > 0 || pendingNotes.length > 0;
+      return hasWake || pendingUserLines.length > 0 || pendingNotes.length > 0 || !!resendTurn;
     },
 
     /** 取下一轮开头的说明（取了就清掉） */
@@ -139,11 +143,21 @@ export function createInbox({ args, agentProtocol, flush }) {
       return parts.join('\n\n');
     },
 
-    /** 送的不是普通的一轮（启动、整理、压缩）：没有要原样再送的输入 */
+    /** 送的是整理、压缩轮：没有要原样再送的输入（它们出错后自己重排） */
     dropTurnInput() { turnInput = null; },
-    /** 一轮结束。requeue：额度、登录问题，这一轮还没动过工具就等于没处理，暂停结束后把玩家的话原样再送一次 */
+    /** 送的是程序拼好的整轮（启动轮、叫停后的新任务轮）：出额度／登录错误时整段原样再送 */
+    wholeTurnSent(text, kind) { turnInput = { text, kind }; },
+    /** 等着原样再送的整轮（取了就清掉），没有是 null */
+    takeResend() {
+      const turn = resendTurn;
+      resendTurn = null;
+      return turn;
+    },
+    /** 一轮结束。requeue：额度、登录问题，这一轮还没动过工具就等于没处理，暂停结束后把玩家的话（整轮就是整段话）原样再送一次 */
     finishTurn({ requeue }) {
-      if (requeue && turnInput) {
+      if (requeue && typeof turnInput?.text === 'string') {
+        resendTurn = { text: turnInput.text, kind: turnInput.kind };
+      } else if (requeue && turnInput) {
         pendingEvents = [...turnInput.events, ...pendingEvents];
         pendingUserLines = [...turnInput.userLines, ...pendingUserLines];
         pendingNotes = [...turnInput.notes, ...pendingNotes];

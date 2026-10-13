@@ -48,6 +48,9 @@ test('event journal skips pre-attachment history, own/bot echo, and preserves un
   assert.equal(fs.readFileSync(path.join(dir, 'consumed-ClientBot.txt'), 'utf8'), `${events.session} 3`);
   const stored = fs.readFileSync(path.join(dir, 'events-ClientBot.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(stored.every(e => e.session === events.session && typeof e.timestamp === 'number'));
+  // Player chat says who spoke as a field (the driver's activity sender and stop player); unknown chat names nobody.
+  assert.equal(stored.find(e => e.type === 'chat').username, 'Alex');
+  assert.equal(stored.find(e => e.type === 'system_chat').username, undefined);
   // The body's own line (self_chat) takes a seq too, for the record only; nothing comes after the last one.
   assert.deepEqual(await events.wait(events.latestSeq(), 1), []);
 });
