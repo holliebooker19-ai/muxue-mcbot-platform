@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVER_GAME_INSTRUCTIONS, LEGACY_GAME_INSTRUCTIONS } from './game-instructions.mjs';
+import { STOP_CONFIRM_MS } from '../host-timing.mjs';
 
 export const CODEX_GAME_TOOLS = Object.freeze([
   'send-chat', 'read-chat', 'get-status', 'get-position', 'list-inventory', 'find-entity',
@@ -56,7 +57,7 @@ export function codexThreadConfig(existing, server, root, body = 'mineflayer', c
 }
 
 export function createCodexConnection({ write, emit, fail, conversationId = '', root,
-  model = '', effort = '', mcpServer, body = 'mineflayer', gameInstructions = '', rules, compactPrompt = '', requestTimeoutMs = 45000, cancelTimeoutMs = 10000 }) {
+  model = '', effort = '', mcpServer, body = 'mineflayer', gameInstructions = '', rules, compactPrompt = '', requestTimeoutMs = 45000, cancelTimeoutMs = STOP_CONFIRM_MS }) {
   let nextId = 0, threadId = '', activeTurn = '', disposed = false, stopping = false;
   let pendingTurn = null, startingTurn = false, ready, turnRequest;
   let cancelling = false, cancelPromise = null;

@@ -11,8 +11,10 @@ import { loadCompat, checkCompat } from './check-compat.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 绿色版里跑的入口；它们 import 的同目录脚本会自动带上
-const ENTRIES = ['webui.mjs', 'start-server-play.mjs', 'companion.mjs'];
-const ASSETS = ['webui-page.html'];
+export const ENTRIES = ['webui.mjs', 'start-server-play.mjs', 'companion.mjs'];
+// client-runtime 里随包带的文件（dist 和运行依赖另外处理）；scripts 按文件读的 JSON（工具表、叫停词、记忆上限、托管时长）都要列在这里，不然绿色版启动就报缺文件
+export const RUNTIME_FILES = ['package.json', 'package-lock.json', 'README.md', 'tool-registry.json', 'player-stop.json', 'memory-limits.json', 'host-timing.json'];
+export const ASSETS =['webui-page.html'];
 const TOP_FILES = ['compat.json', 'LICENSE', 'NOTICE', 'CLAUDE.md'];
 
 /** 默认用 runtime/node-dist 里解压好的官方 Node（版本最新的那个）；没有就用当前的 Node。 */
@@ -131,7 +133,7 @@ export function buildPackage(opts) {
   copy(nodeLicense, path.join(stage, 'node', 'LICENSE'));
 
   const rt = path.join(stage, 'client-runtime');
-  for (const f of ['package.json', 'package-lock.json', 'README.md', 'tool-registry.json', 'player-stop.json', 'memory-limits.json']) copy(path.join(ROOT, 'client-runtime', f), path.join(rt, f));
+  for (const f of RUNTIME_FILES) copy(path.join(ROOT, 'client-runtime', f), path.join(rt, f));
   copy(path.join(ROOT, 'client-runtime', 'dist'), path.join(rt, 'dist'));
   // 复制本机装好的依赖（npm ci 装的、和 lock 一致），再删掉开发依赖；prune 只删不下载
   const modules = path.join(ROOT, 'client-runtime', 'node_modules');

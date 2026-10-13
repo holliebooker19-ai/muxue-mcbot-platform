@@ -31,6 +31,8 @@ export function acquireRuntimeLock(runtimeDir: string, username: string): () => 
   }
   throw new BodyError('LOCKED', '无法取得身体控制锁');
 }
+// How long the heartbeat counts as fresh is client-runtime/host-timing.json: the driver (lock holder check) and the WebUI read the same value.
+const HEARTBEAT_FRESH_MS = (JSON.parse(fs.readFileSync(new URL('../host-timing.json', import.meta.url), 'utf8')) as { heartbeatFreshMs: number }).heartbeatFreshMs;
 // The driver replaces the file every 15s; on Windows a read can land on a locked or half-written file.
 // A failed read falls back to the last value read, so only a stale timestamp or a dead pid releases the body.
 const lastHeartbeat = new Map<string, { pid: number; updatedAt: number; compactions?: number }>();
@@ -49,7 +51,7 @@ export function hostedHeartbeatFresh(file: string, now = Date.now(), alive = pid
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') lastHeartbeat.delete(file);
     value = lastHeartbeat.get(file);
   }
-  return !!value && Number.isFinite(value.updatedAt) && Math.abs(now - value.updatedAt) <= 60_000 && alive(value.pid);
+  return !!value && Number.isFinite(value.updatedAt) && Math.abs(now - value.updatedAt) <= HEARTBEAT_FRESH_MS && alive(value.pid);
 }
 export class RuntimeMonitor {
   private timer?: ReturnType<typeof setTimeout>;

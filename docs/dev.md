@@ -8,6 +8,7 @@
 - `mods/mcbot-server-control/`：当前主线，MC1.21.1／NeoForge21.1.217服务端身体与原生交互。
 - `scripts/companion.mjs`、`scripts/driver/`、`scripts/agents/`：Claude／Codex会话驱动和事件调度。`companion.mjs` 是入口，实现按职责分在 `scripts/driver/`（各模块管什么见[状态归属](state_ownership.md)最后一节）；驱动器只能 import `scripts/` 里的模块，绿色版按 import 收集。
 - 服务端、运行端、驱动器三层各管哪些状态，`runtime/` 里的文件谁写谁读，见[状态归属](state_ownership.md)。
+- 托管的两个时长（心跳多久算新鲜、叫停多久没确认就兜底撤销）只写在 `client-runtime/host-timing.json`，驱动器、WebUI（经 `scripts/host-timing.mjs`）和运行端、旧 `mcp-server` 的 `presence.ts` 都读它；见[状态归属](state_ownership.md)第 4、6 条。
 - 长期记忆：运行端 `client-runtime/src/memory.ts`、`memory-tools.ts`（字数上限在 `client-runtime/memory-limits.json`），驱动器 `scripts/driver/memory.mjs`、`consolidation.mjs`，WebUI `scripts/webui-memory.mjs`；见[记忆方案](memory_plan.md)。
 - `mcp-server/`：保留的Mineflayer实现及宿主回归；真实验证用的协议测试玩家也依赖其依赖包。它不是新ServerBody的产品依赖。
 - `mods/mcbot-control/`、`mods/mcbot-server-spike/`：保留的ClientBody与早期服务端实验，不作为默认主线继续扩大。
@@ -105,7 +106,7 @@ node scripts/package.mjs              # 输出到 output/package：mcbot-<版本
 node scripts/package.mjs --no-zip     # 只出目录；--skip-build 不重新编译运行端；--node 指定要打进去的 node.exe
 ```
 
-- 包里有：便携 Node（`node/`，带 Node 的 LICENSE）、运行端（`client-runtime/` 的 dist 和运行依赖）、WebUI 和托管脚本（`scripts/`，从 `webui.mjs`、`start-server-play.mjs`、`companion.mjs` 按 import 自动找）、我们的 jar（`mods/`，按 `compat.json`）、`compat.json`、`LICENSE`、`NOTICE`、`CLAUDE.md`、`使用说明.txt` 和双击用的 `启动 mcbot.cmd`（用自带的 Node 开 WebUI）。不带旧的 `mcp-server`、源码和测试。
+- 包里有：便携 Node（`node/`，带 Node 的 LICENSE）、运行端（`client-runtime/` 的 dist 和运行依赖，加上 `scripts/` 也按文件读的 `tool-registry.json`、`player-stop.json`、`memory-limits.json`、`host-timing.json`，清单是 `package.mjs` 的 `RUNTIME_FILES`，新加共用的 JSON 要写进去）、WebUI 和托管脚本（`scripts/`，从 `webui.mjs`、`start-server-play.mjs`、`companion.mjs` 按 import 自动找）、我们的 jar（`mods/`，按 `compat.json`）、`compat.json`、`LICENSE`、`NOTICE`、`CLAUDE.md`、`使用说明.txt` 和双击用的 `启动 mcbot.cmd`（用自带的 Node 开 WebUI）。不带旧的 `mcp-server`、源码和测试。
 - Node 用官方 zip 版：解压到 `runtime/node-dist/node-v<版本>-win-x64`（被 git 忽略），脚本默认用版本最新的那个；安装版 Node 没有 LICENSE，会拒绝。10-10 用的是 24.21.0。
 - 不联网：jar 要先用 gradle 构建好；运行依赖复制 `client-runtime/node_modules` 再 `npm prune --omit=dev`；打包前先跑 `compat.json` 核对。
 - 10-10 演练（不开模型）：目录约 105 MB；复制到干净目录、PATH 里去掉系统的 Node 后，自带 Node 能开 WebUI（页面、配置列表、连接文件检查都正常），`start-server-play.mjs --prepare-only` 生成配置，用生成的 `mcp.json` 启动运行端连隔离服，`initialize`、65 个工具、`get-status` 都正常。还没测：从 WebUI 真正启动托管（要开模型）、关掉 WebUI 后托管是否继续、双击 cmd 自动开浏览器。

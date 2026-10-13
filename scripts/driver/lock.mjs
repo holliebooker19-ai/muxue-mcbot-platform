@@ -1,9 +1,10 @@
 // 单实例锁和托管心跳。心跳 companion-<名字>.json 运行端用来判断“有托管在控制”，WebUI 用来显示在线、思考中（docs/state_ownership.md）。
 import fs from 'node:fs';
 import { pidAlive, readJson, writeFileAtomic } from './files.mjs';
+import { HEARTBEAT_FRESH_MS } from '../host-timing.mjs';
 
 export const HEARTBEAT_MS = 15000;
-export const HEARTBEAT_FRESH_MS = 60000;
+// 心跳多久算新鲜（HEARTBEAT_FRESH_MS）在 client-runtime/host-timing.json，运行端、WebUI 判断托管还在用同一个值
 
 // extra 是给 WebUI 看的状态（昵称、身体、是否正在推理），锁判断只用 pid 和 updatedAt
 export function writeHeartbeat(file, agent, now = Date.now(), extra = {}) {

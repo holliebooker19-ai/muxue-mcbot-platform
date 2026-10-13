@@ -10,8 +10,8 @@ import { startupPrompt, newTaskNote, newTaskTurn } from './prompts.mjs';
 // 玩家叫停的词（运行端 src/player-stop.ts 读同一份）：pause 暂停、cancel 取消，addressedPause 只在点名后算
 const STOP_WORDS = JSON.parse(fs.readFileSync(path.join(ROOT, 'client-runtime', 'player-stop.json'), 'utf8'));
 // ServerBody 托管时，叫停交给运行端原地停下（对话不断），它发回 player_stop 事件算确认；这么久没确认（运行端卡住、停不下来）
-// 才走原来的撤销控制。时长和 Codex 连接的停止确认超时（cancelTimeoutMs）一样
-export const STOP_CONFIRM_MS = 10000;
+// 才走原来的撤销控制。时长在 client-runtime/host-timing.json，和 Codex 连接的停止确认超时（cancelTimeoutMs）共用
+import { STOP_CONFIRM_MS } from '../host-timing.mjs';
 
 // 硬停止只识别有限的整句命令，不做模型判断或停止词子串扫描。
 export function isAddressedStop(e, { name, nickname } = {}) {
