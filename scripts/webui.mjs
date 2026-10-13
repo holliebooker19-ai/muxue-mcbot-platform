@@ -14,12 +14,12 @@ import { addGameDir, connectionFileOf, findGames, gameOnline, gameSupport, gameT
 import { createPluginJobs, disabledPlugins, inspectPlugins, loadCatalog, planPlugin, setPluginAi } from './webui-plugins.mjs';
 import { gameRunState, javaProcesses, runMessage } from './game-processes.mjs';
 import { deleteDay, deleteLine, readDay, viewMemory } from './webui-memory.mjs';
+import { HEARTBEAT_FRESH_MS } from './host-timing.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NAME_RE = /^[A-Za-z0-9_]{1,16}$/;
 const FIRST_READ_BYTES = 128 * 1024;
 const MAX_READ_BYTES = 512 * 1024;
-const HEARTBEAT_FRESH_MS = 60000;
 
 export function parseWebArgs(argv) {
   const out = { port: 8770, runtime: process.env.COMPANION_RUNTIME_DIR || path.join(ROOT, 'runtime'), open: false };

@@ -26,7 +26,7 @@
 
 | 文件 | 写 | 读 | 删 |
 | --- | --- | --- | --- |
-| `companion-<名字>.json` 心跳 | 驱动器 `createHeartbeat`（`driver/lock.mjs:58`），字段 `pid`、`updatedAt`、`busy`、`compactions`（`scripts/companion.mjs:134`） | 运行端 `hostedHeartbeatFresh`（`client-runtime/src/lifecycle.ts:43`）判断托管还在；`hostedCompactions`（`lifecycle.ts:38`）看压缩次数；WebUI（`scripts/webui.mjs:51`）显示在线、思考中；驱动器 `lockHolder` | 驱动器退出时 `removeIfOwn` |
+| `companion-<名字>.json` 心跳 | 驱动器 `createHeartbeat`（`driver/lock.mjs:58`），字段 `pid`、`updatedAt`、`busy`、`compactions`（`scripts/companion.mjs:134`） | 运行端 `hostedHeartbeatFresh`（`client-runtime/src/lifecycle.ts:44`）判断托管还在；`hostedCompactions`（`lifecycle.ts:40`）看压缩次数；WebUI（`scripts/webui.mjs:51`）显示在线、思考中；驱动器 `lockHolder` | 驱动器退出时 `removeIfOwn` |
 | `companion-<名字>.lock` | 驱动器 `acquireLock` | 驱动器 | 驱动器 `releaseLock` |
 | `companion-<名字>.stop` / `.halt` | WebUI、`stop-companion.ps1` | 驱动器每 400 毫秒看一次（`checkMarkers`，`driver/lifecycle.mjs:108`）；`.stop` 也被 `start-server-play.mjs:180` 看 | 驱动器 |
 | `session-<名字>.json` 会话 | 驱动器 `save`（`driver/session.mjs:79`） | 驱动器 `readSessionState`；**运行端** `takeHeldPosture` 读其中的 `lastStopAt`（`client-runtime/src/posture.ts:44`，由 `main.ts:147` 传入路径）；WebUI | 没人删 |
@@ -68,11 +68,11 @@
 
 ### 4. 叫停流程分在两层
 
-- 游戏里叫停：运行端 `PlayerStop.hear`（`player-stop.ts:54`）原地停，发 `player_stop` 事件；同时不再受理动作和任务（`mcp.ts:134` `holding()`）。驱动器 `armPlayerStop`（`driver/stop.mjs:113`）只开一个 `STOP_CONFIRM_MS`（10 秒，`driver/stop.mjs:14`）的计时器，收到 `player_stop` 就清掉（`driver/events.mjs:177` → `driver/stop.mjs:223`）；到时没收到才走 `stopServerAgent` 撤销。
+- 游戏里叫停：运行端 `PlayerStop.hear`（`player-stop.ts:54`）原地停，发 `player_stop` 事件；同时不再受理动作和任务（`mcp.ts:134` `holding()`）。驱动器 `armPlayerStop`（`driver/stop.mjs:113`）只开一个 `STOP_CONFIRM_MS`（10 秒，值在 `client-runtime/host-timing.json` 的 `stopConfirmMs`，`driver/stop.mjs:14` 读入）的计时器，收到 `player_stop` 就清掉（`driver/events.mjs:177` → `driver/stop.mjs:223`）；到时没收到才走 `stopServerAgent` 撤销。
 - 同一句叫停可能从两条路到驱动器：事件文件（`driver/events.mjs:174`）和控制通道 `watch`（`server-body-control.mjs:169` → `onStop` → `armPlayerStop`，`driver/stop.mjs:258`），靠计时器去重。
 - WebUI「叫停」是急停：驱动器直接 `stopServerAgent`（`halt`，`driver/stop.mjs:234`），撤销控制、结束这一轮 Agent，进入“等新任务”（`waiting`、排着的新任务）。
-- `STOP_CONFIRM_MS`（`driver/stop.mjs:14`）和 Codex 连接的 `cancelTimeoutMs`（`scripts/agents/codex-app-server.mjs:59`）是同一个 10 秒，写了两次。
-- 应归：原地停归**运行端**；兜底撤销、急停、撤销后等新任务归**驱动器**（这些要结束 Agent 进程，只有驱动器能做）。现在的分法对，只是两个 10 秒应该共用一处。
+- `STOP_CONFIRM_MS`（`driver/stop.mjs:14`）和 Codex 连接的 `cancelTimeoutMs`（默认值，`scripts/agents/codex-app-server.mjs:60`）是同一个 10 秒。**已做**：两处都从 `client-runtime/host-timing.json` 的 `stopConfirmMs` 来（`scripts/host-timing.mjs` 读文件）；`cancelTimeoutMs` 仍可传参数，测试可以传小值。
+- 应归：原地停归**运行端**；兜底撤销、急停、撤销后等新任务归**驱动器**（这些要结束 Agent 进程，只有驱动器能做）。现在的分法对，两个 10 秒已共用一处。
 
 ### 5. 两个 `busy` 不是一回事
 
@@ -83,12 +83,13 @@
 
 ### 6. 心跳“新鲜”的 60 秒写了两次
 
-- 驱动器 `HEARTBEAT_FRESH_MS`（`driver/lock.mjs:6`）用来判断锁的持有者还活着；运行端 `hostedHeartbeatFresh`（`lifecycle.ts:52`）写死 `60_000` 判断托管还在。
+- 驱动器 `HEARTBEAT_FRESH_MS`（`driver/lock.mjs:20`、`21`）用来判断锁的持有者还活着；运行端 `hostedHeartbeatFresh`（`lifecycle.ts:54`）判断托管还在；WebUI `listBots`（`scripts/webui.mjs:53`）判断在线；旧 Mineflayer 路径的 `heartbeatFresh`（`mcp-server/src/presence.ts:187`）判断托管心跳新鲜。原来四处各写一个 60 秒。
 - 应归：心跳是驱动器写的，时长应该由**驱动器**定、放进一份两边都读的 JSON（像 `player-stop.json` 那样）。
+- **已做**：时长是 `client-runtime/host-timing.json` 的 `heartbeatFreshMs`（和上面的 `stopConfirmMs` 同一个文件，打包清单 `RUNTIME_FILES` 里带上）；驱动器、WebUI 经 `scripts/host-timing.mjs` 读，运行端 `lifecycle.ts:35` 和 `presence.ts:181` 直接读。各处比较的边界没动：运行端、`presence.ts` 差正好这么久还算新鲜，驱动器的锁和 WebUI 差正好这么久就不算。
 
 ### 7. 心跳里的压缩次数
 
-- 驱动器数压缩次数（`compactions`，`driver/session.mjs:77`、`noteCompaction` `driver/session.mjs:144`）写进心跳；运行端读到变了就把玩法说明再给一次（`lifecycle.ts:38`、`guides.ts:59`、`main.ts:132`）。
+- 驱动器数压缩次数（`compactions`，`driver/session.mjs:77`、`noteCompaction` `driver/session.mjs:144`）写进心跳；运行端读到变了就把玩法说明再给一次（`lifecycle.ts:40`、`guides.ts:59`、`main.ts:132`）。
 - 这是有意的跨层信号，归**驱动器**写、运行端读，写清楚即可。
 
 ### 8. 记忆的路径和“没整理条数”算了两遍
@@ -96,7 +97,7 @@
 - 世界标识转义：驱动器 `worldKey`（`driver/memory.mjs:71`）和运行端 `worldKey`（`memory.ts:128`）。
 - 没整理的日志条数：驱动器 `memoryStatus`（`driver/memory.mjs:32`）按 `state.json` 的游标数日志，和运行端 `MemoryStore.unconsolidated`（`memory.ts:421`）同一算法。
 - 记忆开没开：驱动器看 `persona.md` 在不在（`driver/config.mjs:44-47`），运行端 `openMemory`（`main.ts:199`）再看一遍。
-- 原因：驱动器不能 import `scripts/` 以外的模块（绿色版打包只带 `scripts/`、运行端的 dist，和运行端的几个 JSON：`tool-registry.json`、`player-stop.json`、`memory-limits.json`，驱动器也读它们）。
+- 原因：驱动器不能 import `scripts/` 以外的模块（绿色版打包只带 `scripts/`、运行端的 dist，和运行端的几个 JSON：`tool-registry.json`、`player-stop.json`、`memory-limits.json`、`host-timing.json`，驱动器也读它们）。
 - 应归：记忆数据归**运行端**。驱动器只需要“上次整理时间、还有几条没整理”，以后可以由运行端的 `--memory-only` 进程或一个状态文件给出，驱动器不再自己数。
 
 ### 9. 交接单读运行端的记录
@@ -129,7 +130,7 @@
 1. 驱动器不再删姿态文件、不再自己判断姿态记录能不能接：叫停靠 `lastStopAt` 已经挡住；真正退出时改由驱动器通知运行端（或在会话文件里写“托管已结束”），由运行端删（第 1 条）。
 2. ~~原地叫停也让驱动器记 `lastStopAt`~~ **10-13 已做**：`player_stop` 事件带 `stop`／`player` 字段，驱动器收到 `cancel` 时按事件时间记 `lastStopAt`，暂停不记；交接单因此把原地取消前的任务标成“已取消”（做法见第 2 条）。
 3. 叫停词识别加一张两边共用的用例表（第 3 条）。
-4. 两个 10 秒（`STOP_CONFIRM_MS`、`cancelTimeoutMs`）和心跳的 60 秒放进共用的 JSON（第 4、6 条）。
+4. 两个 10 秒（`STOP_CONFIRM_MS`、`cancelTimeoutMs`）和心跳的 60 秒放进共用的 JSON（第 4、6 条）。**已做**：`client-runtime/host-timing.json`。
 5. 心跳的 `busy` 字段改名 `thinking`，WebUI 同步（第 5 条）。
 6. “没整理条数”由运行端给，驱动器不再复制 `worldKey` 和计数算法（第 8 条）。
 

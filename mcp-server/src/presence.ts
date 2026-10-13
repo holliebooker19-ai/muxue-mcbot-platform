@@ -177,9 +177,10 @@ export function pidAlive(pid: unknown): boolean {
   }
 }
 
-export const HEARTBEAT_FRESH_MS = 60_000;
+// 心跳多久算新鲜：client-runtime/host-timing.json（驱动器、运行端、WebUI 共用，docs/state_ownership.md 第 6 条）；构建后 dist 和 client-runtime 的相对位置不变
+export const HEARTBEAT_FRESH_MS = (JSON.parse(fs.readFileSync(new URL('../../client-runtime/host-timing.json', import.meta.url), 'utf8')) as { heartbeatFreshMs: number }).heartbeatFreshMs;
 
-// 托管心跳 runtime/companion-<游戏名>.json：{"pid","agent","updatedAt"}，60 秒内更新过且进程活着才算
+// 托管心跳 runtime/companion-<游戏名>.json：{"pid","agent","updatedAt"}，HEARTBEAT_FRESH_MS 内更新过且进程活着才算
 export function heartbeatFresh(file: string, now: number, alive: (pid: number) => boolean = pidAlive): boolean {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: number; updatedAt?: number };
