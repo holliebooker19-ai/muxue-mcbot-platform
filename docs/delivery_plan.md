@@ -61,7 +61,7 @@
 - ✅ **记忆整理的次数**：躺床、玩家都下线、换会话、启动四种触发都要和上次整理隔够 30 分钟（`--consolidate-floor-min`，以前只管躺床）；不到时间的日志留到下次，没有单独的每天上限。
 - ✅ **绿色版没带 `AGENT.md`**：用户授权改 `CLAUDE.md` 第一句为“开发与评审时先读取 `AGENT.md`”，玩家用的包里不再指向不存在的文件。
 - ✅ **过时的测试脚本**：`server-guard-smoke.mjs` 改查 `guard-duty-fenced`（它测跟随时的保护，和 `server-guard-duty-smoke.mjs` 测的常驻保护打断任务不重复，所以留着）；隔离服脚本里 `fetch-and-give` 的阶段改成 `container-withdraw` 再 `give-item`，`assess-tool` 的阶段删掉（不再是模型工具；离线见 `ToolAssessmentTest`，实机看 `server-ore-alpha-smoke` 的木镐拒绝）。这些脚本只做了语法检查。
-- ✅ **状态收拢**（10-13 晚，[状态归属](state_ownership.md)最后 6 条建议里做了第 2、4 条，只离线）：游戏里说“停”这类取消，运行端的 `player_stop` 事件带上 `stop`（pause／cancel）和 `player`，驱动器按事件时间记 `lastStopAt`，换会话后交接单把之前的任务标已取消；“等一下”不记。【停止记录】改成同一次叫停只附一次（Agent 重新启动、上下文压缩后、额度／登录重送时再附），以前每轮都附。叫停确认 10 秒和心跳新鲜 60 秒放进 `client-runtime/host-timing.json`，驱动器、运行端、WebUI、Codex 连接都读它（绿色版清单已加）。第 1 条（姿态记录只由运行端判断）先不做，第 3、5、6 条不急。
+- ✅ **状态收拢**（10-13 晚，[状态归属](state_ownership.md)最后 6 条建议里做了第 2、4 条，只离线）：游戏里说“停”这类取消，运行端的 `player_stop` 事件带上 `stop`（pause／cancel）和 `player`，驱动器按事件时间记 `lastStopAt`，换会话后交接单把之前的任务标已取消；“等一下”不记。叫停前的聊天照旧不进交接单（用户 10-13 定）。【停止记录】改成同一次叫停只附一次（Agent 重新启动、上下文压缩后、额度／登录重送时再附），以前每轮都附。叫停确认 10 秒和心跳新鲜 60 秒放进 `client-runtime/host-timing.json`，驱动器、运行端、WebUI、Codex 连接都读它（绿色版清单已加）。第 1 条（姿态记录只由运行端判断）先不做，第 3、5、6 条不急。
 
 ### 想做、还没设计的
 
