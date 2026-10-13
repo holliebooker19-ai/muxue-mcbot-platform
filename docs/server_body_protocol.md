@@ -275,7 +275,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - `eat-item`：`{slot:0..8,expectedItem,expectedCount,expectedComponents,expectedMaxStackSize?,timeoutMs?}`。原生主手使用与原生时长，绑定槽位、完整初始栈、本次Finish和最终结果；成功`consumedCount:1,consumption:"confirmed"`。已确认部分结果保留`lastConfirmedConsumedCount`，取消／错误不能改成无消费。停止撤销关联并结束原生use，旧Finish不能启动新动作。
 - 自身库存观察的`componentsComplete:false`必须省略components并给出原因；已编码完整物品仍含精确components。未知不能伪造`{}`；涉及该栈的写入拒绝。当前未放宽容器／地面实体的完整快照要求。
 - 工具policy为`fastest_valid|conserve_durability`，默认保留2耐久；dropPreference为`any|silk_touch|no_silk_touch`。返回eligible true/false/null及基础资格依据（2026-10-07 起模组方块和工具也按原生 isCorrectToolForDrops 判断，另标 `modHooks:"unassessed"`；模组附魔的掉落效果仍算未知），预计ticks不含所有玩家／Mod钩子，原生执行重查。nearby-resources保留0..8的recommendedToolSlot，另可带0..35的recommendedInventorySlot。
-- `set-reflexes`使用预期revision避免旧决策覆盖；策略改变先阻断／取消旧任务并确认停写。默认自动进食，默认防卫仍未实现且公开supported:false。硬停清armed，查询不复活。普通进食借父token只在安全间隙执行，未知结果向同一仲裁器上报并解除自动授权；停止确认也不代表允许自动重试该未知动作。
+- `set-reflexes`使用预期revision避免旧决策覆盖；策略改变先阻断／取消旧任务并确认停写。默认自动进食和自卫（自卫要服务端有 `defend-entity` 能力，没有时公开 `defenseSupported:false`）。叫停只停正在跑的，结束后自动进食和自卫照旧（10-08 定）；`armed:false` 只暂停到下一次动作或叫停，真要关用 `autoEat`／`autoDefend:false`。普通进食借父token只在安全间隙执行，未知结果向同一仲裁器上报并解除自动授权；停止确认也不代表允许自动重试该未知动作。
 
 该批实际证据和限制见[第一批验收](archive/server_survival_alpha_validation.md)；下节记录第二批新增合同，其实服验收另行记录。
 
