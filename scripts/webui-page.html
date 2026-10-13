@@ -907,9 +907,15 @@ function showDlg(title, steps, notes, msg, err, run) {
   dlgRun = run || null; $('#p-ok').disabled = false; $('#p-ok').textContent = run ? '确认' : '确定'; $('#p-cancel').hidden = !run;
   $('#p-dlg').hidden = false; $('#p-ok').focus();
 }
+// 安装中途出错后的回滚结果：全部恢复才显示“已恢复原状”；没恢复的文件逐个列出，连同备份目录一起告诉用户手动处理
+function rollbackText(r) {
+  if (r.rollbackFailed?.length) return '\n没能全部恢复，mods 中可能留有不完整的文件。请先完全关闭游戏或服务器，再手动处理（备份目录：' + r.backup + '）：'
+    + r.rollbackFailed.map((x) => '\n· ' + (x.fix === 'restore' ? '把备份目录中的 ' + x.file + ' 放回游戏目录的同一位置' : '删除游戏目录中多出的 ' + x.file)).join('');
+  return r.rolledBack ? '\n已恢复原状。' : '';
+}
 function dlgDone(r) {
   dlgRun = null; $('#p-ok').disabled = false; $('#p-ok').textContent = '关闭'; $('#p-cancel').hidden = true;
-  $('#p-msg').textContent = r.ok ? '已完成。' + (r.backup ? '\n旧文件已移至 ' + r.backup : '') + (r.notes?.length ? '\n' + r.notes.filter((n) => !/mcbot-backups/.test(n)).join('\n') : '') : (r.error || '失败') + (r.rolledBack ? '\n已恢复原状。' : '');
+  $('#p-msg').textContent = r.ok ? '已完成。' + (r.backup ? '\n旧文件已移至 ' + r.backup : '') + (r.notes?.length ? '\n' + r.notes.filter((n) => !/mcbot-backups/.test(n)).join('\n') : '') : (r.error || '失败') + rollbackText(r);
   $('#p-msg').className = 'msg ' + (r.ok ? 'okc' : 'errc');
   loadPlugins(); loadGames();
 }

@@ -95,7 +95,7 @@
 
 ### 8. 记忆的路径和“没整理条数”算了两遍
 
-- 世界标识转义：驱动器 `worldKey`（`driver/memory.mjs:71`）和运行端 `worldKey`（`memory.ts:128`）。
+- 世界标识转义：驱动器 `worldKey`（`driver/memory.mjs:71`）和运行端 `worldKey`（`memory.ts:128`）；10-13 起两份都多转义 `.`／`..`、结尾的点和空格、Windows 保留设备名，`mcp-server/tests/memory-world-key.test.mjs` 对一批输入比较两边。
 - 没整理的日志条数：驱动器 `memoryStatus`（`driver/memory.mjs:32`）按 `state.json` 的游标数日志，和运行端 `MemoryStore.unconsolidated`（`memory.ts:421`）同一算法。
 - 记忆开没开：驱动器看 `persona.md` 在不在（`driver/config.mjs:44-47`），运行端 `openMemory`（`main.ts:199`）再看一遍。
 - 原因：驱动器不能 import `scripts/` 以外的模块（绿色版打包只带 `scripts/`、运行端的 dist，和运行端的几个 JSON：`tool-registry.json`、`player-stop.json`、`memory-limits.json`、`host-timing.json`，驱动器也读它们）。

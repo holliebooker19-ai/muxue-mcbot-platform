@@ -68,6 +68,8 @@ export function listBots(runtime, now = Date.now()) {
 
 /** 从字节位置往后读活动记录；第一次（after<0）只读末尾一段。文件被轮转变小了就从头读。 */
 export function readActivity(runtime, name, after = -1) {
+  // 请求参数传来的可能是 NaN、小数、无穷大（?after=abc）：不是非负整数就当第一次读
+  if (!Number.isInteger(after) || after < 0) after = -1;
   const file = path.join(runtime, `activity-${name}.jsonl`);
   let size;
   try { size = fs.statSync(file).size; } catch { return { offset: 0, items: [] }; }
@@ -141,7 +143,17 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
     res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', ...headers });
     res.end(type.startsWith('application/json') ? JSON.stringify(body) : body);
   };
+  // 只改本机找到的游戏目录（列表里的），不接受随便一个路径：插件、模型导入、外观列表、保存配置都按它查
+  const sameDir = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+  const knownGame = (dir) => (isAbsPath(dir) ? knownGames().find((g) => sameDir(g.dir, dir)) : undefined);
+  // 同步部分抛出的错误不能带倒整个 WebUI 进程：记到终端，返回 500（异步的接口另有 handleProfiles 的 catch）
   const server = http.createServer((req, res) => {
+    try { route(req, res); } catch (e) {
+      console.error(`WebUI 处理 ${req.method} ${String(req.url).split('?')[0]} 时出错：`, e);
+      if (!res.headersSent) send(res, 500, { error: 'internal error' }); else res.end();
+    }
+  });
+  function route(req, res) {
     // 防 DNS 重绑定：Host 只能是本机地址
     if (!allowedHost(req.headers.host)) return send(res, 403, { error: 'host not allowed' });
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
@@ -174,7 +186,7 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
       return send(res, result.ok ? 200 : 409, result);
     }
     send(res, 404, { error: 'not found' });
-  });
+  }
   async function handleProfiles(req, res, url) {
     const p = url.pathname;
     if (req.method === 'GET' && p === '/api/profiles') return send(res, 200, profilesView(runtime, launcher));
@@ -194,19 +206,22 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
     const body = await readBody(req, p === '/api/appearances/import' ? Math.ceil(MODEL_IMPORT_MAX * 1.4) : MAX_BODY_BYTES);
     if (p === '/api/appearances') {
       // 按选中的游戏目录问：连接文件在目录里的固定位置
+      // 和插件页一样只接受游戏列表里的目录，不然已登录的请求可以列任意目录的模组和模型
       const dir = path.normalize(expandHome(String(body.dir || '')));
       if (!isAbsPath(dir)) return send(res, 200, { ok: false, error: '请先在「连接配置」中选择游戏' });
-      let r = await appearanceChoices(connectionFileOf(dir));
+      const game = knownGame(dir);
+      if (!game) return send(res, 200, { ok: false, error: '此目录不在游戏列表中，请先在「连接配置」中添加' });
+      let r = await appearanceChoices(connectionFileOf(game.dir));
       // 世界没开时退回游戏目录里的模型文件夹
-      if (!r.ok && dir) { const local = localAppearances(dir); if (local.length) r = { ok: true, offline: true, sources: local }; }
+      if (!r.ok) { const local = localAppearances(game.dir); if (local.length) r = { ok: true, offline: true, sources: local }; }
       // 本机读得到模型文件夹时带上显示名（「Claude · 暖橙长裙」），网页做成卡片
-      if (r.ok) r.labels = modelLabels(dir, r.sources.flatMap((s) => s.choices));
+      if (r.ok) r.labels = modelLabels(game.dir, r.sources.flatMap((s) => s.choices));
       return send(res, 200, r);
     }
     if (p === '/api/appearances/import') {
       // 和插件一样：只写入游戏列表中的目录
       const dir = path.normalize(expandHome(String(body.dir || '')));
-      const game = isAbsPath(dir) && knownGames().find((g) => path.normalize(g.dir).toLowerCase() === dir.toLowerCase());
+      const game = knownGame(dir);
       if (!game) return send(res, 200, { ok: false, error: '请先在「连接配置」中选择游戏' });
       return send(res, 200, importYsmModel(game.dir, body.files));
     }
@@ -214,7 +229,7 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
       // 只改本机找到的游戏目录（列表里的），不接受随便一个路径
       const dir = path.normalize(expandHome(String(body.dir || '')));
       if (!isAbsPath(dir)) return send(res, 200, { ok: false, error: '请先在「连接配置」中选择游戏' });
-      const game = knownGames().find((g) => path.normalize(g.dir).toLowerCase() === dir.toLowerCase());
+      const game = knownGame(dir);
       if (!game) return send(res, 200, { ok: false, error: '此目录不在游戏列表中，请先在「连接配置」中添加' });
       const catalog = pluginOpts.catalog || loadCatalog();
       // aiOff：此游戏对 AI 关闭的插件（WebUI 自己的数据，下次启动托管时生效）
@@ -253,6 +268,8 @@ export function createWebServer({ runtime, token = crypto.randomBytes(24).toStri
     if (p === '/api/profiles/save') {
       // 先校验，再把 Bot 名和端口写进游戏（世界开着时要重进才生效）；独立身份的人设按名字放，改名时带过去
       const input = normalizeProfile(body);
+      // 只写游戏列表里的目录（自动找到的或在「连接配置」中添加的），不然 server.json 会写进任意一个已存在的目录
+      if (!knownGame(input.gameDir)) return send(res, 200, { ok: false, error: '此目录不在游戏列表中，请先在「连接配置」中添加' });
       const before = readGameConfig(input.gameDir).username;
       const applied = applyToGame(input);
       if (!applied.ok) return send(res, 200, applied);

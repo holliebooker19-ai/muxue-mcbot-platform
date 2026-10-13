@@ -276,7 +276,9 @@ test('账号目录：只列用户目录下像账号目录的文件夹名', () =>
 test('配置接口：要 JSON、查来源；保存后列表不带令牌，启动走启动器', async () => {
   const dir = tmp();
   const launched = [];
-  const web = createWebServer({ runtime: dir, token: 'cd34', launcher: { launch: (p) => { launched.push(p.id); return { ok: true, name: 'Claude', pid: 1 }; }, status: () => null } });
+  // 保存配置只认游戏列表里的目录（和插件页一样）；这里的游戏列表只有这一个目录
+  const web = createWebServer({ runtime: dir, token: 'cd34', launcher: { launch: (p) => { launched.push(p.id); return { ok: true, name: 'Claude', pid: 1 }; }, status: () => null },
+    plugins: { knownGames: () => [{ dir: gameOf(dir) }] } });
   try {
     const port = await web.listen(0);
     const base = `http://127.0.0.1:${port}`;
@@ -303,6 +305,60 @@ test('配置接口：要 JSON、查来源；保存后列表不带令牌，启动
     assert.equal((await post('/api/profiles/delete', { id: saved.profile.id })).status, 200);
     assert.equal(loadProfiles(dir).length, 0);
   } finally { await web.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('外观列表和保存配置只认游戏列表里的目录：别的已存在目录既列不出模型，也写不进 server.json', async () => {
+  const dir = tmp(), other = path.join(dir, 'other');
+  const known = path.join(dir, 'known');
+  const web = createWebServer({ runtime: dir, token: 'ae01', launcher: { launch: () => ({ ok: true }), status: () => null }, plugins: { knownGames: () => [{ dir: gameOf(dir) }, { dir: known }] } });
+  try {
+    // 两个目录里都有 YSM 适配和模型文件夹；other 不在游戏列表中
+    for (const g of [known, other]) {
+      fs.mkdirSync(path.join(g, 'mods'), { recursive: true }); fs.writeFileSync(path.join(g, 'mods', 'mcbot-yes-steve-model-0.1.0.jar'), 'x');
+      fs.mkdirSync(path.join(g, 'config', 'yes_steve_model', 'custom', 'ModelA'), { recursive: true });
+    }
+    const port = await web.listen(0), base = `http://127.0.0.1:${port}`;
+    const cookie = (await fetch(`${base}/?t=ae01`, { redirect: 'manual' })).headers.get('set-cookie').split(';')[0];
+    const post = async (p, body) => (await fetch(base + p, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+    const r = await post('/api/appearances', { dir: other });
+    assert.equal(r.ok, false); assert.match(r.error, /不在游戏列表中/); assert.equal(r.sources, undefined, '不列别的目录里的模型');
+    assert.match((await post('/api/appearances', { dir: 'relative' })).error, /选择游戏/);
+    const ok = await post('/api/appearances', { dir: known });
+    assert.deepEqual([ok.ok, ok.offline, ok.sources[0].choices], [true, true, ['ModelA']], '列表里的目录照常列（世界没开时读本地模型文件夹）');
+    assert.equal((await post('/api/appearances', { dir: known.toUpperCase() })).ok, true, '路径大小写不同也是同一个目录（Windows）');
+    // 保存：other 是存在的目录，但不在列表中，不能被写入 server.json
+    const bad = await post('/api/profiles/save', { label: 'x', agent: 'claude', effort: 'low', gameDir: other, username: 'Claude' });
+    assert.equal(bad.ok, false); assert.match(bad.error, /不在游戏列表中/);
+    assert.equal(fs.existsSync(path.join(other, 'config', 'mcbot-server-control')), false, '没写进别的目录');
+    assert.deepEqual(loadProfiles(dir), [], '也没有存档案');
+    const good = await post('/api/profiles/save', { label: 'x', agent: 'claude', effort: 'low', gameDir: known, username: 'Claude' });
+    assert.equal(good.ok, true, JSON.stringify(good));
+    assert.equal(readGameConfig(known).username, 'Claude');
+  } finally { await web.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('/api/activity 的 after 不是合法数字时当第一次读，同步接口抛错只返回 500、不带倒 WebUI', async () => {
+  const dir = tmp();
+  // 停止接口里 launcher.status 抛错：请求处理的同步部分出错
+  const web = createWebServer({ runtime: dir, token: 'ac01', launcher: { launch: () => ({ ok: true }), status: () => { throw new Error('launcher 坏了'); } } });
+  const logged = [], consoleError = console.error;
+  try {
+    act(dir, 'ServerBot', [{ t: 1, kind: 'reply', text: '在呢' }]);
+    const port = await web.listen(0), base = `http://127.0.0.1:${port}`;
+    const cookie = (await fetch(`${base}/?t=ac01`, { redirect: 'manual' })).headers.get('set-cookie').split(';')[0];
+    const get = (q) => fetch(`${base}/api/activity?name=ServerBot${q}`, { headers: { cookie } });
+    for (const q of ['&after=abc', '&after=1.5', '&after=-5', '&after=Infinity', '&after=NaN']) {
+      const res = await get(q);
+      assert.equal(res.status, 200, q); assert.equal((await res.json()).items[0].text, '在呢', q);
+    }
+    assert.deepEqual(readActivity(dir, 'ServerBot', Number('abc')).items.map((i) => i.text), ['在呢'], '导出函数收到 NaN 也不抛');
+    console.error = (...args) => logged.push(args.map(String).join(' '));
+    const res = await fetch(`${base}/api/stop?name=ServerBot`, { method: 'POST', headers: { cookie } });
+    console.error = consoleError;
+    assert.equal(res.status, 500); assert.deepEqual(await res.json(), { error: 'internal error' });
+    assert.ok(logged.some((l) => /launcher 坏了/.test(l)), '错误记到终端，不吞掉');
+    assert.equal((await get('')).status, 200, '之后的请求照常');
+  } finally { console.error = consoleError; await web.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('模型列表：三家 CLI 的返回整理成同一种格式，只留模型名、说明和思考强度', () => {

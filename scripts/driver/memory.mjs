@@ -67,8 +67,14 @@ export function memoryStatus(agentMemoryDir) {
 }
 
 /** ServerBody 世界现状的文件（和 client-runtime/src/memory.ts 的 worldFileName 同样转义）。 */
-// 世界标识做文件名、目录名的写法，和 client-runtime/src/memory.ts 的 worldKey 一样（驱动器不能引用 scripts/ 以外的模块）
-const worldKey = (worldId) => worldId.replace(/[%<>:"/\\|?*\u0000-\u001f]/g, (c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+// 世界标识做文件名、目录名的写法，和 client-runtime/src/memory.ts 的 worldKey 一样（驱动器不能引用 scripts/ 以外的模块；规则的说明在那边，改要两边一起改）
+export function worldKey(worldId) {
+  const escape = (c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0');
+  let key = worldId.replace(/[%<>:"/\\|?*\u0000-\u001f]/g, escape);
+  key = key.replace(/[. ]+$/, (run) => [...run].map(escape).join(''));
+  if (/^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])$/i.test(key.split('.')[0].replace(/ +$/, ''))) key = escape(key[0]) + key.slice(1);
+  return key;
+}
 export function worldMemoryFile(memoryDir, worldId) {
   return path.join(memoryDir, 'shared', 'worlds', `${worldKey(worldId)}.md`);
 }
