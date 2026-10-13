@@ -8,6 +8,7 @@
 - `mods/mcbot-server-control/`：当前主线，MC1.21.1／NeoForge21.1.217服务端身体与原生交互。
 - `scripts/companion.mjs`、`scripts/driver/`、`scripts/agents/`：Claude／Codex会话驱动和事件调度。`companion.mjs` 是入口，实现按职责分在 `scripts/driver/`（各模块管什么见[状态归属](state_ownership.md)最后一节）；驱动器只能 import `scripts/` 里的模块，绿色版按 import 收集。
 - 服务端、运行端、驱动器三层各管哪些状态，`runtime/` 里的文件谁写谁读，见[状态归属](state_ownership.md)。
+- 长期记忆：运行端 `client-runtime/src/memory.ts`、`memory-tools.ts`（字数上限在 `client-runtime/memory-limits.json`），驱动器 `scripts/driver/memory.mjs`、`consolidation.mjs`，WebUI `scripts/webui-memory.mjs`；见[记忆方案](memory_plan.md)。
 - `mcp-server/`：保留的Mineflayer实现及宿主回归；真实验证用的协议测试玩家也依赖其依赖包。它不是新ServerBody的产品依赖。
 - `mods/mcbot-control/`、`mods/mcbot-server-spike/`：保留的ClientBody与早期服务端实验，不作为默认主线继续扩大。
 
@@ -52,7 +53,7 @@ node scripts/start-server-play.mjs --connection-file '<server>/config/mcbot-serv
 ./start-server-play.ps1 -ConnectionFile '<server>/config/mcbot-server-control/connection.json' -Agent claude
 ```
 
-当前仅支持loopback。目前只支持生存模式：单人游戏开局域网时，游戏模式请选「生存」；Bot 不是生存模式时服务端拒绝接管（`FORBIDDEN`），不会自动切换游戏模式。Agent账号由使用者在本机配置；真实模型测试前确认使用的账号，不自动切换或复制凭据。Codex可用同一入口的`-Agent codex`。不要安装spike和正式控制Mod到同一实例。
+当前仅支持loopback。目前只支持生存模式：单人游戏开局域网时，游戏模式请选「生存」；Bot 第一次接管（世界里还没有它的玩家存档）时服务端把它设成生存；已有存档又不是生存模式时拒绝接管（`FORBIDDEN`），不会自动切换。Agent账号由使用者在本机配置；真实模型测试前确认使用的账号，不自动切换或复制凭据。Codex可用同一入口的`-Agent codex`。不要安装spike和正式控制Mod到同一实例。
 
 2026-10-03用户指定Claude-b；该日之后每轮真实Claude测试先问账号，不擅自回退。`-ConfigDir "$env:USERPROFILE/.claude-b"`仅选本机已有登录环境。
 
@@ -83,13 +84,13 @@ node scripts/webui.mjs --open      # 默认端口 8770，--port 换端口，--ru
 - 页面风格参考 NapCat WebUI（渐变背景加模糊光斑、透明侧栏、胶囊顶栏和按钮、半透明毛玻璃卡片），颜色、图标、字样都是自己的，没有用它的代码和素材；有亮色、暗色和跟随系统三种主题，窄屏时侧栏变成抽屉。页面在 `scripts/webui-page.html`（单个内联 HTML，不依赖外部资源，改完要重启 WebUI）；下拉框是自己写的组件（原生 select 只当数据存着），按钮、开关、折叠区和列表都有动画，列表按 key 原地更新，不会每次刷新都重画。
 - 模型列表从本机 CLI 读（`scripts/agent-models.mjs`），都不发对话消息、不消耗额度：Claude Code 用 stream-json 只发 `initialize` 控制请求（关掉 hooks、不挂 MCP 和工具），返回里有每个模型支持的思考强度；Codex 用 `codex debug models`；dsh 开一个空的 ACP 会话读 `configOptions`（第一次约 20 秒，会在 DSH_HOME 留一条空会话记录）。按 Agent 和账号目录缓存在 `runtime/webui-models.json`，1 小时内不重读，页面上可以「重新读取」。思考强度跟着选中的模型变；读不到列表时 Claude 只给 opus／sonnet／fable／haiku 这几个别名。
 - 只监听 `127.0.0.1`。每次启动生成一次性令牌，终端里打印的地址带着它，打开后存进 Cookie；不带令牌、Host 不是本机地址的请求都拒绝，别的网页没法调它。
-- 只读驱动器写在 `runtime/` 里的文件：心跳 `companion-<名字>.json`（在线、是否在推理）、会话 `session-<名字>.json`（上下文大小、上次请求）、活动记录 `activity-<名字>.jsonl`（游戏事件和聊天、AI 回复、工具调用、每轮开始和结束、驱动器提示，超过 5MB 轮转）。三家 Agent 都走同一个驱动器，记录格式一样。
+- 只读驱动器写在 `runtime/` 里的文件：心跳 `companion-<名字>.json`（在线、是否在推理）、会话 `session-<名字>.json`（上下文大小、上次请求）、活动记录 `activity-<名字>.jsonl`（游戏事件和聊天、AI 回复、工具调用、每轮开始和结束、驱动器提示；驱动器启动时超过 5MB 就轮转，运行中不轮转）。三家 Agent 都走同一个驱动器，记录格式一样。
 - 页面上的「陪伴模式」「最近工具」「最近出错」是从记录里推算的。
 - 「叫停」放 `companion-<名字>.halt` 标记，是急停：驱动器撤销控制、结束这一轮 Agent（对话保留，托管不退出），等玩家用名字或昵称给新任务（目前只支持 ServerBody）。游戏里说“等一下”（暂停）或“停”（取消）由运行端原地停下，Agent 和对话不断，见 `client-runtime/player-stop.json` 和[陪伴体验评审](companion_experience_review.md)第 1 条；「停止托管」放 `companion-<名字>.stop`，和 `stop-companion.ps1` 一样让驱动器退出。WebUI 不碰游戏，关掉它不影响托管。
-- 「配置」页（`scripts/webui-profiles.mjs`、`scripts/webui-games.mjs`）：按档案保存启动参数，存在 `runtime/webui-profiles.json`，不进仓库。10-10 按小白的操作顺序分成标签页（第一次给朋友试玩前用户要求的，一次只看一块，信息别太密），依次是：
+- 「配置」页（`scripts/webui-profiles.mjs`、`scripts/webui-games.mjs`）：按档案保存启动参数，存在 `runtime/webui-profiles.json`，不进仓库。10-10 按小白的操作顺序分成标签页（第一次给朋友试玩前用户要求的，一次只看一块，信息别太密）；页面上的顺序是连接配置、角色、灵魂设置、记忆、行为、插件、高级，下面按功能写：
   1. **连接配置**：先选模式「单人 / 局域网」或「服务器」（有 `server.properties` 的目录算服务器），再从本机的游戏目录里点一个（Prism、ElyPrism、MultiMC、PolyMC 的实例，`%APPDATA%\.minecraft` 和它 `versions` 下的版本隔离目录；服务器和找不到的手动粘贴目录添加，记在 `runtime/webui-games.json`），每个显示核心模组装没装、和包里的 jar 是否逐字节相同（不同多半是旧版）、开没开过世界、世界现在开着没有（用连接文件问一次 hello）。10-10 起还读游戏版本（实例的 `mmc-pack.json`、服务器 `libraries` 里的 NeoForge、版本隔离目录的版本 json），不是 `compat.json` 的 Minecraft 版本加 NeoForge 下限以上的标「不支持的版本」、排在最后，插件页不让装；读不出版本的不拦。地址固定是本机（控制口只开在 127.0.0.1，服务器模式要在开服的那台电脑上运行；远程地址以后单独做），端口可改（写 `server.json` 的 `port`，默认 8766）。10-10 起档案只存游戏目录、模式、名字和端口，**连接文件不出现在网页上**：它在 `<游戏目录>/config/mcbot-server-control/connection.json`，模组每次开世界都换令牌重写；旧档案的 `connectionFile` 读的时候换成游戏目录。
   2. **角色**：游戏名（存在档案里，保存和启动托管时写进游戏目录的 `server.json`，只改 `username` 和 `port`，没有文件就按模组默认值建一个；模组开世界时读，世界开着要退出重进）、昵称（留空时用游戏名，不再有预设昵称）、外观卡片（YSM 模型的显示名读 `ysm.json`；世界没开时直接列 `config/yes_steve_model/custom` 里的模型，要装了 YSM 适配）。头像是像素史蒂夫（默认外观），不再用名字首字母。可导入 YSM 模型：一个 `.ysm` 文件或一个带 `ysm.json`／`main.json` 的模型文件夹，网页读成 base64 发给本机服务，写进所选游戏的 `config/yes_steve_model/custom`（要装了 YSM 插件，不覆盖同名，合计最多 64 MB，只写游戏列表里的目录）。普通皮肤（png）不做：Bot 是服务端模拟的玩家，原版客户端只显示 Mojang 皮肤服务器上签过名的皮肤（10-10 用户定先只支持 YSM）。
-  3. **灵魂设置**：Agent、凭据、模型、思考强度、账号目录（新建 dsh 配置时有 `~/.dsh` 就默认用它）、人设。人设编辑的就是托管时带上的 `persona.md`，位置是 `<记忆目录>/<游戏名小写>/persona.md`（10-10 起各 Agent 一样，`start-server-play.mjs` 把 `--memory-agent <游戏名小写>` 传给驱动器；记忆目录留空时 Claude 用仓库的 `memory`，dsh、Codex 用 `runtime/<agent>-memory`）；改游戏名时把已有的人设带到新名字下。不再有写死的 `xiaoke` 目录和「填入示例」模板；说话风格放在人设里，不写死在系统指令里。记忆系统以后重构。
+  3. **灵魂设置**：Agent、凭据、模型、思考强度、账号目录（新建 dsh 配置时有 `~/.dsh` 就默认用它）、人设。人设编辑的就是托管时带上的 `persona.md`，位置是 `<记忆目录>/<游戏名小写>/persona.md`（10-10 起各 Agent 一样，`start-server-play.mjs` 把 `--memory-agent <游戏名小写>` 传给驱动器；记忆目录留空时 Claude 用仓库的 `memory`，dsh、Codex 用 `runtime/<agent>-memory`）；改游戏名时把已有的人设带到新名字下。不再有写死的 `xiaoke` 目录和「填入示例」模板；说话风格放在人设里，不写死在系统指令里。长期记忆见[记忆方案](memory_plan.md)。
   4. **行为**：保护玩家（开关、用弓、举盾、范围、撤退血量，见[协议](server_body_protocol.md#保护玩家8h2026-10-08)）。
   5. **插件**（10-10，`scripts/webui-plugins.mjs`）：按 `compat.json` 把核心模组和每个适配当成插件，装进或卸出「连接配置」选中的游戏目录。状态按实际文件判断：读 `mods` 里每个 jar 的 `META-INF/neoforge.mods.toml`（只看 `[[mods]]` 段，`${file.jarVersion}` 用 MANIFEST 的版本）得到 mod id 和版本，我们自己的 jar 和包里的逐字节比，通用物品槽插件看 `item-handlers.json` 有没有这一条。一个插件 = 我们的附属 jar ＋ 被适配模组本体（确切版本）＋ 要写的配置，一起装；核心没装或是旧版时一起装上。点按钮先出计划（下载什么、放进什么、移走什么、改哪个配置，下载写文件名、大小、来源和许可证），确认后在后台执行，网页轮询进度：先下载（第三方模组只从清单里的 Modrinth 地址，大小对上才用，存进 `runtime/mod-downloads` 下次直接用），再把要换掉的旧文件和改之前的配置挪进 `<游戏目录>/mcbot-backups/<时间>/`（不删），再放新文件；中途出错就改回原样。卸载只移走我们的适配 jar 或配置条目，模组本体留着（世界里可能有它的方块）；核心本身不在这里卸。游戏或服务器开着时不改（世界开着即能问通 hello；加载中和主菜单时看有没有 `java`/`javaw` 进程的 `--gameDir` 指向该目录，服务器看命令行里的目录，见 `scripts/game-processes.mjs`；查不了进程也拒绝，下载前后各查一次）；服务器模式提醒带「客户端也要装」的模组玩家自己也要装。接口只接受游戏列表里的目录。每个已安装的插件有「给 AI 使用」开关（10-10 晚）：默认开启，按游戏目录存在 `runtime/webui-plugins.json`（不写进游戏目录，清单里删掉的插件自动失效），下次启动托管时生效；启动时启动器读当前开关，作为 `--disabled-plugins` 传给 `start-server-play.mjs`，再写进 `mcp.json` 的运行端参数，运行端注册工具前统一过滤 hello、硬调返回 UNSUPPORTED（见[协议](server_body_protocol.md)的「插件开关和插件说明」和 [Mod 适配](mod_adapters.md#给-ai-用开关)）。附属模组可用 `McbotApi.registerHint` 带给 AI 的用法说明，运行端只收开着的官方插件：托管时工具描述里只列插件名，说明随这个工具第一次调用附上（10-12）；不托管时附在对应工具的描述末尾。
   6. **记忆**（10-12，`scripts/webui-memory.mjs`）：看当前档案角色的回忆、约定和想做的事、最近几天、玩家档案、各世界现状和每天的日志（10-13 起约定、最近几天和日志按世界分开列）；只能删某段的一行或某一天的日志，删之前把原文件复制到 `runtime/memory-backup/`，删行时拿和运行端同一把写锁、核对行内容没变；不提供编辑，人设仍在「灵魂设置」里改。

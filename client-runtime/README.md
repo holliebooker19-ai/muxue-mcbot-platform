@@ -25,7 +25,7 @@ npm test
 node dist/main.js --body server --connection-file "G:/path/to/server/config/mcbot-server-control/connection.json" --username ServerBot --world-id example-world --runtime-dir "<repo>/runtime"
 ```
 
-服务端控制口可达时角色可能尚不存在，首次显式 claim 才创建或附着角色；接管后先读现状。快照标记 `server-observed`，包含服务实例、角色会话与控制代次。按服务端实际 `hello.capabilities` 发布工具：A 的四个动作与九个公共观察／控制工具共 13 个；启用 B 的七个生存动作及 `get-container` 后共 21 个。记忆工具和自动重生不发布给 MCP。
+服务端控制口可达时角色可能尚不存在，首次显式 claim 才创建或附着角色；接管后先读现状。快照标记 `server-observed`，包含服务实例、角色会话与控制代次。按服务端实际 `hello.capabilities` 发布工具：A 的四个动作与九个公共观察／控制工具共 13 个；启用 B 的七个生存动作及 `get-container` 后共 21 个（那时的数字，现在以 `tool-registry.json` 为准）。自动重生不发布给 MCP；记忆工具 10-12 起在托管且有人设时发布。
 
 B 的服务端快照还包含 `selectedSlot`、每个库存／菜单／carried 栈的完整 `components` JSON，以及 `container.revision`。所有组件 value 统一是经注册表 CODEC／NbtOps 生成的 typed-NBT，包含默认组件和嵌套物品；damage 如 `{type:"int",value:1}`，long 为字符串，浮点为原生值文本。把整个对象原样复制，不简化或重建数值；存在 transient／无持久 codec 的组件时明确 UNSUPPORTED，不静默丢字段。
 
@@ -57,7 +57,7 @@ node dist/main.js --body client --connection-file "C:/path/to/instance/config/mc
 - `stop-action` 绕过身体动作互斥，立即发送停止。ServerBody 使用服务端控制代次屏障拒绝旧请求；ClientBody v1 若有未完成请求，等其回执后再停止一次。
 - 变更请求超时／断线返回 `unknown`，从不重发动作。租约丢失、维度／世界代次变化后保留 MCP 通道并返回终态错误，必须手动重启托管才能重新接管；Agent 重试工具不能跨世界自动续做旧任务。
 - 明确收到 `LEASE_BUSY` 时，首次 claim 最多等待约 12 秒，让上个进程残余租约过期；claim 超时结果不明则不重试。
-- 只暴露 Mod `hello.capabilities` 声明实现的动作，不提供假记忆、自动进食或建造脚本工具。
+- 只暴露 Mod `hello.capabilities` 声明实现的动作；进食、建造都是服务端的原生动作，不在运行端拼脚本；记忆工具只在托管且有人设时发布。
 - 挖放／槽位点击使用预期方块、物品、数量和菜单代次保护；ServerBody 另严格核对完整状态／组件和窗口 revision。任何无法确认的原生效果或客户端预测都保持 `unknown`；先观察实际状态，再接受新的明确动作。
 - ServerBody 快照为 `source: server-observed`，来自服务端权威状态；ClientBody 为 `client-observed`，可能包含预测。快照本身不代替具体 Operation 成功回执。
 

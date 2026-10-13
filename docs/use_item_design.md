@@ -66,7 +66,7 @@
 { interaction, slot, expectedItem, expectedCount, expectedComponents, timeoutMs? }
 ```
 
-发 `ServerboundUseItemPacket`（主手），流程同上，只是没有目标方块。首批只允许「打开物品自带菜单」这一类交互；吃东西继续用 `eat-item`，不并进来。打开的菜单不在已核验的菜单名单里时，立刻原生关闭，并返回 `unknown`（菜单确实打开过）。
+发 `ServerboundUseItemPacket`（主手），流程同上，只是没有目标方块。首批只允许「打开物品自带菜单」这一类交互；吃东西继续用协议动作 `eat-item`（MCP 工具 `eat-food`），不并进来。打开的菜单不在已核验的菜单名单里时，立刻原生关闭，并返回 `unknown`（菜单确实打开过）。
 
 ## 4. 结果判定
 

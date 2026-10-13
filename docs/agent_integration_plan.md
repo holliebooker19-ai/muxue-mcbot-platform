@@ -24,7 +24,7 @@
 
 当前代码事实：
 
-- `scripts/companion.mjs` 和 `start-companion.ps1` 已接受 `gemini`／`claude`／`codex`。Claude／agy 的命令与消息转换位于 `scripts/agents/process-protocols.mjs`；Codex 的握手、线程、回合、取消与配置适配位于 `scripts/agents/codex-app-server.mjs`。驱动器消费统一事件；进程生命周期、MCP 和身体仍有耦合，尚不是最终完整 AgentAdapter。Codex 首轮真实试玩已完成，最新快捷停止和首次交还修复待复验，见 [试玩说明](archive/codex_v0.md)。
+- `scripts/companion.mjs` 已接受 `gemini`／`claude`／`codex`／`dsh`（`start-companion.ps1` 只有前三个，dsh 走 `start-server-play`）；10-13 起驱动器的实现拆在 `scripts/driver/`，`companion.mjs` 只剩入口。Claude／agy 的命令与消息转换位于 `scripts/agents/process-protocols.mjs`；Codex 的握手、线程、回合、取消与配置适配位于 `scripts/agents/codex-app-server.mjs`。驱动器消费统一事件；进程生命周期、MCP 和身体仍有耦合，尚不是最终完整 AgentAdapter。Codex 首轮真实试玩已完成，最新快捷停止和首次交还修复待复验，见 [试玩说明](archive/codex_v0.md)。
 - 当前存在 MCP 工具服务，但“能配置 MCP 工具”不等于已经完成自动事件唤醒、会话恢复、中断、错误处理等托管适配。
 - 旧身体层直接依赖Mineflayer；`client-runtime/`已实现ClientBody v1与ServerBody v2，共用Body／MCP边界。ServerBody完整能力集现为39工具（此前33工具＋5生存／工具／进食入口＋defend-self）；游戏端follow-companion、approach-resource及pickup-item供任务层内部调用，不要求模型逐步操作。新生存工具已有Claude实际模型证据，Codex本批仅同步允许列表并通过宿主检查，实际短回归仍待完成。长期记忆10-12已搬到运行端（见[memory_plan.md](memory_plan.md)），三家Agent共用一份；不把测试观察者的Mineflayer依赖当产品依赖。
 - `companion --body server`已接Claude／Codex，独立watch／revoke不等待模型或MCP journal。C已通过；10月3日早一批Sonnet5.5／low实测见[真实体验](archive/server_agent_interaction_trial_2026-10-03.md)，最新Claude-b／Codex分别通过取物、持续跟随、聊天、等待、叫停和新查询，见[持续陪伴记录](archive/server_companion_validation.md)。这些是功能及单轮耗时样本，性能结论不外推。
@@ -104,7 +104,7 @@ MCP 是对外工具接口之一，不承担所有 Agent 的进程与会话管理
 **2026-10-06 实现（R7＋ACP 适配器，离线）**：
 
 - 驱动器 `scripts/companion.mjs` 不再按 Agent 名字分支，全部改读 `scripts/agents/process-protocols.mjs` 里的描述字段：支持的身体、默认角色名和昵称、账号目录环境变量、身份（读小克记忆还是独立身份）、系统指令、托管 MCP 配置、环境变量调整、ServerBody 工具策略。新增一个 Agent 只需在那里注册一个描述和一个适配器。
-- 游戏陪玩的系统指令抽成 `scripts/agents/game-instructions.mjs`，Codex 和 dsh 共用同一份。
+- 游戏陪玩的系统指令抽成 `scripts/agents/game-instructions.mjs`，Claude、Codex 和 dsh 共用同一份。
 - `scripts/agents/dsh-acp.mjs`：dsh 走 ACP，接口和 Codex 一样（start / sendTurn / handleMessage / interrupt / dispose）。启动时生成 profile 补丁，关掉命令行、文件、联网、子代理、技能、工作流等，只留 `minecraft` MCP 工具，并把人设换成陪玩指令；权限请求只批准 `mcp__minecraft__` 开头的工具。思考档位 low/medium/high/xhigh 对应 dsh 的 low/high/high/max，默认 low。`DSH_HOME` 默认在 `runtime/dsh/home`。
 - dsh 只接 ServerBody，是独立试玩身份（不读小克的人设和记忆）。`start-server-play.ps1 -Agent dsh` 可用。
 - 测试：新增 `dsh-adapter.test.mjs` 7 项；`server-driver.test.mjs` 的端到端流程（启动、快速回复、出错通知、叫停、带新任务重连）对 dsh 跑通，和 Claude、Codex 同一套。
@@ -168,7 +168,8 @@ API 消费记录独立于外部 Agent 订阅状态；不同通道的用量与费
 - AgentAdapter 不 import 任一具体 Body；Mod 适配器不 import 某个 Agent SDK。组合由显式配置选择。
 - 原生 API 工具调用不依赖 MCP 的文本返回值来判断成败。MCP 和内部调用共享类型化结果与权限策略。
 - 接口面向能力差异，避免只把现有 Claude／agy 的字段改名后强加给所有 Agent。
-- 人设和长期记忆由项目统一管理，外部 Agent 的内部历史保留在其作用域；同一 Bot 不因切换供应商创建另一份不一致的世界记忆。
+- 人设和长期记忆由项目统一管理，外部 Agent 的内部历史保留在其作用域；同一 Bot 不因切换供应商创建另一份不一致的世界记忆（10-13 注：要做到这点，几家的记忆目录要填同一个；留空时 Claude 和 Codex、dsh 的默认目录不同，见[记忆方案](memory_plan.md)）。
+- 上下文压缩（10-11～10-12）：Claude 发 `/compact` 加“摘要里保留什么”；Codex 用 app-server 的 `thread/compact/start`，保留什么写在会话配置的 `compact_prompt`；dsh 的 ACP 没有压缩命令，生成的补丁让 dsh 自己的自动压缩在我们的上限触发；agy 不压缩，超过上限换会话。入口在 `scripts/driver/turns.mjs`，上限默认 20 万 token（`--rotate-tokens`）。
 - 日常陪玩只开放所需游戏能力，开发文件工具与普通玩家聊天分开授权；外部 Harness 本身的权限仍须由其配置约束。
 
 ## 7. 实施与验收

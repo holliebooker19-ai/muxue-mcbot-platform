@@ -1,4 +1,4 @@
-# 旧路径的可选记忆
+# 记忆的边界
 
 本说明最早写给保留的Mineflayer旧路径；2026-10-12起ServerBody托管也接上了同一套记忆（日志自动记、`memory-note`／`memory-recall`、开局加载回忆和约定、单独会话整理），接口见[协议](server_body_protocol.md#长期记忆运行端和驱动器2026-10-12)，方案见[memory_plan.md](memory_plan.md)。下面的边界两条路径都适用。
 

@@ -31,7 +31,7 @@
 | `companion-<名字>.stop` / `.halt` | WebUI、`stop-companion.ps1` | 驱动器每 400 毫秒看一次（`checkMarkers`，`driver/lifecycle.mjs:108`）；`.stop` 也被 `start-server-play.mjs:180` 看 | 驱动器 |
 | `session-<名字>.json` 会话 | 驱动器 `save`（`driver/session.mjs:79`） | 驱动器 `readSessionState`；**运行端** `takeHeldPosture` 读其中的 `lastStopAt`（`client-runtime/src/posture.ts:42`，由 `main.ts:146` 传入路径）；WebUI | 没人删 |
 | `posture-<名字>.json` 姿态 | 运行端 `writePosture`（`posture.ts:8`，`main.ts:147` 挂到 `companion.onPosture`） | 运行端启动时 `takeHeldPosture`（`main.ts:146`，读完即删）；**驱动器** `buildHandoff`（`driver/handoff.mjs:43`） | 运行端（读完、明确结束时）；**驱动器** `stopServerAgent`（`driver/stop.mjs:139`）、`shutdown`（`driver/lifecycle.mjs:46`，不是等重连时） |
-| `events-<名字>.jsonl` 事件 | 运行端 `EventJournal`（`events.ts:63`），每个进程启动时原地清空重写 | 驱动器 `createEventReader().poll`（`driver/events.mjs:73`） | — |
+| `events-<名字>.jsonl` 事件 | 运行端 `EventJournal`（`events.ts:68`），每个进程启动时原地清空重写 | 驱动器 `createEventReader().poll`（`driver/events.mjs:73`） | — |
 | `cursor-<名字>.txt` 已送达序号 | **驱动器** `markDelivered`（`driver/events.mjs:142`），由每一轮送出时（`driver/inbox.mjs:117`）、叫停撤销（`driver/stop.mjs:142`）、独立身份叫停（`driver/stop.mjs:187`）调用；运行端启动时清空（`events.ts:69`） | 运行端 `deliveredSeq`（`events.ts:296`），`wait-for-events` 不重复返回 | — |
 | `consumed-<名字>.txt` 模型自己读过的序号 | 运行端 `markConsumed`（`events.ts:303`） | 驱动器 `consumedSeq`（`driver/events.mjs:133`） | — |
 | `task-delivered-<名字>.json` 随工具结果送过的任务结果 | 运行端 `writeTaskReceipts`（`events.ts:94`） | 驱动器 `flush`（`driver/turns.mjs:232`）+ `taskAlreadyDelivered`（`driver/events.mjs:42`） | — |
@@ -41,7 +41,7 @@
 | `client-body-<名字>.lock` 运行端锁 | 运行端 `acquireRuntimeLock`（`lifecycle.ts:16`） | 驱动器 `captureBodyArtifacts` | 运行端；**驱动器** `cleanupBodyArtifacts`（同上条件） |
 | `bot-<名字>.lock` | 旧 Mineflayer MCP 服务端 | 驱动器 `waitBotLockFree`（`driver/agent-process.mjs:183`） | 旧 MCP 服务端 |
 | `mcp-hosted-<名字>.json`、`mcp-memory-<名字>.json` | 驱动器 | Agent CLI | — |
-| `<记忆目录>/<角色>/worlds/<世界>/state.json` 整理进度 | 运行端 `MemoryStore.write`（`memory.ts:288`，带 `through` 那次） | 驱动器 `memoryStatus`（`driver/memory.mjs:32`） | — |
+| `<记忆目录>/<角色>/worlds/<世界>/state.json` 整理进度 | 运行端整理会话写入时：ServerBody 的 `memory-write` 走 `MemoryStore.edit`（`memory.ts:357`），旧路径的整段覆盖走 `write`（`memory.ts:288`），都是带 `through` 那次 | 驱动器 `memoryStatus`（`driver/memory.mjs:32`） | — |
 
 ## 重复保存或跨层读写的状态
 
@@ -95,7 +95,7 @@
 - 世界标识转义：驱动器 `worldKey`（`driver/memory.mjs:71`）和运行端 `worldKey`（`memory.ts:128`）。
 - 没整理的日志条数：驱动器 `memoryStatus`（`driver/memory.mjs:32`）按 `state.json` 的游标数日志，和运行端 `MemoryStore.unconsolidated`（`memory.ts:421`）同一算法。
 - 记忆开没开：驱动器看 `persona.md` 在不在（`driver/config.mjs:44-47`），运行端 `openMemory`（`main.ts:198`）再看一遍。
-- 原因：驱动器不能 import `scripts/` 以外的模块（绿色版打包只带 `scripts/` 和运行端的 dist）。
+- 原因：驱动器不能 import `scripts/` 以外的模块（绿色版打包只带 `scripts/`、运行端的 dist，和运行端的几个 JSON：`tool-registry.json`、`player-stop.json`、`memory-limits.json`，驱动器也读它们）。
 - 应归：记忆数据归**运行端**。驱动器只需要“上次整理时间、还有几条没整理”，以后可以由运行端的 `--memory-only` 进程或一个状态文件给出，驱动器不再自己数。
 
 ### 9. 交接单读运行端的记录

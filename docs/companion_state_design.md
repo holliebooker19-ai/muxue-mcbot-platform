@@ -133,8 +133,8 @@ if (duty != null && duty.wantsBody(...) && interruptible(当前任务)) {
 - `SurvivalReflexes`：
   - `guarding()` 改成“保护开着且 `covering`”；覆盖时 3 格近身自卫不插手，不覆盖时照常自卫。
   - `ordinaryBusy` 把“保护正在打”算作忙：普通进食等打完；紧急进食照旧抢占（服务端在原生使用物品时不接管身体，所以吃完保护再接上）。
-- 工具说明和提示词：`companion-mode` 的说明、`scripts/agents/game-instructions.mjs` 的保护规则改成“保护是独立开关，跟随、等待、做事时都有效”；不新增工具名，Codex 白名单不用改。
-- WebUI：状态栏把保护单独显示（保护谁、是否覆盖、在不在打），不再挂在陪伴模式下面。
+- 工具说明和提示词：`companion-mode` 的说明、`scripts/agents/game-instructions.mjs` 的保护规则改成“保护是独立开关，跟随、等待、做事时都有效”；不新增工具名，Codex 白名单不用改。（10-13 核对：`companion-mode` 的工具说明已这样写；`game-instructions.mjs` 的常驻规则没加这句。）
+- WebUI：状态栏把保护单独显示（保护谁、是否覆盖、在不在打），不再挂在陪伴模式下面。（10-13 核对：没做，WebUI 只有保护的设置项。）
 
 ### 5.4 测试
 
@@ -557,7 +557,7 @@ interface BodyTask extends GuardDuty.Pausable {
 - 运行端多了一种“等”：采集自己的生存步骤（换工具、两块之间吃东西）占着生存锁时，不开窗口，下一拍再试；低血线规则同 `NOT_PAUSABLE`。
 - 明确的 `defend-self` 遇到 `NOT_PAUSABLE` 不等，照旧取消再打：这是模型或玩家现在就要的。
 - 正在自动进食（可能就在窗口里）时来了怪，自卫照旧 `stop` 抢先，被暂停的任务也一起取消。这种情况少见，没有为它做“窗口里先吃后打”。
-- 工具说明只改了 `defend-self`、`set-reflexes`（按能力加一句，列出的任务名从 `tool-registry.json` 取）；建筑、种地等任务的说明里本来就没写“会被取消”，没动。游戏指令（`scripts/companion.mjs`）那一行改成先暂停、最多两次。
+- 工具说明只改了 `defend-self`、`set-reflexes`（按能力加一句，列出的任务名从 `tool-registry.json` 取）；建筑、种地等任务的说明里本来就没写“会被取消”，没动。游戏指令那一行（现在在 `scripts/agents/game-instructions.mjs`）改成正在做的任务先暂停、处理完接着做；“每件任务最多两次”写在 `defend-self` 的工具说明里（`MAX_RESUMES`）。
 - 顺手修了一个旧错误：`defend-self` 不带 `entityId`、而且之前从没发过自卫事件时，读 `this.defenseEvent!.at` 会抛 `TypeError`，自卫被当成失败并停用本能。
 - 做 4d 运行端时发现并修正（10-11）：运行端原来要等 `begin` 的回复才在本地登记窗口。这之间采集发出的下一步，服务端已经开了窗口，会被当成窗口外的操作报 BUSY，采集因此失败。现在发 `begin` 之前就先登记，采集的下一步从那一刻起就等着；`begin` 被拒或叫停时撤掉登记、放行。窗口时长从服务端开窗的回复算起，`fightMs()` 仍然只增不减。
 - 10-11 评审 4a～4c 时发现并修正：叫停只清了服务端的窗口，运行端本地的窗口要等 `work` 跑完才撤。这期间（1）自卫抢先进食后再拿任务锁会因窗口还在报 BUSY，自动防卫因此被阻断；（2）停止确认后，旧窗口的令牌发出的一步会在新代次下当成普通操作送到服务端（用真实 `ServerBody` 和 mock 服务端复现）。现在 `stop()` 发出时就让本地窗口退场：时长计入 `fightMs()`（只计一次），放行在 `act()` 里等着的任务锁步骤（它们因代次变了报 CANCELLED）；被叫停的窗口令牌记下来，用它发的步骤直接报 CANCELLED、不发出，`work` 结束或 `begin` 失败时删掉记录。窗口还在等 `begin` 回复时被叫停也一样。

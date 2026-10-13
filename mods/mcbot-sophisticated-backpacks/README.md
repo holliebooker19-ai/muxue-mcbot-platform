@@ -25,7 +25,7 @@ MCBOT 的示例附属模组，让 Bot 能用 [Sophisticated Backpacks](https://m
 
 ## 暂不支持
 
-- Bot 自己放下或收起背包：SB 要求潜行右键，Bot 不会潜行使用物品。
+- Bot 自己放下背包：没有放置背包的交互。收起已经支持：空手对放着的背包用 `interact-block` 的 `backpack/take`（核心替它按住潜行），再用 `equip-item` 穿上。
 - 背包里的背包、从别的玩家身上打开背包。
 - 背包的设置页、过滤器、升级页。
 

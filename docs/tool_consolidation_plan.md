@@ -3,7 +3,7 @@
 ## 进度
 
 - 10-11 用户同意先做合并。已做（离线）：合并清单第 1～4、6～9、12、13 条，名字按本方案（go-to、places、blueprints、get-status include、equip-item hand main、get-up、pillar、container-menu、emote 看人）；ServerBody **68 → 49 个**。旧名字在 `tool-registry.json` 里标 `clientOnly`，只给旧 ClientBody。运行端 520 项、`mcp-server` 728 项通过（另 1 项跳过；vision 截图那项本机连不上 viewer，没改那部分）；核心 `gradlew build` 通过（坐着、睡着时的提示改成 get-up）。
-- 10-12 用户看过用法后定：第 5、10、11、14 条（read-chat、approach-container、fetch-and-give、assess-tool）都删，ServerBody **45 个**；启动提示里的“取物交还优先 fetch-and-give”改成先 container-withdraw 再 give-item。`AGENT.md` 的工具数用户同意改成 45。
+- 10-12 用户看过用法后定：第 5、10、11、14 条（read-chat、approach-container、fetch-and-give、assess-tool）都删，ServerBody **45 个**；启动提示里的“取物交还优先 fetch-and-give”改成先 container-withdraw 再 give-item。`AGENT.md` 的工具数用户同意改成 45。（之后 10-12 又加了 4 个记忆工具，去掉 `clientOnly` 共 49 个，`AGENT.md` 已按此写。）
 - 10-12 说明瘦身（离线）：说明只留“什么时候用、给什么参数”，范围、时限、失败码这类细节交给错误信息和事件。陪伴模式不再写保护的拉回范围和陪挖的守卫细节，只说“跟随时自动保护，玩家不要你打才 guard:false”。顺手改掉说明里还指向旧名字的地方（dig-block 的 select-slot、give-item 的 list-inventory）。同一组能力下（脚本 `tool-sizes`，44 个工具）工具列表从 **62,333 → 41,613 字符**；其中说明文字约 3.7 万 → 1.6 万，剩下约 2.9 万是参数结构（类型、正则、范围），没动。运行端 520 项、`mcp-server` 729 项通过（另 1 项跳过）。
 - 10-12 隔离服 smoke／agent-trial 脚本改成新名字（b15aef6，44 个文件，复核修正 2d54d00）；还留着 `fetch-and-give`（9 处）、`assess-tool`（4 处）的 TODO，只做了 `node --check`，没跑隔离服。
 - 没做：真实模型实测（合并和瘦身后挑工具对不对），随 10-12 的包一起试玩。
