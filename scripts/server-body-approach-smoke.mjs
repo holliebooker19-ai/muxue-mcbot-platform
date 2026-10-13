@@ -104,11 +104,12 @@ try {
   const rawTarget=rawFound.candidates.find(v=>v.position.x===820&&v.position.z===816);
   check('authority discovery has private instance-bound target token',typeof rawTarget?.targetToken==='string'&&rawTarget.targetToken.length>0&&!('targetToken' in target),{visibility:target.visibility});
   let callStart=evidence.rpc.length,started=performance.now();
-  // TODO(ServerBody 合并)：fetch-and-give 已删。下面断言合成任务的 withdrawnCount/droppedCount/pickup，拆成两步会改变测试内容，待决定。
-  const delivered=await terminal('fetch-and-give',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,player:'C2Tester',say:'我去箱子取来。'});
-  evidence.separatedTask={ms:performance.now()-started,operation:delivered,rpcCalls:evidence.rpc.length-callStart};
+  // 取物交给玩家：fetch-and-give 10-12 删了，现在和模型一样分两步（container-withdraw，再 give-item）
+  const withdrawn=await terminal('container-withdraw',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3});
+  const delivered=await terminal('give-item',{player:'C2Tester',item:'minecraft:oak_log',count:3,say:'我去箱子取来。'});
+  evidence.separatedTask={ms:performance.now()-started,operation:{withdrawn,delivered},rpcCalls:evidence.rpc.length-callStart};
   check('different stations execute approach-container and approach-player',evidence.rpc.slice(callStart).some(v=>v.action==='approach-container')&&evidence.rpc.slice(callStart).some(v=>v.action==='approach-player'));
-  check('composed task confirms withdrawal and drop but not pickup',delivered.result.withdrawnCount===3&&delivered.result.droppedCount===3&&delivered.result.pickup==='unconfirmed',delivered.result);
+  check('withdraw then give confirms withdrawal and drop but not pickup',withdrawn.result.withdrawnCount===3&&delivered.result.droppedCount===3&&delivered.result.pickup==='unconfirmed',{withdrawn:withdrawn.result,delivered:delivered.result});
   deadline=performance.now()+10000;let received=false;
   while(performance.now()<deadline){await peerCommand({type:'inventory'});await wait(350);received=(await peerEvents()).some(v=>v.type==='inventory'&&v.inventory.some(i=>i.name==='oak_log'&&i.count===3));if(received)break;}
   check('actual specified player received exact quantity',received);
@@ -159,19 +160,19 @@ try {
 
   phase='stop-during-move';await resetArena();target=await targetAt(820);
   let held=pauseAction('approach-container','after'),index=evidence.rpc.length;
-  // TODO(ServerBody 合并)：fetch-and-give 已删，停止合成任务的测试待改写。
-  const pendingMove=tool('fetch-and-give',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,player:'C2Tester'});
+  const pendingMove=tool('container-withdraw',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3});
   await waitGate(held);await wait(200);const stopStarted=performance.now();await tool('stop-action');held.release();gate=undefined;
   const cancelledMove=await pendingMove;evidence.moveStop={ms:performance.now()-stopStarted,operation:cancelledMove};
   await wait(300);
-  check('stop during move prevents open and drop',cancelledMove.status==='cancelled'&&!evidence.rpc.slice(index).some(v=>['open-container','drop-item'].includes(v.action))&&(await tool('container-menu', { action: 'read', details:true}))===null,cancelledMove);
+  check('stop during move prevents open',cancelledMove.status==='cancelled'&&!evidence.rpc.slice(index).some(v=>['open-container','drop-item'].includes(v.action))&&(await tool('container-menu', { action: 'read', details:true}))===null,cancelledMove);
   target=await targetAt(820);const afterStop=await terminal('container-list',{containerRef:target.containerRef});
   check('first new task after movement stop succeeds',afterStop.result.items.some(v=>v.item==='minecraft:oak_log'&&v.count===8));
 
   phase='stop-after-withdrawal';await resetArena();target=await targetAt(820);
+  // 先取出三个，再交给玩家；走向玩家前叫停
+  await terminal('container-withdraw',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3});
   held=pauseAction('approach-player','before');index=evidence.rpc.length;
-  // TODO(ServerBody 合并)：fetch-and-give 已删，停止合成任务的测试待改写。
-  const pendingReturn=tool('fetch-and-give',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,player:'C2Tester'});
+  const pendingReturn=tool('give-item',{player:'C2Tester',item:'minecraft:oak_log',count:3});
   await waitGate(held);
   const inventoryHeld=await command('data get entity Claude Inventory');
   check('pause reached after confirmed withdrawal and closed menu',/minecraft:oak_log/.test(inventoryHeld)&&/count: 3/.test(inventoryHeld)&&(await tool('container-menu', { action: 'read', details:true}))===null,{inventoryHeld});

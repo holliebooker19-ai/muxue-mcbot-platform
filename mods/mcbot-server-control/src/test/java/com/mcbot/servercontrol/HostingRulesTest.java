@@ -30,6 +30,9 @@ final class HostingRulesTest {
         check(HostingRules.worldId("auto",false,Path.of("saves","我的世界-2")).equals("sp-我的世界-2"),"unicode letters, digits and dashes are kept");
         check(HostingRules.worldId("auto",false,Path.of("saves","a".repeat(60))).equals("sp-"+"a".repeat(HostingRules.MAX_WORLD_ID)),"long folder names are truncated");
         check(HostingRules.worldId("auto",false,Path.of("/").toAbsolutePath().getRoot()).equals("sp-world"),"a root path without a folder name falls back to world");
-        System.out.println("HostingRulesTest: "+checks+" checks passed (LAN requirement, OP exception, auto world ID)");
+        String first=HostingRules.newServerWorldId(),second=HostingRules.newServerWorldId();
+        check(first.matches("srv-[0-9a-f]{8}")&&!first.equals(second),"each new dedicated config gets its own srv- world ID");
+        check(HostingRules.worldId(first,true,Path.of("server","world")).equals(first),"the generated ID is kept, not replaced by the level folder");
+        System.out.println("HostingRulesTest: "+checks+" checks passed (LAN requirement, OP exception, auto and new server world ID)");
     }
 }

@@ -546,7 +546,7 @@ test('记忆位置：驱动器参数 > MCP 配置 > 默认，并写进托管 MCP
   assert.ok(args.includes('--hosted'));
 });
 
-test('整理记忆：触发事件、有没有没整理的日志、躺床的 30 分钟间隔', () => {
+test('整理记忆：触发事件、有没有没整理的日志、每种触发都隔 30 分钟', () => {
   assert.equal(consolidationTrigger({ type: 'sleep', text: '你躺上床睡着了' }), 'sleep');
   assert.equal(consolidationTrigger({ type: 'presence', text: 'Claude不在线（no_players：没有真人玩家在线，没有 muxue 在线满 2 分钟）。' }), 'offline');
   assert.equal(consolidationTrigger({ type: 'presence', text: 'Claude不在线（uncontrolled：没人控制）' }), null);
@@ -555,8 +555,10 @@ test('整理记忆：触发事件、有没有没整理的日志、躺床的 30 �
   const now = 100 * 60000;
   const base = { consolidatedAt: now - 10 * 60000, pending: 3, now, floorMs };
   assert.equal(consolidationDue('sleep', base), false, '躺床离上次整理不到 30 分钟');
-  assert.equal(consolidationDue('offline', base), true, '下线不受间隔限制');
-  assert.equal(consolidationDue('rotate', base), true);
+  assert.equal(consolidationDue('offline', base), false, '下线也要隔够 30 分钟，日志留到下次');
+  assert.equal(consolidationDue('rotate', base), false);
+  assert.equal(consolidationDue('startup', base), false);
+  assert.equal(consolidationDue('offline', { ...base, consolidatedAt: 0 }), true, '从来没整理过');
   assert.equal(consolidationDue('sleep', { ...base, consolidatedAt: now - 31 * 60000 }), true);
   assert.equal(consolidationDue('offline', { ...base, pending: 0 }), false, '没有没整理的日志');
   assert.match(consolidationPrompt('sleep', 200000), /躺上床[\s\S]*through/);
@@ -700,7 +702,7 @@ test('冒烟：新 MCP 原地重写的事件文件和旧文件一样长或更长
   }
 });
 
-test('冒烟：躺上床触发整理（有没整理的日志才整理，30 分钟内不重复）；下线不受间隔限制；没启用记忆时不整理', async () => {
+test('冒烟：躺上床触发整理（有没整理的日志才整理，30 分钟内不重复）；下线也隔 30 分钟；没启用记忆时不整理', async () => {
   const mc = await fakeMcPort();
   const s = setup({ memory: true, consolidate: 'noop' });
   const journal = path.join(s.agentMemory, 'journal', '2026-09-28.md');
@@ -724,6 +726,12 @@ test('冒烟：躺上床触发整理（有没整理的日志才整理，30 分�
     await sleep(2500);
     assert.equal(s.turns().length, 3, '30 分钟内躺床不再整理');
     assert.match(d.output(), /不用整理记忆（sleep/);
+    appendEvent(s.F, 'presence', 'Claude不在线（no_players：没有真人玩家在线，没有 muxue 在线满 2 分钟）。');
+    await sleep(2500);
+    assert.equal(s.turns().length, 3, '30 分钟内下线也不再整理');
+    assert.match(d.output(), /不用整理记忆（offline/);
+    // 上次整理已经是 31 分钟前：下线就整理
+    fs.writeFileSync(path.join(s.agentMemory, 'state.json'), JSON.stringify({ consolidatedAt: Date.now() - 31 * 60000, through: '2026-09-28#1' }));
     appendEvent(s.F, 'presence', 'Claude不在线（no_players：没有真人玩家在线，没有 muxue 在线满 2 分钟）。');
     const t3 = await waitFor(() => s.turns()[3], 10000, '下线整理轮');
     assert.match(t3.text, /^【整理记忆】（玩家都下线了/);

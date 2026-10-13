@@ -115,7 +115,7 @@ try {
     args: [path.join(root, 'client-runtime/dist/main.js'), '--body', 'server', '--connection-file', connectionFile,
       '--username', 'Claude', '--world-id', connection.worldId, '--runtime-dir', runtime, '--controller-id', randomUUID()] }));
   const status = await tool('get-status');
-  check('身体声明 companion-guard', status.value.capabilities?.includes('companion-guard'), status.value.capabilities);
+  check('身体声明 guard-duty-fenced（跟随时的保护）', status.value.capabilities?.includes('guard-duty-fenced'), status.value.capabilities);
   const began = Date.now();
   peer = spawn(process.execPath, [path.join(root, 'scripts/server-play-test-peer.mjs'), '--commands', commands, '--events', peerFile], { cwd: root, stdio: 'ignore', windowsHide: true });
   await until(peerEvents, events => events.some(event => event.type === 'spawn' && Date.parse(event.time) >= began), '测试玩家没有进服');

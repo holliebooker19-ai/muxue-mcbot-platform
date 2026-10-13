@@ -317,8 +317,8 @@ try {
     report.natural.observedHeightRange = { min: Math.min(...heights), max: Math.max(...heights) };
     report.natural.actualBodyMotion = totalMotion; await hardStop('natural-follow-hard-stop'); report.natural.result = 'passed';
   } else {
-    // TODO(ServerBody 合并)：assess-tool 已删，这个阶段待改写（不改会 unknown tool）。
-    await request('read-tool-and-prepare-main-inventory', '用assess-tool评估2816,201,2813的minecraft:iron_ore，dropPreference:no_silk_touch；equip-item(hand:"main")槽10到targetSlot:0，再equip-item(hand:"main")槽11到targetSlot:1，不吃不挖。', ['assess-tool', 'equip-item'], async row => {
+    // assess-tool 10-12 起不再是模型工具，这一步只留主背包准备
+    await request('prepare-main-inventory', '用equip-item(hand:"main")槽10到targetSlot:0，再equip-item(hand:"main")槽11到targetSlot:1，不吃不挖。', ['equip-item'], async row => {
       row.inventory = await command('data get entity Claude Inventory');
       assert(/^Test passed/.test(await command('execute if items entity Claude weapon.mainhand minecraft:bread')), 'Last prepared bread was not selected');
       assert(/^Test passed/.test(await command('execute if items entity Claude hotbar.0 minecraft:diamond_pickaxe')));

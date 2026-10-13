@@ -36,8 +36,7 @@ const input = path.join(dir, 'peer-input.jsonl'), peerFile = path.join(dir, 'pee
 const report = { started: new Date().toISOString(), backup: backup.backup, serverDir, toolsOnly: process.argv.includes('--tools-only'),
   nodeRuntime: { version: process.version, v8: process.versions.v8, uv: process.versions.uv, executable: process.execPath },
   boundary: '实际 stdio MCP／服务端工具资格与原生使用；RCON 仅授权夹具和独立字段核对；没有实际模型。',
-  limitations: ['assess-tool 是基础资格和基础速度估计，不证明候选装备后的 Mod／玩家采掘钩子。',
-    '铁矿／黑曜石／沙子仅用于只读评估，不计为当前有限资源目录的可采集能力。',
+  limitations: ['工具资格和速度评估（assess-tool）10-12 起不再是模型工具，这里不测；离线见 ToolAssessmentTest，实机见 server-ore-alpha-smoke 的木镐拒绝。',
     '原生消费收据、库存变化和饥饿变化分别记录；最后回执时间不等于最后原生写入 tick。',
     '失败保留原报告，不自动重跑任何失败动作；未测试三维导航／自卫／真实 Mod 负面食物。'],
   checks: [], steps: [], calls: [], rpc: [], processes: [], cleanup: [] };
@@ -104,16 +103,6 @@ const state = async () => (await tool('get-status', { include: ['survival'], det
 const inventory = async () => (await tool('get-status', { include: ['inventory'] })).inventory;
 const total = (values, id) => values.filter(value => value.id === id).reduce((count, value) => count + value.count, 0);
 async function policy(change) { const current = await state(); return tool('set-reflexes', { expectedRevision: current.policy.revision, ...change }); }
-async function readOnlyAssessment(block, args = {}) {
-  await fixture(`setblock 2414 201 2422 ${block}`);
-  const before = await state(), authorityBefore = await command('data get entity Claude Inventory');
-  // TODO(ServerBody 合并)：assess-tool 已删、没有直接替代，这里仍是旧名，待决定删除或改写（不改会 unknown tool）。
-  const value = await tool('assess-tool', { x: 2414, y: 201, z: 2422, expectedBlock: `minecraft:${block}`, ...args });
-  const after = await state(), authorityAfter = await command('data get entity Claude Inventory');
-  check(`只读评估 ${block} 未换手／改变库存`, before.selectedSlot === after.selectedSlot && authorityBefore === authorityAfter && JSON.stringify(before.inventory) === JSON.stringify(after.inventory));
-  check(`评估 ${block} 全主背包36候选及时间口径`, value.candidates.length === 36 && value.candidates.every(candidate => ['estimated', 'unknown', 'native-base'].includes(candidate.estimate)) && value.notes.some(note => note.includes('基础')));
-  return value;
-}
 async function makeHungry(target = 10) {
   const initial = await state();
   if (initial.food <= target) return initial;
@@ -157,25 +146,6 @@ try {
   await fixture('fill 2400 200 2400 2444 200 2444 stone'); await fixture('fill 2400 201 2400 2444 204 2444 air');
   await fixture('clear Claude'); await fixture('clear C2Tester'); await fixture('tp Claude 2410.5 201 2422.5'); await fixture('tp C2Tester 2420.5 201 2428.5');
   await until(() => command('data get entity Claude OnGround'), value => /1b\s*$/.test(value), '传送后未落地');
-  await step('tool-qualification-speeds', async () => {
-    for (const [slot, item] of [[0, 'wooden_pickaxe'], [1, 'stone_pickaxe'], [2, 'iron_pickaxe'], [3, 'golden_pickaxe'], [20, 'diamond_pickaxe'], [10, 'iron_axe'], [11, 'iron_shovel']]) await replace(slot, `minecraft:${item}`);
-    const stone = await readOnlyAssessment('stone'), get = (value, slot) => value.candidates.find(candidate => candidate.slot === slot);
-    check('原版木／石／铁／金／钻石石头资格及基础速度', [[0, 2], [1, 4], [2, 6], [3, 12], [20, 8]].every(([slot, speed]) => get(stone, slot)?.eligible === true && get(stone, slot).baseSpeed === speed));
-    check('石头默认选合格最快金镐', stone.recommendedSlot === 3, stone.recommendedSlot);
-    const iron = await readOnlyAssessment('iron_ore');
-    check('木镐／金镐不把铁矿破坏当可获掉落', get(iron, 0).eligible === false && get(iron, 3).eligible === false && get(iron, 1).eligible === true);
-    const obsidian = await readOnlyAssessment('obsidian');
-    check('铁镐不获黑曜石／全背包钻石镐合格', get(obsidian, 2).eligible === false && get(obsidian, 20).eligible === true && obsidian.recommendedSlot === 20);
-    const log = await readOnlyAssessment('oak_log'), sand = await readOnlyAssessment('sand');
-    check('斧／铲的原生速度而非工具名字排序', log.recommendedSlot === 10 && get(log, 10).baseSpeed > get(log, 20).baseSpeed && sand.recommendedSlot === 11);
-    await replace(3, 'minecraft:golden_pickaxe[minecraft:damage=31]'); const protectedTool = await readOnlyAssessment('stone');
-    check('近坏金镐速度仍快但默认保护其最后耐久', get(protectedTool, 3).remainingDurability === 1 && protectedTool.recommendedSlot === 20);
-    const permitted = await readOnlyAssessment('stone', { minRemainingDurability: 0 }); check('明确改变耐久策略可选仍合格的金镐', permitted.recommendedSlot === 3);
-    await fixture('clear Claude'); const bare = await readOnlyAssessment('oak_log');
-    check('无斧可只读确认徒手采木，推荐已有空热栏', bare.candidates.find(candidate => candidate.slot === 0).eligible === true && bare.recommendedSlot >= 0 && bare.recommendedSlot <= 8 && bare.candidates[bare.recommendedSlot].id === 'minecraft:air');
-    const discovered = await tool('discover-resources', { blockIds: ['minecraft:oak_log'], radius: 6 });
-    check('旧资源热栏推荐字段仍限定0..8', discovered.candidates.some(candidate => candidate.id === 'minecraft:oak_log') && discovered.candidates.every(candidate => candidate.recommendedToolSlot === undefined || candidate.recommendedToolSlot <= 8));
-  });
   await step('prepare-occupied-native-swap', async () => {
     await replace(0, 'minecraft:dirt', 17); await replace(10, 'minecraft:diamond_pickaxe');
     const before = await inventory(), operation = await terminal('equip-item', { hand: 'main', slot: 10, targetSlot: 0 }), after = await inventory();

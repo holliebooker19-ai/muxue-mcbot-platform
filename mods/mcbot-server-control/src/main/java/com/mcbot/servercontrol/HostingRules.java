@@ -1,6 +1,7 @@
 package com.mcbot.servercontrol;
 
 import java.nio.file.Path;
+import java.util.UUID;
 import static com.mcbot.servercontrol.Protocol.*;
 
 /** Where the body may run: a dedicated server, or a single-player world opened to LAN (which never pauses). */
@@ -8,6 +9,7 @@ final class HostingRules {
     record Host(boolean dedicated,boolean published,boolean paused,boolean commandsForAll) {}
     static final String AUTO_WORLD="auto";
     static final int MAX_WORLD_ID=48;
+    static final String SERVER_WORLD_PREFIX="srv-";
     private HostingRules() {}
     /** Checked before claim, respawn and act: a paused or un-published integrated server would freeze native actions. */
     static void requireRunnable(Host host) {
@@ -20,6 +22,13 @@ final class HostingRules {
      */
     static boolean forbiddenOp(Host host,boolean op,boolean listedOp) {
         return op&&(listedOp||host.dedicated()||!host.commandsForAll());
+    }
+    /**
+     * A new dedicated-server config gets its own fixed ID: dedicated save folders are almost always "world",
+     * so "auto" would make every server share one world memory. scripts/webui-games.mjs writes the same form.
+     */
+    static String newServerWorldId() {
+        return SERVER_WORLD_PREFIX+UUID.randomUUID().toString().substring(0,8);
     }
     /** "auto" uses the save folder, so single-player worlds sharing one instance config keep separate memories. */
     static String worldId(String configured,boolean dedicated,Path worldRoot) {

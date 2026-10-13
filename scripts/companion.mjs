@@ -26,7 +26,7 @@
 //       --rotate-tokens <N>（会话上下文超过 N tokens 就整理记忆后换新会话，默认 200000；0 表示不换。
 //         服务端身体的 Claude、Codex 改成原地压缩（/compact、thread/compact/start，进程、工具服务和身体控制都不断），压缩失败才换会话；
 //         dsh 的 ACP 发不了压缩，生成的补丁让它自己在这个上限自动压缩，宿主不换会话）
-//       --consolidate-floor-min <N>（躺床触发的整理两次至少隔 N 分钟，默认 30）
+//       --consolidate-floor-min <N>（两次整理至少隔 N 分钟，躺床、下线、换会话、启动都算，默认 30）
 //
 // 运行时文件（runtime/，可用环境变量 COMPANION_RUNTIME_DIR 改）：
 //   companion-<名字>.json  托管心跳 {pid, agent, updatedAt}，每 15 秒写一次，MCP 服务端据此判断"有托管在控制"

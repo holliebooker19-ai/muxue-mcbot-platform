@@ -17,11 +17,11 @@ export function consolidationTrigger(e) {
   return null;
 }
 
-// 该不该整理：没有没整理的日志就不用；躺床触发的要和上次隔够 floorMs
-export function consolidationDue(trigger, { consolidatedAt, pending, now, floorMs }) {
+// 该不该整理：没有没整理的日志就不用；不管哪种触发（躺床、下线、换会话、启动），都要和上次整理隔够 floorMs。
+// 不到时间的日志留着，下一次触发再整理，不会丢。
+export function consolidationDue(_trigger, { consolidatedAt, pending, now, floorMs }) {
   if (!pending) return false;
-  if (trigger === 'sleep') return now - consolidatedAt >= floorMs;
-  return true;
+  return now - consolidatedAt >= floorMs;
 }
 
 const JOURNAL_ENTRY_RE = /^- (\d{2}):(\d{2}) /;

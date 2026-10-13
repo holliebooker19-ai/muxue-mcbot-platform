@@ -184,12 +184,6 @@ try {
     assert(/entity data:\s*"minecraft:diamond_pickaxe"\s*$/.test(preparedId), 'Independent hotbar slot 0 did not contain the prepared pickaxe');
     assert.equal(integerField(await command('data get entity Claude SelectedItemSlot')), 0);
   });
-  const beforeAssess = await command('data get entity Claude Inventory');
-  // TODO(ServerBody 合并)：assess-tool 已删、没有直接替代，这个阶段仍用旧名，待决定删除或改写（不改会 unknown tool）。
-  await phase('assess-native-tool', context + '调用assess-tool评估x:2414,y:201,z:2422、expectedBlock:minecraft:stone，policy:fastest_valid、dropPreference:any。简短说明当前推荐及估计的边界，不换手、不挖。', ['assess-tool'], async row => {
-    assert(row.responses.some(value => value.name === 'assess-tool' && value.value?.blockId === 'minecraft:stone' && Array.isArray(value.value.candidates)), 'No parsed native tool assessment of the fixture block');
-    assert.equal(await command('data get entity Claude Inventory'), beforeAssess); assert.equal(integerField(await command('data get entity Claude SelectedItemSlot')), 0);
-  });
   await hungerFixture(); const beforeFood = await foodLevel();
   await phase('one-native-food', context + '使用eat-food消费主背包slot:11的一份安全面包，timeoutMs:10000。只吃一次，确认consumedCount:1且consumption:confirmed，不恢复旧工具，不再吃第二次。', ['eat-food'], async row => {
     const receipt = row.responses.map(value => value.value).find(value => value?.status === 'succeeded' && value.result?.consumedCount === 1 && value.result?.consumption === 'confirmed');

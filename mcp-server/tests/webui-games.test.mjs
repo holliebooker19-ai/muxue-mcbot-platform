@@ -82,7 +82,10 @@ test('写游戏配置：只改 server.json 的 username 和 port，其余字段�
     const server = path.join(dir, 'srv'); put(path.join(server, 'server.properties'), '');
     assert.equal(gameType(server), 'server'); assert.equal(gameType(dir), 'lan');
     writeGameConfig(server, { username: 'Claude' });
-    assert.equal(JSON.parse(fs.readFileSync(control(server, 'server.json'), 'utf8')).worldId, 'serverbody-validation', '和模组给服务器的默认一样');
+    const serverWorld = JSON.parse(fs.readFileSync(control(server, 'server.json'), 'utf8')).worldId;
+    assert.match(serverWorld, /^srv-[0-9a-f]{8}$/, '和模组给服务器的默认一样：每台服务器一个固定标识');
+    writeGameConfig(server, { username: 'Xiaojing' });
+    assert.equal(JSON.parse(fs.readFileSync(control(server, 'server.json'), 'utf8')).worldId, serverWorld, '已有的标识不改');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

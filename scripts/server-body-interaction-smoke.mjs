@@ -76,19 +76,20 @@ try{
   let discovery=await tool('discover-containers',{radius:8,maxResults:16});let target=discovery.candidates.find(c=>c.position.x===770);assert(target);
   const list=await terminal('container-list',{containerRef:target.containerRef});
   check('task container list excludes Bot diamonds',list.result.items.some(v=>v.item==='minecraft:oak_log'&&v.count===8)&&!list.result.items.some(v=>v.item==='minecraft:diamond'),list.result);
-  phase='fetch-and-give';const taskStartedAt=new Date().toISOString(),taskStarted=performance.now(),rpcStart=evidence.rpc.length,toolStart=evidence.toolCalls.length;
+  phase='withdraw-and-give';const taskStartedAt=new Date().toISOString(),taskStarted=performance.now(),rpcStart=evidence.rpc.length,toolStart=evidence.toolCalls.length;
   discovery=await tool('discover-containers',{centerPlayer:'C2Tester',radius:4,maxResults:8});target=discovery.candidates.find(c=>c.position.x===770);assert(target);
-  // TODO(ServerBody 合并)：fetch-and-give 已删。下面断言合成任务结果，拆成两步会改变测试内容，待决定。
-  const given=await terminal('fetch-and-give',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,player:'C2Tester',say:'我看看旁边的箱子。'});
-  evidence.task={operation:given,startedAt:taskStartedAt,ms:performance.now()-taskStarted,rpcCalls:evidence.rpc.length-rpcStart,mcpCalls:evidence.toolCalls.length-toolStart};
-  check('task confirms withdrew three dropped three without claiming pickup',given.result.withdrawnCount===3&&given.result.droppedCount===3&&given.result.heldCount===0&&given.result.pickup==='unconfirmed',given.result);
+  // fetch-and-give 10-12 删了：和模型一样先 container-withdraw，再 give-item
+  const withdrawn=await terminal('container-withdraw',{containerRef:target.containerRef,item:'minecraft:oak_log',count:3,say:'我看看旁边的箱子。'});
+  const given=await terminal('give-item',{player:'C2Tester',item:'minecraft:oak_log',count:3});
+  evidence.task={operation:{withdrawn,given},startedAt:taskStartedAt,ms:performance.now()-taskStarted,rpcCalls:evidence.rpc.length-rpcStart,mcpCalls:evidence.toolCalls.length-toolStart};
+  check('tasks confirm withdrew three dropped three without claiming pickup',withdrawn.result.withdrawnCount===3&&given.result.droppedCount===3&&given.result.pickup==='unconfirmed',{withdrawn:withdrawn.result,given:given.result});
   phase='authority-check';
   deadline=performance.now()+10000;let received=false;while(performance.now()<deadline){await peerCommand({type:'inventory'});await wait(350);received=(await peerEvents()).some(e=>e.type==='inventory'&&e.inventory.some(v=>v.name==='oak_log'&&v.count===3));if(received)break;}
   check('real specified test player inventory receives exactly three logs',received);
   evidence.task.peerInventoryConfirmationMs=performance.now()-taskStarted;
   const authority=await command('data get entity C2Tester Inventory');check('independent server player inventory confirms exact three logs',/minecraft:oak_log/.test(authority)&&/count: 3/.test(authority),{reply:authority});
   const chest=await command('data get block 770 201 768 Items');check('exact source remainder is five logs',/minecraft:oak_log/.test(chest)&&/count: 5/.test(chest),{reply:chest});
-  const inventory=(await tool('get-status', { include: ['inventory'] })).inventory;check('Bot diamonds conserved and cursor closed after composed task',inventory.filter(v=>v.id==='minecraft:diamond').reduce((a,v)=>a+v.count,0)===5&&(await tool('container-menu', { action: 'read', details:true}))===null);
+  const inventory=(await tool('get-status', { include: ['inventory'] })).inventory;check('Bot diamonds conserved and cursor closed after withdraw and give',inventory.filter(v=>v.id==='minecraft:diamond').reduce((a,v)=>a+v.count,0)===5&&(await tool('container-menu', { action: 'read', details:true}))===null);
   const chats=await peerEvents();check('task-supplied response arrived before confirmed drop',chats.some(v=>v.type==='chat'&&v.username==='Claude'&&v.message==='我看看旁边的箱子。'&&Date.parse(v.time)<=Date.parse(taskStartedAt)+evidence.task.ms));
   phase='safety-regression';
   await fixture(`item replace block 770 201 768 container.1 with minecraft:oak_log[minecraft:custom_name='${JSON.stringify({text:'variant probe'})}'] 2`);

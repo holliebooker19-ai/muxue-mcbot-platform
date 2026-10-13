@@ -196,9 +196,7 @@ try {
   });
   await scenario('wooden-pickaxe-refuses-iron', async () => {
     await arena('iron_ore', 1, 'minecraft:wooden_pickaxe');
-    // TODO(ServerBody 合并)：assess-tool 已删、没有直接替代，待决定删除或改写（不改会 unknown tool）。
-    const assessment = await tool('assess-tool', { x: 6010, y: 201, z: 6010, expectedBlock: 'minecraft:iron_ore', dropPreference: 'no_silk_touch' });
-    check('MC原生木镐铁矿资格为false', assessment.candidates.find(value => value.id === 'minecraft:wooden_pickaxe')?.eligible === false, assessment);
+    // assess-tool 10-12 起不再是模型工具（只在身体内部选工具用）；木镐资格看下面 gather 的 WRONG_TOOL
     const found = await scan('iron_ore'), floor = report.rpc.length;
     const op = await terminal('gather-resources', { resourceRef: found.resourceRef, item: 'minecraft:raw_iron', count: 1 });
     check('木镐拒绝且矿石未动／未发原生dig', (op.result?.code ?? op.code) === 'WRONG_TOOL' && digCalls(floor).length === 0 && await blockStill(positions[0], 'iron_ore') && await independentCount('raw_iron') === 0, op);

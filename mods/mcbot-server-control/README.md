@@ -18,6 +18,8 @@ Java 21 编译：`$env:JAVA_HOME='D:/Java/jdk-21'; ./gradlew.bat build`。产物
 }
 ```
 
+这是隔离服的配置。没有这个文件时模组自己建一个：单人世界的 `worldId` 是 `"auto"`（按存档文件夹区分），独立服务器是 `srv-` 加 8 位随机字符（10-13 起；以前写死 `serverbody-validation`，不同服务器会共用世界记忆）。已有的文件不改。
+
 端口被别的世界占用（例如客户端装了本模组、单人世界已经开着）时服务器照常启动，只在日志里报一行 `MCBOT local server control is off: port in use`，这时没有本地控制，换个 `port` 重启即可。
 
 默认 spawn 为 null，使用原版出生点。配置 spawn 仅无该 UUID 的玩家存档时生效，附着已存活角色不会传送。身份、世界与端口只由服务端配置指定，claim 不能任意更换角色或出生点。不要把配置身份设为 OP；存活可控判定、claim 和 respawn 都拒绝 OP，运行中加 OP 也会使旧控制失效。唯一例外是单人世界「对局域网开放＋允许作弊」给所有玩家的 OP（内置服务器没有出生点保护）。单人世界没开局域网时拒绝接管（`SINGLEPLAYER_NOT_LAN`），`worldId: "auto"` 按存档文件夹命名，见[单人模式](../../docs/singleplayer_design.md)。

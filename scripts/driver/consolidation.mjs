@@ -25,7 +25,7 @@ export function createConsolidation({ args, agentProtocol, memory, memoryAgentDi
 
   const floorMs = () => Math.max(0, args.consolidateFloorMinutes || 0) * 60000;
 
-  // 安排一轮整理记忆；没有没整理的日志、躺床离上次整理不够久就跳过
+  // 安排一轮整理记忆；没有没整理的日志、离上次整理不够久就跳过
   function request(reason) {
     const renewNow = () => {
       rotateDue = false;
@@ -69,7 +69,7 @@ export function createConsolidation({ args, agentProtocol, memory, memoryAgentDi
     const due = consolidationDue(reason, { consolidatedAt: status.consolidatedAt, pending: status.pending, now: Date.now(),
       floorMs: floorMs() });
     if (!due) {
-      info(`不用整理记忆（${reason}：没整理的日志 ${status.pending} 条${reason === 'sleep' ? `，躺床离上次整理不到 ${args.consolidateFloorMinutes} 分钟也不整理` : ''}）`);
+      info(`不用整理记忆（${reason}：没整理的日志 ${status.pending} 条，离上次整理不到 ${args.consolidateFloorMinutes} 分钟也不整理）`);
       return;
     }
     // 额度、登录问题暂停中：暂停结束再整理

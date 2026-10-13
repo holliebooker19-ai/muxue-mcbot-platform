@@ -7,6 +7,7 @@
 // - YSM 模型的显示名：读 config/yes_steve_model/custom/<模型>/ysm.json 的 metadata.name。
 // 连接文件里的令牌只用来问一次 hello，不返回给网页。
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -200,7 +201,8 @@ export function readGameConfig(dir) {
 }
 /**
  * 把配置里的 Bot 名和端口写进游戏目录的 server.json（模组开世界时读，世界开着时要退出重进才生效）。
- * 只改 username 和 port，其余字段原样保留；还没有文件就按模组的默认值建一个（单人 worldId 用 auto，按存档区分）。
+ * 只改 username 和 port，其余字段原样保留；还没有文件就按模组的默认值建一个（单人 worldId 用 auto，按存档区分；独立服务器的存档文件夹几乎都叫 world，
+ * 所以和模组 HostingRules.newServerWorldId 一样给一个固定的 srv- 加 8 位，各服务器的记忆不串）。
  */
 export function writeGameConfig(dir, { username, port } = {}) {
   if (!NAME_RE.test(String(username ?? ''))) return { ok: false, error: '游戏名仅可使用英文字母、数字和下划线，最多 16 个字符' };
@@ -209,7 +211,7 @@ export function writeGameConfig(dir, { username, port } = {}) {
   const control = path.join(String(dir), CONTROL_DIR), file = path.join(control, 'server.json');
   let data = readJson(file);
   if (fs.existsSync(file) && (!data || typeof data !== 'object' || Array.isArray(data))) return { ok: false, error: '游戏中的 server.json 无法读取，请先修复或删除该文件' };
-  data ||= { worldId: gameType(dir) === 'server' ? 'serverbody-validation' : 'auto', username, uuid: '9c6882e0-e80c-4c3e-8f20-8e3f42c738a1', port: p, spawn: null };
+  data ||= { worldId: gameType(dir) === 'server' ? `srv-${randomUUID().slice(0, 8)}` : 'auto', username, uuid: '9c6882e0-e80c-4c3e-8f20-8e3f42c738a1', port: p, spawn: null };
   if (data.username === username && data.port === p && fs.existsSync(file)) return { ok: true, changed: false };
   data.username = username; data.port = p;
   fs.mkdirSync(control, { recursive: true });

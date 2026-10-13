@@ -92,9 +92,10 @@ try {
   await fixture('tp C2Tester 2007.5 201 2012.5'); await wait(300);
   const containers = await tool('discover-containers', { radius: 6 });
   const target = containers.candidates.find(value => value.position.x === 2010 && value.position.z === 2014); assert(target);
-  // TODO(ServerBody 合并)：fetch-and-give 已删。下面断言合成任务的 withdrawnCount/droppedCount，拆成 container-withdraw＋give-item 两步会改变测试内容，待决定。
-  const given = await terminal('fetch-and-give', { containerRef: target.containerRef, item: 'minecraft:stone', stacks: 1, player: 'C2Tester' });
-  check('container one modified group transfers beyond atomic drop limit', given.status === 'succeeded' && given.result.withdrawnCount === 99 && given.result.droppedCount === 99, given);
+  // fetch-and-give 10-12 删了：先 container-withdraw 一整组（99），再 give-item 分批丢出
+  const withdrawn = await terminal('container-withdraw', { containerRef: target.containerRef, item: 'minecraft:stone', stacks: 1 });
+  const given = withdrawn.status === 'succeeded' ? await terminal('give-item', { player: 'C2Tester', item: 'minecraft:stone', count: 99 }) : withdrawn;
+  check('container one modified group transfers beyond atomic drop limit', withdrawn.status === 'succeeded' && withdrawn.result.withdrawnCount === 99 && given.status === 'succeeded' && given.result.droppedCount === 99, { withdrawn, given });
   await until(async () => { await send({ type: 'inventory' }); return peerEvents(); }, values => values.some(value => value.type === 'inventory' && value.inventory.some(item => item.name === 'stone' && item.count === 99)), 'Peer did not receive modified stack', 10000);
   check('specified player actually receives 99', /count: 99/.test(await command('data get entity C2Tester Inventory')));
 

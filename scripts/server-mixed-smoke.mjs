@@ -279,9 +279,10 @@ async function roundBody() {
     await wait(350); const found = await tool('discover-containers', { radius: 8, maxResults: 16 });
     const target = found.candidates.find(value => value.position.x === 2415 && value.position.y === 201 && value.position.z === 2422); assert(target, '没有发现指定夹具箱子');
     const floor = (await peerEvents()).length;
-    // TODO(ServerBody 合并)：fetch-and-give 已删。合成任务的结果与取消测试待改写。
-    const op = await terminal('fetch-and-give', { containerRef: target.containerRef, item: 'minecraft:oak_log', count: 3, player: 'C2Tester', say: `第${round}轮，我取三个原木给你。` });
-    check('容器任务确认取出／丢出各三，未编造玩家拾取', op.status === 'succeeded' && op.result?.withdrawnCount === 3 && op.result?.droppedCount === 3 && op.result?.pickup === 'unconfirmed', op);
+    // fetch-and-give 10-12 删了：和模型一样先 container-withdraw，再 give-item
+    const taken = await terminal('container-withdraw', { containerRef: target.containerRef, item: 'minecraft:oak_log', count: 3, say: `第${round}轮，我取三个原木给你。` });
+    const op = taken.status === 'succeeded' ? await terminal('give-item', { player: 'C2Tester', item: 'minecraft:oak_log', count: 3 }) : taken;
+    check('容器任务确认取出／丢出各三，未编造玩家拾取', taken.status === 'succeeded' && taken.result?.withdrawnCount === 3 && op.status === 'succeeded' && op.result?.droppedCount === 3 && op.result?.pickup === 'unconfirmed', { taken, op });
     await until(async () => { await send({ type: 'inventory' }); return peerEvents(); }, rows => rows.slice(floor).some(row => row.type === 'inventory' && row.inventory.some(item => item.name === 'oak_log' && item.count === 3)), '指定玩家未实收三个原木', 12000);
     const chest = await command('data get block 2415 201 2422 Items'), received = await command('data get entity C2Tester Inventory');
     check('独立服务端核对箱子剩五／玩家收到三', chest.includes('minecraft:oak_log') && /count: 5(?:[,}])/.test(chest) && received.includes('minecraft:oak_log') && /count: 3(?:[,}])/.test(received), { chest, received });
@@ -296,20 +297,19 @@ async function roundBody() {
     const target = found.candidates.find(value => value.position.x === 2430 && value.position.y === 201 && value.position.z === 2422); assert(target, '未发现远处取消夹具箱子');
     const floor = evidence.rpc.length;
     // 容器任务调用要保持在途；先安装失败处理，避免取消响应变成未处理 rejection。
-    // TODO(ServerBody 合并)：fetch-and-give 已删。停止合成任务的测试待改写。
-    const oldPending = tool('fetch-and-give', { containerRef: target.containerRef, item: 'minecraft:oak_log', count: 48, player: 'C2Tester' }, true)
+    const oldPending = tool('container-withdraw', { containerRef: target.containerRef, item: 'minecraft:oak_log', count: 48 }, true)
       .then(value => ({ value }), error => ({ error }));
     const rows = await until(async () => evidence.rpc.slice(floor), values => values.some(row => row.method === 'act' && row.action === 'approach-container' && row.ok && row.status === 'running'), '容器任务未受理走近箱子的原生动作');
     const oldGeneration = rows.find(row => row.method === 'act' && row.action === 'approach-container' && row.ok).controlGeneration;
     const stopAt = performance.now(); await tool('stop-action'); const stopConfirmed = stamp();
-    record('stop-confirmed', { oldTask: 'fetch-and-give', msSinceRequest: Math.round(performance.now() - stopAt) });
+    record('stop-confirmed', { oldTask: 'container-withdraw', msSinceRequest: Math.round(performance.now() - stopAt) });
     const [fresh, immediate] = await Promise.all([tool('collect-items', { item: 'minecraft:dirt', count: 1, radius: 6 }, true), motionSample()]);
     record('container-stop-immediate-motion', { sample: immediate });
     const first = await terminal('collect-items', { item: 'minecraft:dirt', count: 1, radius: 6 }, fresh);
     const oldReply = await oldPending;
     if (oldReply.error) throw oldReply.error;
-    // TODO(ServerBody 合并)：cancelled-fetch-and-give 不是注册的工具名，待改写。
-    const cancelled = await terminal('cancelled-fetch-and-give', {}, oldReply.value);
+    // 第三个参数给了在途的操作：只等它结束，名字只是记录用的标签
+    const cancelled = await terminal('cancelled-container-withdraw', {}, oldReply.value);
     check('真实在途容器任务 stop 后 cancelled', cancelled.status === 'cancelled', cancelled);
     check('容器 stop 确认后首个新有限任务成功（R4 不重试）', first.status === 'succeeded' && first.result?.pickedUpCount === 1, first);
     const after = await command('data get block 2430 201 2422 Items');
