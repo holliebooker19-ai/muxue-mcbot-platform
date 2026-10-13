@@ -631,7 +631,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - 开关：`<记忆目录>/<游戏名小写>/persona.md` 存在才开；没有记忆目录或人设时运行端不记日志、不发布记忆工具，驱动器提示词里没有【长期记忆】，行为和以前一样（交接单照旧，它只用运行端的状态文件）。运行端只在 `--hosted` 且 `hello.backend` 为 `server` 时记日志，开发时直接起的 MCP、`--respawn-only` 都不记。
 - 记忆代码：旧 `mcp-server/src/memory.ts` 搬到 `client-runtime/src/memory.ts`（`MemoryStore`），旧路径只剩一行转出，Mineflayer 旧路径照用。上限在 `client-runtime/memory-limits.json`（各段字数沿用旧 `SECTION_LIMITS`、开局列多少条日志、写锁时长），运行端、驱动器、WebUI 读同一份。
 - 归属（10-13 起按世界隔离）：
-  - 只属于一个世界：约定和想做的事 `goals.md`、最近几天 `digest.md`、日志 `journal/`、整理进度 `state.json`，放在 `<游戏名小写>/worlds/<世界标识>/`；世界现状 `shared/worlds/<世界标识>.md`，同一世界的角色共用。世界标识的转义同地点簿。换了世界，开局加载、`memory-recall`、整理都只看这个世界的，不会提别的世界的家、去兑现别的世界的约定。
+  - 只属于一个世界：约定和想做的事 `goals.md`、最近几天 `digest.md`、日志 `journal/`、整理进度 `state.json`，放在 `<游戏名小写>/worlds/<世界标识>/`；世界现状 `shared/worlds/<世界标识>.md`，同一世界的角色共用。世界标识的转义在地点簿的基础上（Windows 不能用的字符转成 `%xx`）再转义 `.` 和 `..`、结尾的点和空格、Windows 保留设备名（CON、NUL、COM1 等，转义第一个字母），免得手写的 `worldId` 让目录落到上层；正常的标识（`sp-新的世界`、`srv-1a2b3c4d`）转义结果不变，运行端和驱动器各有一份规则，测试对一批输入比较两边。换了世界，开局加载、`memory-recall`、整理都只看这个世界的，不会提别的世界的家、去兑现别的世界的约定。
   - 所有世界共用：人设 `persona.md`、回忆 `bonds.md`（`<游戏名小写>/`）、玩家档案 `shared/players/<玩家>.md`（各角色也共用）。整理写进回忆和玩家档案的每一行，依据前自动加上世界标识，比如 `〔sp-家园 2026-10-12#3〕`。
   - 旧 Mineflayer 路径没有世界标识，仍是原来的不分世界写法：都在 `<角色>/` 下，世界现状 `shared/world.md`。
 - 自动日志：运行端从事件里记聊天（Bot 自己说的话以服务端确认的 `self_chat` 为准，`since()` 不返回它，不叫醒模型）、进服、断开、死亡（`hello.lastDeath`，按时刻去重，只记一次）、收到的东西、睡觉（Bot 从醒到睡发一条 `sleep` 事件）、玩家上下线（有 `far-players` 时按附近实体加 `farPlayers` 比较，接管时的第一次只当基准，发 `player_joined`／`player_left`，不叫醒模型），任务按工具表里 `task` 类的结束回执记一句。挑什么记沿用旧 `journalLineFor`。

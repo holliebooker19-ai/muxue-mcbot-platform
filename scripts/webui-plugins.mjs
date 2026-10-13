@@ -340,7 +340,7 @@ export async function applyPlugin(gameDir, id, action, { catalog = loadCatalog()
   if (busyAgain) return { ok: false, error: busyAgain };
   progress({ phase: 'files' });
   const mods = path.join(gameDir, 'mods'), backup = path.join(gameDir, 'mcbot-backups', stamp(now));
-  const moved = [], added = [], configs = [];
+  const moved = [], added = [], configs = [], tmps = [];
   const all = [...catalog.plugins, catalog.core];
   try {
     for (const s of plan.steps) {
@@ -354,6 +354,7 @@ export async function applyPlugin(gameDir, id, action, { catalog = loadCatalog()
         fs.mkdirSync(mods, { recursive: true });
         const dest = path.join(mods, s.file);
         if (fs.existsSync(dest)) { fs.mkdirSync(path.join(backup, 'mods'), { recursive: true }); fs.renameSync(dest, path.join(backup, 'mods', s.file)); moved.push(s.file); }
+        tmps.push(`${dest}.tmp`);
         fs.copyFileSync(src, `${dest}.tmp`); fs.renameSync(`${dest}.tmp`, dest);
         added.push(s.file);
       } else if (s.op === 'config') {
@@ -364,14 +365,26 @@ export async function applyPlugin(gameDir, id, action, { catalog = loadCatalog()
       }
     }
   } catch (e) {
-    for (const f of added) { try { fs.rmSync(path.join(mods, f), { force: true }); } catch { /* 尽量 */ } }
-    for (const f of moved) { try { fs.renameSync(path.join(backup, 'mods', f), path.join(mods, f)); } catch { /* 留在备份里 */ } }
+    // 回滚每一步都可能失败（Windows 上文件被游戏占用时尤其常见）：失败的记下来，没全部恢复就不能说“已恢复原状”
+    const failed = [];
+    const stuckNew = new Map();
+    for (const tmp of tmps) { try { fs.rmSync(tmp, { force: true }); } catch { /* 半截的临时文件不是 .jar，留着不会被游戏加载 */ } }
+    for (const f of added) {
+      try { fs.rmSync(path.join(mods, f), { force: true }); } catch { stuckNew.set(f, { file: `mods/${f}`, fix: 'delete' }); }
+    }
+    for (const f of moved) {
+      try { fs.renameSync(path.join(backup, 'mods', f), path.join(mods, f)); stuckNew.delete(f); } catch { failed.push({ file: `mods/${f}`, fix: 'restore' }); }
+    }
+    failed.push(...stuckNew.values());
     if (configs.length) {
       const file = path.join(gameDir, ITEM_HANDLERS);
-      try { if (configs[0]) fs.copyFileSync(path.join(backup, ITEM_HANDLERS), file); else fs.rmSync(file, { force: true }); } catch { /* 留在备份里 */ }
+      try { if (configs[0]) fs.copyFileSync(path.join(backup, ITEM_HANDLERS), file); else fs.rmSync(file, { force: true }); } catch { failed.push({ file: ITEM_HANDLERS.split(path.sep).join('/'), fix: configs[0] ? 'restore' : 'delete' }); }
     }
     const busy = ['EBUSY', 'EPERM', 'EACCES'].includes(e.code);
-    return { ok: false, error: busy ? '文件被占用：请完全关闭游戏或服务器后重试' : e.message, rolledBack: true };
+    const out = { ok: false, error: busy ? '文件被占用：请完全关闭游戏或服务器后重试' : e.message, rolledBack: !failed.length };
+    // 没恢复的文件和备份目录一起交给用户手动处理：fix 为 restore 是把备份里的同名文件放回游戏目录，delete 是删掉游戏目录里多出的新文件
+    if (failed.length) Object.assign(out, { rollbackFailed: failed, backup });
+    return out;
   }
   const backedUp = moved.length || configs.some(Boolean);
   return { ok: true, id, action, name: plan.name, notes: plan.notes, backup: backedUp ? backup : '' };

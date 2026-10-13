@@ -12,6 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LIMITS = JSON.parse(fs.readFileSync(path.join(ROOT, 'client-runtime', 'memory-limits.json'), 'utf8'));
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const JOURNAL_LINE_RE = /^- \d{2}:\d{2} /;
+const CURSOR_RE = /^(\d{4}-\d{2}-\d{2})#(\d+)$/;
 const SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
 const AGENT_SECTIONS = [['bonds', '回忆'], ['goals', '约定和想做的事'], ['digest', '最近几天']];
 /** 按世界放的段（MemoryStore.sectionFile）；回忆不分世界。 */
@@ -123,7 +124,28 @@ export function deleteLine(opts, id, line, text, env = {}) {
   });
 }
 
-/** 删某一天的日志文件；先备份。整理进度（state.json）不动：别的日子的游标不受影响。 */
+/**
+ * 整理游标（state.json 的 through，形如 2026-10-13#3，client-runtime/src/memory.ts）按“当天第几条”数日志。
+ * 游标正好在被删的那天时，当天之后新写的日志会从 1 重新编号，编号不大于游标的都会被当成已整理；
+ * 所以把游标退到那天的 #0（运行端 parseCursor 和驱动器 memoryStatus 都认，那天的日志全算没整理，更早的日子仍算已整理）。
+ * 游标在别的日子时不用动。返回有没有改。
+ */
+function rewindCursor(stateFile, date) {
+  let state;
+  try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return false; }
+  const hit = typeof state?.through === 'string' ? CURSOR_RE.exec(state.through) : null;
+  if (!hit || hit[1] !== date) return false;
+  const tmp = `${stateFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ ...state, through: `${date}#0` }) + '\n');
+  fs.renameSync(tmp, stateFile);
+  return true;
+}
+
+/**
+ * 删某一天的日志文件；先备份，整理游标在这一天时退到 #0（见 rewindCursor）。
+ * 在写锁里先把文件改名移开，再从移开的文件读、备份、删：运行端追加日志不拿锁，
+ * 如果读了再删，读之后追加的那一行既不在备份里、又随文件一起没了。改名之后运行端再追加会新建当天的文件，这是正常的。
+ */
 export function deleteDay(opts, date, env = {}, world = '') {
   const p = memoryPaths(opts, env);
   if (!p.ok) return p;
@@ -131,9 +153,19 @@ export function deleteDay(opts, date, env = {}, world = '') {
   const dir = journalDir(p, world);
   if (!dir) return { ok: false, error: '未找到该世界的记忆' };
   const file = path.join(dir, `${date}.md`);
-  const old = read(file);
-  if (old === null) return { ok: false, error: '未找到该日的日志' };
-  const saved = backup(p, world ? `journal-${world}-${date}` : `journal-${date}`, old);
-  fs.rmSync(file, { force: true });
-  return { ok: true, backup: saved };
+  return withLock(p, () => {
+    const moved = `${file}.deleting-${process.pid}-${Date.now()}`;
+    try { fs.renameSync(file, moved); } catch (e) {
+      return { ok: false, error: e.code === 'ENOENT' ? '未找到该日的日志' : `无法移开该日的日志（${e.code || e.message}），请稍后重试` };
+    }
+    let saved;
+    try { saved = backup(p, world ? `journal-${world}-${date}` : `journal-${date}`, fs.readFileSync(moved, 'utf8')); } catch (e) {
+      // 备份没做成就不删：能放回原处就放回，运行端已经新建了当天的文件就留在移开的位置，并告诉用户
+      if (!fs.existsSync(file)) { try { fs.renameSync(moved, file); return { ok: false, error: `备份失败（${e.code || e.message}），日志未删除` }; } catch { /* 下面说明留在哪 */ } }
+      return { ok: false, error: `备份失败（${e.code || e.message}），日志未删除，原文件留在 ${moved}` };
+    }
+    const rewound = rewindCursor(path.join(path.dirname(dir), 'state.json'), date);
+    fs.rmSync(moved, { force: true });
+    return { ok: true, backup: saved, cursorRewound: rewound };
+  });
 }

@@ -164,6 +164,45 @@ test('安装出问题：游戏开着不改、下载大小不对不用、放文�
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('回滚本身失败（Windows 上文件被占用）：不说已恢复原状，列出没恢复的文件和备份目录；回滚成功才是 rolledBack', async () => {
+  const f = fixture(), game = path.join(f.root, 'inst');
+  const opts = { catalog: f.catalog, downloads: f.downloads, fetchImpl: f.fetchImpl, online: async () => false, listProcesses: async () => [] };
+  const core = 'mcbot-server-control-0.1.0.jar', realRename = fs.renameSync, realRm = fs.rmSync;
+  const busy = (code) => Object.assign(new Error(code), { code });
+  try {
+    const old = modJar('mcbot_server_control', '0.1.0');
+    put(path.join(game, 'mods', core), old);
+    // 计划算好后包里的适配 jar 不见了：旧核心已移进备份、新核心已复制进 mods，第三步出错要回滚
+    fs.rmSync(path.join(f.root, 'mods/mcbot-kaleidoscope-cookery/build/libs/mcbot-kaleidoscope-cookery-0.1.0.jar'));
+    // 放回备份里的旧核心时被占用
+    fs.renameSync = function (from, to) { if (String(from).includes('mcbot-backups')) throw busy('EBUSY'); return realRename.call(this, from, to); };
+    const r = await applyPlugin(game, 'kaleidoscope_cookery', 'install', opts);
+    fs.renameSync = realRename;
+    assert.equal(r.ok, false); assert.equal(r.rolledBack, false, '没全部恢复，不能说已恢复原状');
+    assert.deepEqual(r.rollbackFailed, [{ file: `mods/${core}`, fix: 'restore' }]);
+    assert.match(r.backup, /mcbot-backups[\\/]\d{8}-\d{6}$/);
+    assert.ok(fs.readFileSync(path.join(r.backup, 'mods', core)).equals(old), '旧核心还在备份目录里，用户可以手动放回');
+    assert.deepEqual(fs.existsSync(path.join(game, 'mods', core)), false, '新复制的核心已经拿掉了，mods 里没有半装的文件');
+    fs.rmSync(r.backup, { recursive: true, force: true });
+
+    // 拿掉新文件时被占用，但旧文件放回去时把它覆盖掉了：恢复成功
+    put(path.join(game, 'mods', core), old);
+    fs.rmSync = function (file, ...rest) { if (String(file) === path.join(game, 'mods', core)) throw busy('EPERM'); return realRm.call(this, file, ...rest); };
+    const covered = await applyPlugin(game, 'kaleidoscope_cookery', 'install', { ...opts, now: new Date('2026-10-13T01:00:00Z') });
+    fs.rmSync = realRm;
+    assert.equal(covered.ok, false); assert.equal(covered.rolledBack, true); assert.equal(covered.rollbackFailed, undefined);
+    assert.ok(fs.readFileSync(path.join(game, 'mods', core)).equals(old), '旧核心放回来了');
+
+    // 两步都失败：新文件拿不掉、旧文件放不回，两件都要用户处理
+    fs.rmSync = function (file, ...rest) { if (String(file) === path.join(game, 'mods', core)) throw busy('EPERM'); return realRm.call(this, file, ...rest); };
+    fs.renameSync = function (from, to) { if (String(from).includes('mcbot-backups')) throw busy('EBUSY'); return realRename.call(this, from, to); };
+    const both = await applyPlugin(game, 'kaleidoscope_cookery', 'install', { ...opts, now: new Date('2026-10-13T02:00:00Z') });
+    fs.rmSync = realRm; fs.renameSync = realRename;
+    assert.equal(both.rolledBack, false);
+    assert.deepEqual(both.rollbackFailed, [{ file: `mods/${core}`, fix: 'restore' }, { file: `mods/${core}`, fix: 'delete' }]);
+  } finally { fs.renameSync = realRename; fs.rmSync = realRm; fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('核心是所有插件的依赖：干净目录里内置适配和配置类插件也一并安装核心，核心缺失时不显示为已安装', async () => {
   const f = fixture(), game = path.join(f.root, 'clean');
   try {

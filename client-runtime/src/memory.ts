@@ -124,9 +124,18 @@ export function parseWhen(text: string, endOfDay = false): number {
 export function worldFileName(worldId: string): string {
   return `${worldKey(worldId)}.md`;
 }
-/** 世界标识做文件名、目录名时的写法（见 worldFileName）。按世界放的记忆目录 <agent>/worlds/<这个>/ 也用它。 */
+/**
+ * 世界标识做文件名、目录名时的写法（见 worldFileName）。按世界放的记忆目录 <agent>/worlds/<这个>/ 也用它。
+ * 除了 Windows 不能用的字符，还转义三种会让路径落到别处或根本建不出来的写法：整个名字是 . 或 ..（结尾的点和空格 Windows 会悄悄去掉，
+ * 所以结尾的每个点、空格都转义）、保留设备名（CON、NUL、COM1、LPT1 等，点号前面的部分也算，所以 NUL.md 同样不行；转义第一个字母）。
+ * 正常的标识（sp-新的世界、srv-1a2b3c4d）转义结果不变。驱动器 scripts/driver/memory.mjs 的 worldKey 必须保持一致（测试对一批输入比较两边）。
+ */
 export function worldKey(worldId: string): string {
-  return `${worldId.replace(/[%<>:"/\\|?*\u0000-\u001f]/g, c => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'))}`;
+  const escape = (c: string) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0');
+  let key = worldId.replace(/[%<>:"/\\|?*\u0000-\u001f]/g, escape);
+  key = key.replace(/[. ]+$/, run => [...run].map(escape).join(''));
+  if (/^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])$/i.test(key.split('.')[0].replace(/ +$/, ''))) key = escape(key[0]) + key.slice(1);
+  return key;
 }
 
 /** 整理时一条改动：新增、更新（按 memory-context 里的行号）、删除；没提到的就是不动。 */
