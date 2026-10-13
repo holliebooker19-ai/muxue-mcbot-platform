@@ -14,7 +14,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const ENTRIES = ['webui.mjs', 'start-server-play.mjs', 'companion.mjs'];
 // client-runtime 里随包带的文件（dist 和运行依赖另外处理）；scripts 按文件读的 JSON（工具表、叫停词、记忆上限、托管时长）都要列在这里，不然绿色版启动就报缺文件
 export const RUNTIME_FILES = ['package.json', 'package-lock.json', 'README.md', 'tool-registry.json', 'player-stop.json', 'memory-limits.json', 'host-timing.json'];
-export const ASSETS =['webui-page.html'];
+export const ASSETS = ['webui-page.html'];
 const TOP_FILES = ['compat.json', 'LICENSE', 'NOTICE', 'CLAUDE.md'];
 
 /** 默认用 runtime/node-dist 里解压好的官方 Node（版本最新的那个）；没有就用当前的 Node。 */

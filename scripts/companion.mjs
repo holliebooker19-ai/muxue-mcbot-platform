@@ -97,7 +97,7 @@ function main() {
   const pause = createPause();
   // 会话：对话 ID、上次请求、上下文大小、上次叫停（session-<名字>.json）
   const conversation = createSession({ file: F.session, provider: config.provider, configDir: config.configDir, model: args.model, bodyScope: config.bodyScope,
-    resumeWindowMs: config.resumeWindowMs, keepStop: agentProtocol.identity === 'independent' || args.body === 'server', info, onCompaction: () => heartbeat.beat() });
+    resumeWindowMs: config.resumeWindowMs, keepStop: agentProtocol.identity === 'independent' || args.body === 'server', info, onCompaction: () => { heartbeat.beat(); inbox.compacted(); } });
   // Agent 进程（连同它的 MCP 服务端）
   const agent = createAgentProcess({ args, agentProtocol, log, notifyGame, conversation, instructions: config.serverInstructions,
     hostedConfigFile: () => hosted.hostedConfigFile, hostedServer: () => hosted.hostedServer, shuttingDown: () => lifecycle.shuttingDown, botLockFile: F.botLock,

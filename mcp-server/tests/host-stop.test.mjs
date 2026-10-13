@@ -9,6 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { isAddressedStop, runtimeFiles, stopFollowup, readSessionState, buildHandoff } from '../../scripts/companion.mjs';
 import { createServerBodyControl } from '../../scripts/server-body-control.mjs';
+import { createInbox } from '../../scripts/driver/inbox.mjs';
 import { EventStore } from '../dist/event-store.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -599,4 +600,18 @@ test('宿主 --reconnect：身体断开（游戏关了或角色死了）就以 7
     if (driver.exitCode === null) driver.kill('SIGKILL');
     await exited; await f.close();
   }
+});
+
+test('停止记录：同一次叫停只附一次；上下文压缩后、Agent 重新启动后、这一轮被原样重送时再附一次', () => {
+  const inbox = createInbox({ args: { body: 'server', headless: true }, agentProtocol: {}, flush: () => {} });
+  const turn = () => inbox.takeTurn('', { lastStopAt: 1000, session: 's', markDelivered: () => {} });
+  assert.match(turn(), /停止记录/);
+  assert.doesNotMatch(turn(), /停止记录/, '同一次不每轮都附');
+  inbox.compacted();
+  assert.match(turn(), /停止记录/, '压缩后模型可能忘了，再附一次');
+  assert.doesNotMatch(turn(), /停止记录/);
+  inbox.agentStarted();
+  assert.match(turn(), /停止记录/, '新的 Agent 进程');
+  inbox.finishTurn({ requeue: true });
+  assert.match(turn(), /停止记录/, '额度／登录重送的那一轮等于没送到');
 });

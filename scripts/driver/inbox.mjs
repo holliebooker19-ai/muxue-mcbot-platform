@@ -80,6 +80,8 @@ export function createInbox({ args, agentProtocol, flush }) {
     respawn(note) { respawnNote = note; },
     /** 启动了新的 Agent 进程（新会话或接着旧会话）：上次叫停的【停止记录】在它的第一轮普通对话里再附一次 */
     agentStarted() { toldStopAt = 0; },
+    /** 上下文压缩过：模型可能已不记得上次叫停，【停止记录】下一轮再附一次 */
+    compacted() { toldStopAt = 0; },
     /** 叫停后重新启动 Agent：新会话、交接单、重启说明都不再带 */
     forgetSessionNotes() {
       newSessionNote = '';
