@@ -123,6 +123,7 @@ async function main(): Promise<void> {
     if (closing) { await body.close(); return; }
     if (values.appearance) await applyAppearance(body, values.appearance);
     events = new EventJournal(values.hosted ? runtimeDir : undefined, values.username, values['bot-players']!.split(',').filter(Boolean), lease?.chatCursor);
+    events.worldId = values['world-id'];
     const places = new PlaceBook(runtimeDir, values['world-id']);
     events.useHome(() => places.home());
     // Items a player throws to the body wake the model (gift-receipts); without it receipts carry no thrower.
@@ -143,8 +144,8 @@ async function main(): Promise<void> {
     let held: HeldPosture | null = null;
     if (companion && values.hosted) {
       const postureFile = path.join(runtimeDir, `posture-${values.username}.json`);
-      if (body.hello.capabilities.includes('server-posture')) held = takeHeldPosture(postureFile, path.join(runtimeDir, `session-${values.username}.json`));
-      companion.onPosture = writePosture(postureFile);
+      if (body.hello.capabilities.includes('server-posture')) held = takeHeldPosture(postureFile, path.join(runtimeDir, `session-${values.username}.json`), Date.now(), values['world-id']);
+      companion.onPosture = writePosture(postureFile, Date.now, values['world-id']);
     }
     const tasks = new ContainerTasks(body, Date.now, operation => events!.deliverOperation(operation));
     const survival = ['survival-state', 'swap-inventory', 'eat-item'].every(cap => body!.hello.capabilities.includes(cap)) ? new SurvivalTasks(body, Date.now, operation => events!.recordOperation(operation)) : undefined;

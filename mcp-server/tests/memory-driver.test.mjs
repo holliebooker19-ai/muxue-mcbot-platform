@@ -64,16 +64,17 @@ function playDir(api, { persona = true } = {}) {
     const now = new Date();
     fs.writeFileSync(path.join(worldDir, 'journal', `${dateOf(now)}.md`), `# ${dateOf(now)}\n\n- ${two(now.getHours())}:${two(now.getMinutes())} tester: 我们去砍树吧\n`);
   }
-  // 上次托管留下的记录：模型调过的任务、运行端记的结果、跟随状态、聊天
-  const F = runtimeFiles(runtime, 'ServerTest'), t0 = Date.now() - 10 * 60000;
+  // 上次托管留下的记录：模型调过的任务、运行端记的结果、跟随状态、聊天（都标着这个世界 world-a；更早一条是别的世界的）
+  const F = runtimeFiles(runtime, 'ServerTest'), t0 = Date.now() - 10 * 60000, world = 'world-a';
   fs.writeFileSync(F.activity, [
-    { t: t0, kind: 'event', type: 'chat', text: 'tester: 小克帮我砍 64 个原木', from: 'tester' },
-    { t: t0 + 1000, kind: 'tool', name: 'gather-resources', input: '{"item":"minecraft:oak_log","count":64}' },
-    { t: t0 + 2000, kind: 'event', type: 'self_chat', text: '好，这就去砍' },
-    { t: t0 + 3000, kind: 'tool', name: 'discover-resources', input: '{"blockIds":["#minecraft:logs"]}' },
+    { t: t0 - 5000, world: 'world-b', kind: 'event', type: 'chat', text: 'tester: 别的世界的话', from: 'tester' },
+    { t: t0, world, kind: 'event', type: 'chat', text: 'tester: 小克帮我砍 64 个原木', from: 'tester' },
+    { t: t0 + 1000, world, kind: 'tool', name: 'gather-resources', input: '{"item":"minecraft:oak_log","count":64}' },
+    { t: t0 + 2000, world, kind: 'event', type: 'self_chat', text: '好，这就去砍' },
+    { t: t0 + 3000, world, kind: 'tool', name: 'discover-resources', input: '{"blockIds":["#minecraft:logs"]}' },
   ].map((x) => JSON.stringify(x)).join('\n') + '\n');
-  fs.writeFileSync(path.join(runtime, 'operations-ServerTest.jsonl'), JSON.stringify({ session: 'old', timestamp: t0 + 60000, operation: { operationId: 'op', name: 'gather-resources', status: 'cancelled', summary: '捡到 40 个 oak_log，被打断' } }) + '\n');
-  fs.writeFileSync(F.posture, JSON.stringify({ action: 'follow', player: 'tester', guard: true, at: t0 + 90000 }));
+  fs.writeFileSync(path.join(runtime, 'operations-ServerTest.jsonl'), JSON.stringify({ session: 'old', timestamp: t0 + 60000, world, operation: { operationId: 'op', name: 'gather-resources', status: 'cancelled', summary: '捡到 40 个 oak_log，被打断' } }) + '\n');
+  fs.writeFileSync(F.posture, JSON.stringify({ action: 'follow', player: 'tester', guard: true, at: t0 + 90000, world }));
   return { dir, runtime, configFile, memory, agentDir, worldDir, F };
 }
 
@@ -110,6 +111,7 @@ for (const agent of ['claude', 'codex', 'dsh']) test(`ServerBody 记忆/${agent}
     assert.doesNotMatch(startup.text, /discover-resources/, '查询类不算任务');
     assert.match(startup.text, /陪伴：跟着 tester，保护开着/);
     assert.match(startup.text, /\d\d:\d\d tester: 小克帮我砍 64 个原木\n\s+\d\d:\d\d 你: 好，这就去砍/);
+    assert.doesNotMatch(startup.text, /别的世界的话/, '交接单只拿这个世界的记录');
     assert.match(startup.text, /本轮只确认准备好并结束/);
     // ② 常驻档案在系统提示里（Claude：--append-system-prompt；Codex：developerInstructions；dsh 的补丁见下面的单元测试）
     const playing = d.log().find((r) => r.kind === 'start' || r.kind === 'thread');
@@ -222,6 +224,30 @@ test('交接单：只写记录里有的事；叫停之前的任务标已取消�
     const noStop = buildHandoff({ activityFile, operationsFile, postureFile, now, chatLines: 2 });
     assert.match(noStop, /最多 2 句/); assert.doesNotMatch(noStop, /昨天的话/, '只列最后几句');
     assert.match(buildHandoff({ activityFile, operationsFile, postureFile, now, chatLines: 15 }), /2026-10-11 20:50 tester: 昨天的话/, '别的日子带日期');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('交接单按世界：换了世界不带上个世界的任务、结果、陪伴和聊天；没标世界的旧记录也不拿', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcbot-memory-driver-'));
+  try {
+    const activityFile = path.join(dir, 'a.jsonl'), operationsFile = path.join(dir, 'o.jsonl'), postureFile = path.join(dir, 'p.json');
+    const now = new Date(2026, 9, 13, 18, 0).getTime();
+    fs.writeFileSync(activityFile, [
+      { t: now - 90000, kind: 'event', type: 'chat', text: 'tester: 没标世界的旧话' },
+      { t: now - 80000, world: 'sp-old', kind: 'event', type: 'chat', text: 'tester: 去盖房子' },
+      { t: now - 70000, world: 'sp-old', kind: 'tool', name: 'build', input: '{"blueprint":"house"}' },
+      { t: now - 20000, world: 'sp-new', kind: 'event', type: 'chat', text: 'tester: 新世界你好' },
+    ].map((x) => JSON.stringify(x)).join('\n'));
+    fs.writeFileSync(operationsFile, JSON.stringify({ world: 'sp-old', timestamp: now - 60000, operation: { name: 'build', status: 'succeeded', summary: 'Built' } }) + '\n');
+    fs.writeFileSync(postureFile, JSON.stringify({ action: 'follow', player: 'tester', guard: true, at: now - 50000, world: 'sp-old' }));
+    const fresh = buildHandoff({ activityFile, operationsFile, postureFile, worldId: 'sp-new', now });
+    assert.match(fresh, /新世界你好/);
+    assert.doesNotMatch(fresh, /去盖房子|build|陪伴|没标世界的旧话/, '上个世界和没标世界的记录都不拿');
+    const back = buildHandoff({ activityFile, operationsFile, postureFile, worldId: 'sp-old', now });
+    assert.match(back, /最近的任务：17:58 build .*17:59 做完了：Built/);
+    assert.match(back, /陪伴：跟着 tester，保护开着/);
+    assert.doesNotMatch(back, /新世界你好/);
+    assert.equal(buildHandoff({ activityFile, operationsFile, postureFile, worldId: 'sp-other', now }), '', '这个世界什么都没有就是空的');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

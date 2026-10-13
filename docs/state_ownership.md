@@ -29,14 +29,14 @@
 | `companion-<名字>.json` 心跳 | 驱动器 `createHeartbeat`（`driver/lock.mjs:58`），字段 `pid`、`updatedAt`、`busy`、`compactions`（`scripts/companion.mjs:134`） | 运行端 `hostedHeartbeatFresh`（`client-runtime/src/lifecycle.ts:43`）判断托管还在；`hostedCompactions`（`lifecycle.ts:38`）看压缩次数；WebUI（`scripts/webui.mjs:51`）显示在线、思考中；驱动器 `lockHolder` | 驱动器退出时 `removeIfOwn` |
 | `companion-<名字>.lock` | 驱动器 `acquireLock` | 驱动器 | 驱动器 `releaseLock` |
 | `companion-<名字>.stop` / `.halt` | WebUI、`stop-companion.ps1` | 驱动器每 400 毫秒看一次（`checkMarkers`，`driver/lifecycle.mjs:108`）；`.stop` 也被 `start-server-play.mjs:180` 看 | 驱动器 |
-| `session-<名字>.json` 会话 | 驱动器 `save`（`driver/session.mjs:79`） | 驱动器 `readSessionState`；**运行端** `takeHeldPosture` 读其中的 `lastStopAt`（`client-runtime/src/posture.ts:42`，由 `main.ts:146` 传入路径）；WebUI | 没人删 |
-| `posture-<名字>.json` 姿态 | 运行端 `writePosture`（`posture.ts:8`，`main.ts:147` 挂到 `companion.onPosture`） | 运行端启动时 `takeHeldPosture`（`main.ts:146`，读完即删）；**驱动器** `buildHandoff`（`driver/handoff.mjs:43`） | 运行端（读完、明确结束时）；**驱动器** `stopServerAgent`（`driver/stop.mjs:139`）、`shutdown`（`driver/lifecycle.mjs:46`，不是等重连时） |
-| `events-<名字>.jsonl` 事件 | 运行端 `EventJournal`（`events.ts:68`），每个进程启动时原地清空重写 | 驱动器 `createEventReader().poll`（`driver/events.mjs:73`） | — |
-| `cursor-<名字>.txt` 已送达序号 | **驱动器** `markDelivered`（`driver/events.mjs:142`），由每一轮送出时（`driver/inbox.mjs:117`）、叫停撤销（`driver/stop.mjs:142`）、独立身份叫停（`driver/stop.mjs:187`）调用；运行端启动时清空（`events.ts:69`） | 运行端 `deliveredSeq`（`events.ts:296`），`wait-for-events` 不重复返回 | — |
-| `consumed-<名字>.txt` 模型自己读过的序号 | 运行端 `markConsumed`（`events.ts:303`） | 驱动器 `consumedSeq`（`driver/events.mjs:133`） | — |
-| `task-delivered-<名字>.json` 随工具结果送过的任务结果 | 运行端 `writeTaskReceipts`（`events.ts:94`） | 驱动器 `flush`（`driver/turns.mjs:232`）+ `taskAlreadyDelivered`（`driver/events.mjs:42`） | — |
-| `operations-<名字>.jsonl` 操作结果 | 运行端（`events.ts:122`） | 驱动器 `createServerHandoff`（`driver/handoff.mjs:56`） | — |
-| `activity-<名字>.jsonl` 活动记录 | 驱动器 `activity`（`driver/log.mjs:55`） | WebUI；驱动器 `buildHandoff`（自己的聊天、工具调用） | 启动时超过 5MB 轮转 |
+| `session-<名字>.json` 会话 | 驱动器 `save`（`driver/session.mjs:79`） | 驱动器 `readSessionState`；**运行端** `takeHeldPosture` 读其中的 `lastStopAt`（`client-runtime/src/posture.ts:44`，由 `main.ts:147` 传入路径）；WebUI | 没人删 |
+| `posture-<名字>.json` 姿态 | 运行端 `writePosture`（`posture.ts:8`，`main.ts:148` 挂到 `companion.onPosture`） | 运行端启动时 `takeHeldPosture`（`main.ts:147`，读完即删）；**驱动器** `buildHandoff`（`driver/handoff.mjs:45`） | 运行端（读完、明确结束时）；**驱动器** `stopServerAgent`（`driver/stop.mjs:139`）、`shutdown`（`driver/lifecycle.mjs:46`，不是等重连时） |
+| `events-<名字>.jsonl` 事件 | 运行端 `EventJournal`（`events.ts:70`），每个进程启动时原地清空重写 | 驱动器 `createEventReader().poll`（`driver/events.mjs:73`） | — |
+| `cursor-<名字>.txt` 已送达序号 | **驱动器** `markDelivered`（`driver/events.mjs:142`），由每一轮送出时（`driver/inbox.mjs:117`）、叫停撤销（`driver/stop.mjs:142`）、独立身份叫停（`driver/stop.mjs:187`）调用；运行端启动时清空（`events.ts:71`） | 运行端 `deliveredSeq`（`events.ts:298`），`wait-for-events` 不重复返回 | — |
+| `consumed-<名字>.txt` 模型自己读过的序号 | 运行端 `markConsumed`（`events.ts:305`） | 驱动器 `consumedSeq`（`driver/events.mjs:133`） | — |
+| `task-delivered-<名字>.json` 随工具结果送过的任务结果 | 运行端 `writeTaskReceipts`（`events.ts:96`） | 驱动器 `flush`（`driver/turns.mjs:232`）+ `taskAlreadyDelivered`（`driver/events.mjs:42`） | — |
+| `operations-<名字>.jsonl` 操作结果 | 运行端（`events.ts:124`） | 驱动器 `createServerHandoff`（`driver/handoff.mjs:58`） | — |
+| `activity-<名字>.jsonl` 活动记录 | 驱动器 `activity`（`driver/log.mjs:58`） | WebUI；驱动器 `buildHandoff`（自己的聊天、工具调用） | 启动时超过 5MB 轮转 |
 | `server-control-<名字>.json` 控制租约 | 运行端 `onLease`（`main.ts:114`） | 驱动器 `server-body-control.mjs:71` `capture`；`captureBodyArtifacts`（`driver/stop.mjs:66`） | 运行端 `removeControlFile`（`main.ts:73`）；**驱动器** `cleanupBodyArtifacts`（`driver/stop.mjs:81`，只在运行端进程已死、内容没变时） |
 | `client-body-<名字>.lock` 运行端锁 | 运行端 `acquireRuntimeLock`（`lifecycle.ts:16`） | 驱动器 `captureBodyArtifacts` | 运行端；**驱动器** `cleanupBodyArtifacts`（同上条件） |
 | `bot-<名字>.lock` | 旧 Mineflayer MCP 服务端 | 驱动器 `waitBotLockFree`（`driver/agent-process.mjs:183`） | 旧 MCP 服务端 |
@@ -49,14 +49,14 @@
 
 ### 1. 姿态文件 `posture-<名字>.json`
 
-- 现状：运行端写（`posture.ts:8`）、运行端启动时读并删（`posture.ts:31`，`main.ts:146`）。驱动器在两处删它：叫停撤销（`stopServerAgent`，`driver/stop.mjs:139`）和真正退出（`shutdown`，`driver/lifecycle.mjs:46`）；换会话时读它拼交接单（`buildHandoff`，`driver/handoff.mjs:42-48`）。活着的姿态还在服务端（`Posture.java`，属于租约）。
-- 重复：驱动器 `buildHandoff` 自己又校验了一遍记录（动作名、玩家名格式、`at > lastStopAt`，`driver/handoff.mjs:44`），和运行端 `takeHeldPosture`（`posture.ts:38-43`）是两份规则，而且**不一样**：运行端超过 `HELD_POSTURE_MAX_AGE_MS`（1 小时，`posture.ts:18`）的记录不接，驱动器的交接单不看时间，会写“能接上的话运行端会自己接上”。
-- 叫停时驱动器删文件，其实运行端已经按 `lastStopAt` 不接叫停前的记录（`posture.ts:43`），是双保险。
+- 现状：运行端写（`posture.ts:8`）、运行端启动时读并删（`posture.ts:32`，`main.ts:147`）。驱动器在两处删它：叫停撤销（`stopServerAgent`，`driver/stop.mjs:139`）和真正退出（`shutdown`，`driver/lifecycle.mjs:46`）；换会话时读它拼交接单（`buildHandoff`，`driver/handoff.mjs:44-50`）。活着的姿态还在服务端（`Posture.java`，属于租约）。
+- 重复：驱动器 `buildHandoff` 自己又校验了一遍记录（动作名、玩家名格式、`at > lastStopAt`，`driver/handoff.mjs:46`），和运行端 `takeHeldPosture`（`posture.ts:39-45`）是两份规则，而且**不一样**：运行端超过 `HELD_POSTURE_MAX_AGE_MS`（1 小时，`posture.ts:18`）的记录不接，驱动器的交接单不看时间，会写“能接上的话运行端会自己接上”。
+- 叫停时驱动器删文件，其实运行端已经按 `lastStopAt` 不接叫停前的记录（`posture.ts:45`），是双保险。
 - 应归：**运行端**。驱动器只读，不删、不判断能不能接。
 
 ### 2. 叫停时间 `lastStopAt` 有两套
 
-- 现状：驱动器的 `lastStopAt` 由会话持有（`createSession`，`driver/session.mjs:75`），写进 `session-<名字>.json`（`save`，`driver/session.mjs:79`），运行端读它判断姿态记录能不能接（`posture.ts:42`）。驱动器拿它写【停止记录】提示（`stopRecord`，`driver/prompts.mjs:161`，`driver/inbox.mjs:113`）和交接单的“已取消”（`buildHandoff`）。
+- 现状：驱动器的 `lastStopAt` 由会话持有（`createSession`，`driver/session.mjs:75`），写进 `session-<名字>.json`（`save`，`driver/session.mjs:79`），运行端读它判断姿态记录能不能接（`posture.ts:44`）。驱动器拿它写【停止记录】提示（`stopRecord`，`driver/prompts.mjs:161`，`driver/inbox.mjs:113`）和交接单的“已取消”（`buildHandoff`）。
 - 问题：驱动器只在**撤销控制**的叫停（`stopServerAgent`，`driver/stop.mjs:136`；WebUI 急停、运行端 10 秒没确认）和独立试玩身份叫停（`driver/stop.mjs:184`）时更新它。游戏里“停”由运行端原地停（`player-stop.ts:66`），驱动器收到 `player_stop` 只清计时器（`playerStopConfirmed`，`driver/stop.mjs:223`），**不更新** `lastStopAt`。所以原地取消之后换会话，交接单不会把被取消的任务标成“已取消”。
 - 应归：叫停的事实归**运行端**（它真正停了身体）；驱动器只读来写提示。会话文件里的 `lastStopAt` 是驱动器写给运行端看的跨层接口，现在先保留。
 
@@ -87,25 +87,25 @@
 
 ### 7. 心跳里的压缩次数
 
-- 驱动器数压缩次数（`compactions`，`driver/session.mjs:77`、`noteCompaction` `driver/session.mjs:144`）写进心跳；运行端读到变了就把玩法说明再给一次（`lifecycle.ts:38`、`guides.ts:59`、`main.ts:131`）。
+- 驱动器数压缩次数（`compactions`，`driver/session.mjs:77`、`noteCompaction` `driver/session.mjs:144`）写进心跳；运行端读到变了就把玩法说明再给一次（`lifecycle.ts:38`、`guides.ts:59`、`main.ts:132`）。
 - 这是有意的跨层信号，归**驱动器**写、运行端读，写清楚即可。
 
 ### 8. 记忆的路径和“没整理条数”算了两遍
 
 - 世界标识转义：驱动器 `worldKey`（`driver/memory.mjs:71`）和运行端 `worldKey`（`memory.ts:128`）。
 - 没整理的日志条数：驱动器 `memoryStatus`（`driver/memory.mjs:32`）按 `state.json` 的游标数日志，和运行端 `MemoryStore.unconsolidated`（`memory.ts:421`）同一算法。
-- 记忆开没开：驱动器看 `persona.md` 在不在（`driver/config.mjs:44-47`），运行端 `openMemory`（`main.ts:198`）再看一遍。
+- 记忆开没开：驱动器看 `persona.md` 在不在（`driver/config.mjs:44-47`），运行端 `openMemory`（`main.ts:199`）再看一遍。
 - 原因：驱动器不能 import `scripts/` 以外的模块（绿色版打包只带 `scripts/`、运行端的 dist，和运行端的几个 JSON：`tool-registry.json`、`player-stop.json`、`memory-limits.json`，驱动器也读它们）。
 - 应归：记忆数据归**运行端**。驱动器只需要“上次整理时间、还有几条没整理”，以后可以由运行端的 `--memory-only` 进程或一个状态文件给出，驱动器不再自己数。
 
 ### 9. 交接单读运行端的记录
 
-- `buildHandoff`（`driver/handoff.mjs:28`）读 `operations-<名字>.jsonl`（运行端）、`posture-<名字>.json`（运行端）、`activity-<名字>.jsonl`（驱动器），还读运行端的工具表 `client-runtime/tool-registry.json`（`driver/handoff.mjs:10`）判断哪个工具算任务、在服务端叫什么名字（`runsAs`）。
+- `buildHandoff`（`driver/handoff.mjs:29`）读 `operations-<名字>.jsonl`（运行端）、`posture-<名字>.json`（运行端）、`activity-<名字>.jsonl`（驱动器），还读运行端的工具表 `client-runtime/tool-registry.json`（`driver/handoff.mjs:10`）判断哪个工具算任务、在服务端叫什么名字（`runsAs`）。
 - 应归：事实归**运行端**，拼成给模型的文字归**驱动器**。可以接受；以后可以让运行端给一份“最近任务和姿态”的摘要，驱动器不再解析它的记录格式。
 
 ### 10. 事件送达用三个文件来回握手
 
-- 驱动器写 `cursor`（送到哪了），运行端写 `consumed`（模型自己用 `wait-for-events` 读到哪了）和 `task-delivered`（哪些任务结果已经随工具结果给过）。驱动器的 `deliveredSeq`（`driver/events.mjs:59`）和运行端的 `deliveredSeq()`（`events.ts:296`）是同一个数的两端。
+- 驱动器写 `cursor`（送到哪了），运行端写 `consumed`（模型自己用 `wait-for-events` 读到哪了）和 `task-delivered`（哪些任务结果已经随工具结果给过）。驱动器的 `deliveredSeq`（`driver/events.mjs:59`）和运行端的 `deliveredSeq()`（`events.ts:298`）是同一个数的两端。
 - 应归：这是两层之间的协议，不算重复。拆分后驱动器这一端都在 `createEventReader`（`driver/events.mjs`）里。
 
 ### 11. 驱动器替运行端清理控制文件

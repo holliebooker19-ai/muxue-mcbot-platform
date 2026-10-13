@@ -34,6 +34,20 @@ test('the paused/blocked mark is read back; a code that is not one of ours is dr
   assert.deepEqual(takeHeldPosture(file, session, now), { action: 'wait', guard: false, at: now }, 'an unknown state is no state');
 });
 
+test('a posture from another world, or one without a world, is not set again in this world', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'held-world-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'posture.json'), session = path.join(dir, 'session.json'), now = 10_000_000_000;
+  const write = writePosture(file, () => now, 'sp-home');
+  write({ action: 'follow', player: 'Alex', guard: true });
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).world, 'sp-home');
+  assert.equal(takeHeldPosture(file, session, now, 'sp-other'), null, 'another world');
+  assert.ok(!fs.existsSync(file), 'the record is taken either way');
+  write({ action: 'follow', player: 'Alex', guard: true });
+  assert.deepEqual(takeHeldPosture(file, session, now, 'sp-home'), { action: 'follow', player: 'Alex', guard: true, at: now });
+  fs.writeFileSync(file, JSON.stringify({ action: 'wait', guard: false, at: now }));
+  assert.equal(takeHeldPosture(file, session, now, 'sp-home'), null, 'a record without a world (older runtime) is not trusted');
+});
+
 // The standing posture (follow, wait, protect, sit) outlives a lost body so the next run can set it again; only an explicit end clears it.
 test('a follow, its guard setting, a wait and a seat are recorded once each, as they change', async t => {
   const f = await companionFixture(t);

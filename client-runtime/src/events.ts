@@ -57,6 +57,8 @@ export class EventJournal {
   private giftHandlerTimeoutMs = 8000;
   private gifts?: { windowMs: number; instance?: string; cursor?: number; pending: Map<string, PendingGift> };
   private guideBook?: GuideBook;
+  /** ServerBody world ID, written on every line of the operation trace: the driver's handoff only takes this world's lines. */
+  worldId?: string;
   constructor(runtimeDir?: string, private readonly username?: string, private readonly botPlayers: string[] = [], private readonly attachmentChatCursor?: number) {
     if (!runtimeDir || !username) return;
     fs.mkdirSync(runtimeDir, { recursive: true });
@@ -123,7 +125,7 @@ export class EventJournal {
       if (fs.existsSync(this.operationTraceFile) && fs.statSync(this.operationTraceFile).size > 5_000_000) {
         fs.renameSync(this.operationTraceFile, `${this.operationTraceFile}.previous`);
       }
-      fs.appendFileSync(this.operationTraceFile, JSON.stringify({ session: this.session, timestamp: Date.now(), operation }) + '\n');
+      fs.appendFileSync(this.operationTraceFile, JSON.stringify({ session: this.session, timestamp: Date.now(), ...(this.worldId ? { world: this.worldId } : {}), operation }) + '\n');
     }
   }
   notifyOperation(operation: Operation, compact = true): void {

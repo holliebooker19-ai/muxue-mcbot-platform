@@ -90,7 +90,7 @@ function main() {
   let hosted = { hostedConfigFile: '', hostedServer: null };
 
   fs.mkdirSync(runtimeDir, { recursive: true });
-  const log = createLog({ logFile: F.log, activityFile: F.activity });
+  const log = createLog({ logFile: F.log, activityFile: F.activity, world: args.body === 'server' ? config.worldId : '' });
   const { info } = log;
   const notifyGame = createNotifier({ args, agentProtocol, info, serverControl: () => stop.control });
   // 额度或登录问题的暂停
@@ -114,7 +114,7 @@ function main() {
   // 每一轮的发送和结束、压缩、换会话、Agent 崩了重启
   const turns = createTurns({ args, agentProtocol, log, notifyGame, provider: config.provider, startupPrompt: config.startupPrompt, serverMemory: config.serverMemory,
     agent, conversation, consolidation, inbox, events, pause,
-    serverHandoff: createServerHandoff({ files: F, runtimeDir, name: args.name, lastStopAt: () => conversation.lastStopAt, info }),
+    serverHandoff: createServerHandoff({ files: F, runtimeDir, name: args.name, worldId: config.worldId, lastStopAt: () => conversation.lastStopAt, info }),
     taskReceiptFile: path.join(runtimeDir, `task-delivered-${args.name}.json`), stop: () => stop, lifecycle: () => lifecycle });
   // 叫停和 ServerBody 控制通道
   const stop = createStopControl({ args, memoryOn: config.memoryOn, runtimeDir, files: F, log, agent, conversation, inbox, consolidation, events,

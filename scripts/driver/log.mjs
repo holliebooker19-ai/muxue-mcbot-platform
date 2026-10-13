@@ -29,8 +29,11 @@ export function createRateLimiter(intervalMs = NOTIFY_INTERVAL_MS) {
   };
 }
 
-/** 文本日志 companion-<名字>.log 和给 WebUI 看的活动记录 activity-<名字>.jsonl。没有状态，只往文件里追加。 */
-export function createLog({ logFile, activityFile }) {
+/**
+ * 文本日志 companion-<名字>.log 和给 WebUI 看的活动记录 activity-<名字>.jsonl。没有状态，只往文件里追加。
+ * ServerBody 给了世界标识（world）时，活动记录每行带上它：交接单只拿这个世界的记录。
+ */
+export function createLog({ logFile, activityFile, world = '' }) {
   function ts() {
     return new Date().toLocaleTimeString('zh-CN', { hour12: false });
   }
@@ -54,7 +57,7 @@ export function createLog({ logFile, activityFile }) {
   // 给 WebUI 看的结构化记录（每行一个 JSON），和文本日志内容一致，只是分好了类
   function activity(kind, data) {
     try {
-      fs.appendFileSync(activityFile, JSON.stringify({ t: Date.now(), kind, ...data }) + '\n');
+      fs.appendFileSync(activityFile, JSON.stringify({ t: Date.now(), kind, ...(world ? { world } : {}), ...data }) + '\n');
     } catch {
       // 写不了不影响运行
     }
