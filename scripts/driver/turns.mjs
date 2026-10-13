@@ -39,14 +39,16 @@ export function createTurns({ args, agentProtocol, log, notifyGame, provider, st
     inbox.agentStarted();
   }
 
-  function sendTurn(text, kind = 'normal') {
+  // resend：这一轮是程序拼好的整段（启动轮、叫停后的新任务轮），不经收件箱的 takeTurn；额度／登录报错、没动过工具时整段原样再送
+  function sendTurn(text, kind = 'normal', { resend = false } = {}) {
     if (!agent.child) return;
     turnKind = kind;
     inTurn = true;
     turnStartedAt = Date.now();
     currentTool = '';
     turnUsedTool = false;
-    if (kind !== 'normal') inbox.dropTurnInput();
+    if (resend) inbox.wholeTurnSent(text, kind);
+    else if (kind !== 'normal') inbox.dropTurnInput();
     activity('turn_start', { turnKind: kind });
     conversation.inputSent(turnStartedAt);
     lastActivity = Date.now();
@@ -83,8 +85,8 @@ export function createTurns({ args, agentProtocol, log, notifyGame, provider, st
     } else {
       restartCount = 0;
     }
-    // 额度、登录问题：这一轮还没动过工具就等于没处理，暂停结束后把玩家的话原样再送一次
-    inbox.finishTurn({ requeue: (errorKind === 'quota' || errorKind === 'auth') && turnKind === 'normal' && !turnUsedTool });
+    // 额度、登录问题：这一轮还没动过工具就等于没处理，暂停结束后把玩家的话（启动轮、新任务轮是整段）原样再送一次
+    inbox.finishTurn({ requeue: (errorKind === 'quota' || errorKind === 'auth') && (turnKind === 'normal' || turnKind === 'startup') && !turnUsedTool });
     const kind = turnKind;
     turnKind = 'normal';
     const consolidated = kind === 'consolidate' ? consolidation.finishTurn({ error, errorKind }) : false;
@@ -183,7 +185,7 @@ export function createTurns({ args, agentProtocol, log, notifyGame, provider, st
       restarting = false;
       if (lifecycle().shuttingDown) return;
       startAgent();
-      if (!conversation.conversationId) sendTurn(startupPrompt, 'startup');
+      if (!conversation.conversationId) sendTurn(startupPrompt, 'startup', { resend: true });
       else {
         inbox.resume('agent 进程出错退出后刚重启');
         flush();
@@ -238,6 +240,12 @@ export function createTurns({ args, agentProtocol, log, notifyGame, provider, st
       return;
     }
     if (!agent.child) return;
+    // 额度／登录暂停前没送成的启动轮、新任务轮：先原样再送，攒下的事件和开头说明留到下一轮
+    const resend = inbox.takeResend();
+    if (resend) {
+      sendTurn(resend.text, resend.kind, { resend: true });
+      return;
+    }
     // 压缩一般等没有要回应的事再做；一直有人说话就最多等 CONSOLIDATE_MAX_DEFER_MS，事件留到下一轮
     if (pendingCompact && (!hasWork || Date.now() - pendingCompact.since > CONSOLIDATE_MAX_DEFER_MS)) {
       pendingCompact = null;
@@ -288,7 +296,7 @@ export function createTurns({ args, agentProtocol, log, notifyGame, provider, st
       const handoff = args.body === 'server' ? serverHandoff() : '';
       if (handoff) info('交接单已备好，随启动轮送出', 'handoff', { text: handoff });
       startAgent();
-      sendTurn(handoff ? `${startupPrompt}\n\n${handoff}` : startupPrompt, 'startup');
+      sendTurn(handoff ? `${startupPrompt}\n\n${handoff}` : startupPrompt, 'startup', { resend: true });
       if (serverMemory) consolidation.startSide('startup');
     }
     // 重连（死了、游戏关过）后不等玩家先开口：死因作为驱动器提示，马上给 Agent 一轮。断开前的跟随／等待／保护和死亡掉落由运行端自己读记录、自己恢复，不经过这里

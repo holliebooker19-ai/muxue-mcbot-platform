@@ -36,7 +36,7 @@
 | `consumed-<名字>.txt` 模型自己读过的序号 | 运行端 `markConsumed`（`events.ts:305`） | 驱动器 `consumedSeq`（`driver/events.mjs:133`） | — |
 | `task-delivered-<名字>.json` 随工具结果送过的任务结果 | 运行端 `writeTaskReceipts`（`events.ts:96`） | 驱动器 `flush`（`driver/turns.mjs:232`）+ `taskAlreadyDelivered`（`driver/events.mjs:42`） | — |
 | `operations-<名字>.jsonl` 操作结果 | 运行端（`events.ts:124`） | 驱动器 `createServerHandoff`（`driver/handoff.mjs:58`） | — |
-| `activity-<名字>.jsonl` 活动记录 | 驱动器 `activity`（`driver/log.mjs:58`） | WebUI；驱动器 `buildHandoff`（自己的聊天、工具调用） | 启动时超过 5MB 轮转 |
+| `activity-<名字>.jsonl` 活动记录 | 驱动器 `activity`（`driver/log.mjs:58`） | WebUI；驱动器 `buildHandoff`（自己的聊天、工具调用；连同轮转出的 `.1` 一起读） | 启动时超过 5MB 轮转 |
 | `server-control-<名字>.json` 控制租约 | 运行端 `onLease`（`main.ts:114`） | 驱动器 `server-body-control.mjs:71` `capture`；`captureBodyArtifacts`（`driver/stop.mjs:66`） | 运行端 `removeControlFile`（`main.ts:73`）；**驱动器** `cleanupBodyArtifacts`（`driver/stop.mjs:81`，只在运行端进程已死、内容没变时） |
 | `client-body-<名字>.lock` 运行端锁 | 运行端 `acquireRuntimeLock`（`lifecycle.ts:16`） | 驱动器 `captureBodyArtifacts` | 运行端；**驱动器** `cleanupBodyArtifacts`（同上条件） |
 | `bot-<名字>.lock` | 旧 Mineflayer MCP 服务端 | 驱动器 `waitBotLockFree`（`driver/agent-process.mjs:183`） | 旧 MCP 服务端 |
@@ -49,16 +49,16 @@
 
 ### 1. 姿态文件 `posture-<名字>.json`
 
-- 现状：运行端写（`posture.ts:8`）、运行端启动时读并删（`posture.ts:32`，`main.ts:147`）。驱动器在两处删它：叫停撤销（`stopServerAgent`，`driver/stop.mjs:139`）和真正退出（`shutdown`，`driver/lifecycle.mjs:46`）；换会话时读它拼交接单（`buildHandoff`，`driver/handoff.mjs:44-50`）。活着的姿态还在服务端（`Posture.java`，属于租约）。
-- 重复：驱动器 `buildHandoff` 自己又校验了一遍记录（动作名、玩家名格式、`at > lastStopAt`，`driver/handoff.mjs:46`），和运行端 `takeHeldPosture`（`posture.ts:39-45`）是两份规则，而且**不一样**：运行端超过 `HELD_POSTURE_MAX_AGE_MS`（1 小时，`posture.ts:18`）的记录不接，驱动器的交接单不看时间，会写“能接上的话运行端会自己接上”。
+- 现状：运行端写（`posture.ts:8`）、运行端启动时读并删（`posture.ts:32`，`main.ts:147`）。驱动器在两处删它：叫停撤销（`stopServerAgent`，`driver/stop.mjs:158`）和真正退出（`shutdown`，`driver/lifecycle.mjs:46`）；换会话时读它拼交接单（`buildHandoff`，`driver/handoff.mjs:46-52`）。活着的姿态还在服务端（`Posture.java`，属于租约）。
+- 重复：驱动器 `buildHandoff` 自己又校验了一遍记录（动作名、玩家名格式、`at > lastStopAt`，`driver/handoff.mjs:48`），和运行端 `takeHeldPosture`（`posture.ts:39-45`）是两份规则，而且**不一样**：运行端超过 `HELD_POSTURE_MAX_AGE_MS`（1 小时，`posture.ts:18`）的记录不接，驱动器的交接单不看时间，会写“能接上的话运行端会自己接上”。
 - 叫停时驱动器删文件，其实运行端已经按 `lastStopAt` 不接叫停前的记录（`posture.ts:45`），是双保险。
 - 应归：**运行端**。驱动器只读，不删、不判断能不能接。
 
 ### 2. 叫停时间 `lastStopAt` 有两套
 
-- 现状：驱动器的 `lastStopAt` 由会话持有（`createSession`，`driver/session.mjs:75`），写进 `session-<名字>.json`（`save`，`driver/session.mjs:79`），运行端读它判断姿态记录能不能接（`posture.ts:44`）。驱动器拿它写【停止记录】提示（`stopRecord`，`driver/prompts.mjs:161`，`driver/inbox.mjs:119`）和交接单的“已取消”（`buildHandoff`）。
-- 原来的问题：驱动器只在**撤销控制**的叫停（`stopServerAgent`，`driver/stop.mjs:136`；WebUI 急停、运行端 10 秒没确认）和独立试玩身份叫停（`driver/stop.mjs:184`）时更新它；游戏里原地取消后换会话，交接单不会把被取消的任务标成“已取消”。
-- **10-13 已做**：运行端写 `player_stop` 时带上结构化字段 `stop`（`pause`／`cancel`）和 `player`（叫停的玩家）（`player-stop.ts:87`，`EventJournal.add` 的第三个参数，`events.ts:84`），驱动器不解析中文。驱动器收到 `player_stop` 时（`driver/events.mjs:178` → `playerStopConfirmed`，`driver/stop.mjs:228`）先清兜底计时器（有才清），再看 `stop`：`cancel` 才用**事件里的时间**（运行端停好身体的时候；叫停词之后运行端不再受理动作和任务，`mcp.ts:134` `holding()`，所以叫停前开始的任务都早于它）`markStop` 并存会话文件，同时把 `lastStopBy` 记成这位玩家；不比已记的晚就不记（同一句不重复记，也不把更晚的撤销叫停改回去）；`pause` 不记（说继续还要接着做）。计时器开没开不影响记不记。随之【停止记录】改成同一次叫停在同一个 Agent 进程里只附一次（`driver/inbox.mjs:119`，Agent 启动时 `agentStarted`、上下文压缩后 `compacted` 重置，额度／登录报错重送那一轮时也再附），原地取消后对话还在接着，不再每轮都附。
+- 现状：驱动器的 `lastStopAt` 由会话持有（`createSession`，`driver/session.mjs:75`），写进 `session-<名字>.json`（`save`，`driver/session.mjs:79`），运行端读它判断姿态记录能不能接（`posture.ts:44`）。驱动器拿它写【停止记录】提示（`stopRecord`，`driver/prompts.mjs:161`，`driver/inbox.mjs:125`）和交接单的“已取消”（`buildHandoff`）。
+- 原来的问题：驱动器只在**撤销控制**的叫停（`stopServerAgent`，`driver/stop.mjs:155`；WebUI 急停、运行端 10 秒没确认）和独立试玩身份叫停（`driver/stop.mjs:204`）时更新它；游戏里原地取消后换会话，交接单不会把被取消的任务标成“已取消”。
+- **10-13 已做**：运行端写 `player_stop` 时带上结构化字段 `stop`（`pause`／`cancel`）和 `player`（叫停的玩家）（`player-stop.ts:87`，`EventJournal.add` 的第三个参数，`events.ts:86`），驱动器不解析中文。驱动器收到 `player_stop` 时（`driver/events.mjs:178` → `playerStopConfirmed`，`driver/stop.mjs:248`）先清兜底计时器（有才清），再看 `stop`：`cancel` 才用**事件里的时间**（运行端停好身体的时候；叫停词之后运行端不再受理动作和任务，`mcp.ts:134` `holding()`，所以叫停前开始的任务都早于它）`markStop` 并存会话文件，同时把 `lastStopBy` 记成这位玩家；不比已记的晚就不记（同一句不重复记，也不把更晚的撤销叫停改回去）；`pause` 不记（说继续还要接着做）。计时器开没开不影响记不记。随之【停止记录】改成同一次叫停在同一个 Agent 进程里只附一次（`driver/inbox.mjs:125`，Agent 启动时 `agentStarted`、上下文压缩后 `compacted` 重置，额度／登录报错重送那一轮时也再附），原地取消后对话还在接着，不再每轮都附。
 - 应归：叫停的事实归**运行端**（它真正停了身体）；驱动器只读来写提示。会话文件里的 `lastStopAt` 是驱动器写给运行端看的跨层接口，现在先保留。
 
 ### 3. 叫停词识别有两份
@@ -68,9 +68,10 @@
 
 ### 4. 叫停流程分在两层
 
-- 游戏里叫停：运行端 `PlayerStop.hear`（`player-stop.ts:55`）原地停，发 `player_stop` 事件（暂停时跟随／等待先停在原地这一步失败只降级，事件文字里说明，照常发；身体没停下才不发）；同时不再受理动作和任务（`mcp.ts:134` `holding()`）。驱动器 `armPlayerStop`（`driver/stop.mjs:113`）只开一个 `STOP_CONFIRM_MS`（10 秒，值在 `client-runtime/host-timing.json` 的 `stopConfirmMs`，`driver/stop.mjs:14` 读入）的计时器，收到 `player_stop` 就清掉（`driver/events.mjs:177` → `driver/stop.mjs:223`）；到时没收到才走 `stopServerAgent` 撤销。
-- 同一句叫停可能从两条路到驱动器：事件文件（`driver/events.mjs:174`）和控制通道 `watch`（`server-body-control.mjs:169` → `onStop` → `armPlayerStop`，`driver/stop.mjs:258`），靠计时器去重。
-- WebUI「叫停」是急停：驱动器直接 `stopServerAgent`（`halt`，`driver/stop.mjs:234`），撤销控制、结束这一轮 Agent，进入“等新任务”（`waiting`、排着的新任务）。
+- 游戏里叫停：运行端 `PlayerStop.hear`（`player-stop.ts:57`）原地停，发 `player_stop` 事件（暂停时跟随／等待先停在原地这一步失败只降级，事件文字里说明，照常发；身体没停下才不发）；同时不再受理动作和任务（`mcp.ts:134` `holding()`）。驱动器 `armPlayerStop`（`driver/stop.mjs:130`）只开一个 `STOP_CONFIRM_MS`（10 秒，值在 `client-runtime/host-timing.json` 的 `stopConfirmMs`，`driver/stop.mjs:14` 读入）的计时器，收到 `player_stop` 就清掉（`driver/events.mjs:178` → `driver/stop.mjs:248`）；到时没收到才走 `stopServerAgent` 撤销。
+- 同一句叫停可能从两条路到驱动器：事件文件（`driver/events.mjs:174`）和控制通道 `watch`（`server-body-control.mjs:169` → `onStop` → `armPlayerStop`，`driver/stop.mjs:293`），先后不定。原来只靠计时器去重：事件文件先到时，同一次读取里运行端的 `player_stop` 已经把计时器清了，控制通道后到的同一句又开一个，10 秒后照样撤销。**10-13 已改**：按配对去重（`sameStopFromOtherPath`，`driver/stop.mjs:117`）——一条路来的叫停，另一条路在 `STOP_CONFIRM_MS` 内来过同一位玩家（事件的 `username`，运行端写聊天事件时带上，`events.ts:173`）还没配上的叫停，就算同一句，一对一配掉、不再开计时器。两边时间不是同一个钟（独立服务器时控制通道带服务器时间），只看驱动器收到的时间。私聊只走事件文件，不配；没带玩家名的旧事件不配。剩下的边界：一条路漏了一句（比如控制通道断了），玩家 10 秒内又说一遍时，漏掉那句的另一份会把这一遍配掉，这一遍不开兜底计时器（运行端照样原地停，只少了兜底）。
+- 撤销控制时（`stopServerAgent`）收件箱连同进行中那一轮的输入一起清掉（`inbox.clear`），之后额度／登录暂停结束也不会把叫停前的话再送。不经收件箱拼的整轮——启动轮（带交接单的那次也是）和撤销后的新任务轮——额度／登录报错、没动过工具时，暂停结束后整段原样再送一次（`sendTurn` 的 `resend`，`driver/turns.mjs` 的 `flush` 先送它）。
+- WebUI「叫停」是急停：驱动器直接 `stopServerAgent`（`halt`，`driver/stop.mjs:269`），撤销控制、结束这一轮 Agent，进入“等新任务”（`waiting`、排着的新任务）。
 - `STOP_CONFIRM_MS`（`driver/stop.mjs:14`）和 Codex 连接的 `cancelTimeoutMs`（默认值，`scripts/agents/codex-app-server.mjs:60`）是同一个 10 秒。**已做**：两处都从 `client-runtime/host-timing.json` 的 `stopConfirmMs` 来（`scripts/host-timing.mjs` 读文件）；`cancelTimeoutMs` 仍可传参数，测试可以传小值。
 - 应归：原地停归**运行端**；兜底撤销、急停、撤销后等新任务归**驱动器**（这些要结束 Agent 进程，只有驱动器能做）。现在的分法对，两个 10 秒已共用一处。
 
@@ -102,7 +103,7 @@
 
 ### 9. 交接单读运行端的记录
 
-- `buildHandoff`（`driver/handoff.mjs:29`）读 `operations-<名字>.jsonl`（运行端）、`posture-<名字>.json`（运行端）、`activity-<名字>.jsonl`（驱动器），还读运行端的工具表 `client-runtime/tool-registry.json`（`driver/handoff.mjs:10`）判断哪个工具算任务、在服务端叫什么名字（`runsAs`）。
+- `buildHandoff`（`driver/handoff.mjs:29`）读 `operations-<名字>.jsonl`（运行端）、`posture-<名字>.json`（运行端）、`activity-<名字>.jsonl`（驱动器；连同启动时轮转出的 `.1`），还读运行端的工具表 `client-runtime/tool-registry.json`（`driver/handoff.mjs:10`）判断哪个工具算任务、在服务端叫什么名字（`runsAs`）。
 - 应归：事实归**运行端**，拼成给模型的文字归**驱动器**。可以接受；以后可以让运行端给一份“最近任务和姿态”的摘要，驱动器不再解析它的记录格式。
 
 ### 10. 事件送达用三个文件来回握手
