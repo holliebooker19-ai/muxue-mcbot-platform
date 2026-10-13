@@ -49,10 +49,8 @@ final class ServerController implements ControlSession.Game {
     private boolean postureDrove;
     /** Standing guard: kept across operations and stops, cleared when the lease ends (docs/companion_state_design.md, section 5). */
     private GuardDuty duty;
-    private boolean dutyDrove;
-    /** When the duty took the body for the current fight, and what was running then (resumed afterwards, its limit extended). */
-    private long dutyFrom;
-    private ControlSession.Operation dutyPaused;
+    /** The fight the duty drives now: when it began, what was running then (resumed afterwards, its limit extended) and how it ends. */
+    private final DutyFight dutyFight=new DutyFight();
     /**
      * What drives the body for the running operation (docs/companion_state_design.md 8.3): a task, a walk or a pickup;
      * null for an emote gesture (BodyEmotes drives it) and for the native actions SurvivalActions runs.
@@ -312,7 +310,8 @@ final class ServerController implements ControlSession.Game {
     }
     @Override public void clearDuty() {
         GuardDuty old=duty; duty=null;
-        if(old!=null) { try { old.stop(); } finally { if(dutyDrove) { dutyDrove=false; if(posture!=null) posture.resumeAfterGuard(); } } }
+        // Turned off or replaced in the middle of a fight: the body goes back the way it does when the fight ends by itself.
+        if(old!=null) { try { old.stop(); } finally { endFight(); } }
     }
     @Override public JsonObject posture(JsonObject params) {
         if(params.has("off")&&bool(params,"off")) { clearPosture(); JsonObject off=new JsonObject(); off.add("posture",JsonNull.INSTANCE); return off; }
@@ -378,7 +377,7 @@ final class ServerController implements ControlSession.Game {
         if(active==null) return true;
         return task!=null&&task.interruptible();
     }
-    private boolean bodyFree(){return GuardDuty.bodyFree(survival!=null&&survival.busy(),nativeWriteInProgress(),player.isSleeping(),player.isUsingItem(),dutyDrove,player.containerMenu!=player.inventoryMenu);}
+    private boolean bodyFree(){return GuardDuty.bodyFree(survival!=null&&survival.busy(),nativeWriteInProgress(),player.isSleeping(),player.isUsingItem(),dutyFight.driving(),player.containerMenu!=player.inventoryMenu);}
     @Override public boolean interruptOpen(){return window!=null;}
     @Override public ControlSession.Operation interruptPaused(){return window==null?null:window.paused;}
     /**
@@ -392,7 +391,7 @@ final class ServerController implements ControlSession.Game {
         String reason=string(params,"reason");
         if(!TaskInterrupt.REASONS.contains(reason)) throw error("INVALID_ARGUMENT","reason must be eat or defend");
         if(window!=null) throw error("BUSY","An interrupt window is already open");
-        String refusal=TaskInterrupt.refusal(dutyDrove,bodyFree(),active!=null,task!=null&&task.interruptible());
+        String refusal=TaskInterrupt.refusal(dutyFight.driving(),bodyFree(),active!=null,task!=null&&task.interruptible());
         if(refusal!=null) throw error("NOT_PAUSABLE",refusal);
         window=new TaskInterrupt(reason,active,task,now());
         active=null;task=null;player.stopInput();
@@ -416,27 +415,30 @@ final class ServerController implements ControlSession.Game {
         if(open.paused!=null) result.addProperty("operationId",open.paused.id);
         return result;
     }
-    /** The fight is over: what was paused plans its way again; only the operation that was paused gets the time back. */
-    private void resumeAfterFight(long fightMs) {
-        if(task!=null) task.resumeAfterGuard(active==dutyPaused?fightMs:0);
+    /**
+     * The fight is over, because the duty finished it (tickDuty) or was turned off or replaced during it (clearDuty): what was
+     * paused plans its way again and counts damage from now on, and only the operation that was paused gets the time back;
+     * with nothing running the body stands still and the posture takes it back. Nothing happens when no fight was on.
+     */
+    private void endFight() {
+        dutyFight.end(now(),active,new DutyFight.Handback() {
+            public void resumeTask(long extendMs){ if(task!=null) task.resumeAfterGuard(extendMs); }
+            public void resumeBody(){ if(player!=null) player.stopInput(); if(posture!=null) posture.resumeAfterGuard(); }
+        });
     }
     /** True when the duty drove the body this tick. */
-    private boolean tickDuty(BodyPlayer body) {
+    private boolean tickDuty() {
         // Sitting keeps the protection: when the guard would fight, the body gets up first; a seated posture walks back to the seat afterwards.
-        if(player.isPassenger()&&NativeSeat.standForFight(NativeSeat.seated(player),true,duty.wouldFight())) player.stopRiding();
+        // Only for a fight that starts this tick: with the body held (an open menu, a meal) the guard waits, and a body stood up for nothing would not sit down again.
+        if(player.isPassenger()&&NativeSeat.standForFight(NativeSeat.seated(player),true,duty.wouldFight(dutyMayInterrupt()))) player.stopRiding();
         GuardDuty current=duty;
         boolean drove;
         // Idle: nothing runs, and no follow or seat takes the body back after the fight, so the guard walks back to where it stood.
         try { drove=current.tick(dutyMayInterrupt(),active==null&&(posture==null||posture.guardWalksBack())); }
         catch(RuntimeException fault) { drove=false; current.interrupt(); }
         if(current!=duty)return false; // A native callback may have cleared or replaced the duty.
-        if(drove) { if(!dutyDrove){dutyFrom=now();dutyPaused=active;} dutyDrove=true; if(posture!=null) posture.guarding(); return true; }
-        if(dutyDrove) {
-            dutyDrove=false;
-            if(active!=null) resumeAfterFight(now()-dutyFrom);
-            else { body.stopInput(); if(posture!=null) posture.resumeAfterGuard(); }
-            dutyPaused=null;
-        }
+        if(drove) { dutyFight.drove(now(),active); if(posture!=null) posture.guarding(); return true; }
+        endFight();
         return false;
     }
     /**
@@ -532,8 +534,8 @@ final class ServerController implements ControlSession.Game {
             return PickupLedger.thrownBy(thrower==null?null:thrower.getUUID(),thrower instanceof Player p?p.getGameProfile().getName():null,thrower instanceof Player,player.getUUID());
         }catch(RuntimeException failure){return null;}
     }
-    /** The pickup task in the slot, for the native pickup events; null when something else runs. */
-    private PickupItem pickup(){return task instanceof PickupItem pickup?pickup:null;}
+    /** The pickup task for the native pickup events: the one in the slot, or the one paused in an interrupt window; null when something else runs. */
+    private PickupItem pickup(){return TaskInterrupt.pickupOf(task,window);}
     @Override public JsonObject watch() { return obj("chat",chat,"chatCursor",chatSequence); }
     /** Gray italic host line to every player; the session already checked length, characters and rate. */
     @Override public void notice(String text) { server.getPlayerList().broadcastSystemMessage(Component.literal(text).withStyle(ChatFormatting.GRAY,ChatFormatting.ITALIC),false); }
@@ -554,7 +556,7 @@ final class ServerController implements ControlSession.Game {
         if(!session.mayDrive(operation)) throw error("LEASE_LOST","Body lease expired before action");
         gazeHold=now()+IdleGaze.HOLD_AFTER_ACTION_MS;
         // Started while the duty fights (between two steps of a gathering, say): it waits for the fight like a paused one and gets that time back.
-        if(dutyDrove&&!Posture.keeps(operation.name)){dutyPaused=operation;dutyFrom=now();}
+        if(!Posture.keeps(operation.name)) dutyFight.began(operation,now());
         JsonObject args=operation.args;
         if(player.isSleeping()&&!Set.of("send-chat","wake-up").contains(operation.name)) throw error("SLEEPING","Body is asleep in a bed; call get-up first");
         if(NativeSeat.seated(player)&&!NativeSeat.allowedWhileSeated(operation.name)) throw error("SEATED","Body is sitting; call get-up first");
@@ -669,14 +671,14 @@ final class ServerController implements ControlSession.Game {
         if(body!=player) { body.stopInput(); return; }
         reconcile();
         if(lastDriveTick==server.getTickCount()){
-            if(!dutyDrove&&!postureDrove&&(active==null||!session.mayDrive(active)))body.stopInput();return;
+            if(!dutyFight.driving()&&!postureDrove&&(active==null||!session.mayDrive(active)))body.stopInput();return;
         }
         lastDriveTick=server.getTickCount();postureDrove=false;
         if(survival!=null) survival.tick();
         emotes.tick(now());
         if(window!=null&&window.expired(session.stepsRunning(window.paused),now())) closeInterrupt("No eating or defense step came within the lease time");
         // The guard first, then the posture (it steps aside while an operation outside Posture.KEEPS runs), then the operation (docs/server_body_protocol.md, 陪伴姿态).
-        if(duty!=null&&tickDuty(body)) return;
+        if(duty!=null&&tickDuty()) return;
         if(posture!=null&&tickPosture()) return;
         if(active==null) { body.stopInput(); idleGaze(body); return; }
         // A lost lease already stopped everything (the session cancels through stop()); this only ends the one operation.
@@ -918,7 +920,7 @@ final class ServerController implements ControlSession.Game {
         try { stopBody(true); } finally { if(open!=null&&open.task!=null) open.task.stop(); }
     }
     /** Ends the running action. The posture waits RESUME_AFTER_MS before it drives again, unless the action ended normally and left it alone (finish). */
-    private void stopBody(boolean postureTail) { if(duty!=null)duty.interrupt();dutyDrove=false;dutyPaused=null;active=null;emotes.cancelGesture(player);BodyTask ended=task;task=null;if(ended!=null)ended.stop(); if(posture!=null&&postureTail) posture.interrupt(); if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
+    private void stopBody(boolean postureTail) { if(duty!=null)duty.interrupt();dutyFight.reset();active=null;emotes.cancelGesture(player);BodyTask ended=task;task=null;if(ended!=null)ended.stop(); if(posture!=null&&postureTail) posture.interrupt(); if(player!=null) player.stopInput();if(survival!=null) survival.stop(); }
     @Override public void abort(ControlSession.Operation operation) { if(active==operation) stopBody(true);else if(survival!=null) survival.abort(operation); }
     @Override public boolean leave() {
         if(player==null)return false;

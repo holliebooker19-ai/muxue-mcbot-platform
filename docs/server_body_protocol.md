@@ -322,7 +322,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 
 - **方法`guard`**（要租约，校验 instance／session／lease，不看`controlGeneration`；**不是操作**，不占操作 ID 预算）：`{player, expectedEntityId, options?}`打开或替换（`options`同 8h 的`guard`对象，省略用默认值），玩家不在 32 格内报`PLAYER_NOT_VISIBLE`，UUID 不符报`STALE_TARGET`；`{off:true}`关掉。所有请求还必须带`guardRevision`，回执带同一序号。运行中的普通操作不阻止配置；HTTP 队列仍可能报`BUSY`，原生写入尚未返回时不能确认停稳或开启替代职责。
 - **配置排序**：每份新租约从 0 开始记录`guardRevision`；每次配置及`stop(clearGuard:true)`携带严格递增的正安全整数，不复用序号。`guard`的序号小于或等于已接受序号报`CANCELLED`；接受序号后即使后续参数／原生检查失败也不回退。顺序只看序号：后到的旧开启不能越过新的关闭或`stop(clearGuard)`；普通 stop 保留保护意图，所以它前后到达的配置（开或关）照常生效。运行端同时撤销等待观察／聊天的旧配置，并丢弃被取代的迟到回执，不自动重放开启。
-- **生命周期**：普通`stop`（代次加一）保留保护意图，只打断正在进行的执行，后续 tick 可重新判断；`stop`带`clearGuard:true`及新`guardRevision`时，在同一服务端请求中停止操作并清保护，确认后才返回`stopped:true`；序号已被更新的设置超过时照样停止，但保留那个更新的设置。`revoke`、`release`、新的`claim`、租约过期、身体死亡／换维度／移除时也清掉。
+- **生命周期**：普通`stop`（代次加一）保留保护意图，只打断正在进行的执行，后续 tick 可重新判断；`stop`带`clearGuard:true`及新`guardRevision`时，在同一服务端请求中停止操作并清保护，确认后才返回`stopped:true`；序号已被更新的设置超过时照样停止，但保留那个更新的设置。`revoke`、`release`、新的`claim`、租约过期、身体死亡／换维度／移除时也清掉。保护正在打时被关掉或换成新的，和打完同一套收尾（`DutyFight.end`）：被暂停的任务重新寻路、受伤基线从此刻算（打架挨的伤不让它以`BLOCKED`结束），期限只给被暂停的那个操作顺延；没有任务时身体站住，姿态接回去。
 - **原生撤销**：意图绑定原租约和身体会话，当前战斗另持可撤销的执行授权。普通 stop、off 或替换配置立即使旧攻击 scope 的授权失效；后续 tick 或新租约不能复活旧 scope。原生攻击回调内重入停止／关闭时先撤销，调用栈尚未退出仍报`STOP_UNCONFIRMED`，已发生的伤害仅保留为旧执行的只读回执。
 - **观察**：保护开着时`observe`多一个`guard`：`{enabled:true, player, entityId, options, covering, reason?, returning, busyMs, state, target?, targetId?, hits, damage, shots, kills, retreats}`。`covering:false`时`reason`是`PLAYER_AWAY`（下线、换维度、超出 32 格）、`TOO_FAR`（Bot 离玩家超过 16 格）、`BUSY`（正在做的事不能打断）或`NO_CONTROL`；玩家回来后自动接着保护。`busyMs`是累计打架时长，以后给任务顺延期限用。
 - **什么时候接管身体**：Bot 离玩家 16 格内，且此刻没有操作在跑（空闲，或运行端在原地等待），或者在跑的是不带自己保护的`follow-companion`；在吃东西、挖掘、自卫（原生使用或写入中）、睡觉、开着界面时不接管。这一块里别的任务（建筑、采集、走路、长途走、工作站……）还不能被打断，保护等它们做完（`reason:BUSY`），这期间只有 3 格近身自卫；任务打断在下一块做。
@@ -503,9 +503,9 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 **`seated`**：
 - 不由`posture`方法设，而是由`sit`操作成功后服务端设为`seated`（记下座位方块），原来的跟随或等待就此结束；
 - `stand-up`操作成功后，姿态清空；
-- 坐着时被保护叫起来（`wouldFight`）不清`seated`：打完走回座位，用和`sit`一样的原生右键坐下；
+- 坐着时被保护叫起来（`wouldFight`）不清`seated`：打完走回座位，用和`sit`一样的原生右键坐下；只有这一拍保护真的会去打才站起来（`GuardDuty.wouldFight(interruptible)`，和`tick`同一套条件），开着界面、在吃东西等身体被占着时保护本来就不接管（`BUSY`），这时不站起来；
 - 走回座位途中`state`仍是`seated`，另带`returning:true`；观察顶层的`sitting`为 false。检查和右键与`sit`操作相同（`NativeSeat.requireCanSit`、`requireFreeSeat`、`sitDown`）。
-- 座位方块不在了、被占了、走不到时，姿态改成`wait`，`reason`给出`sit`的同名码，例如`SEAT_OCCUPIED`、`EMPTY_HAND_REQUIRED`、`NO_LINE_OF_SIGHT`。方块已经不是座位（`STALE_TARGET`）报`NO_SEAT`；超过`GuardDuty.BACK_LIMIT_MS`（15 秒，和保护打完走回原位的上限同一个）还没坐回去报`NO_PATH`。实现补定；
+- 座位方块不在了、被占了、走不到时，姿态改成`wait`，`reason`给出`sit`的同名码，例如`SEAT_OCCUPIED`、`EMPTY_HAND_REQUIRED`、`NO_LINE_OF_SIGHT`。方块已经不是座位（`STALE_TARGET`）报`NO_SEAT`；超过`GuardDuty.BACK_LIMIT_MS`（15 秒，和保护打完走回原位的上限同一个）还没坐回去报`NO_PATH`。例外：会自己过去的拒绝（`BUSY`：开着界面、光标上拿着东西、骑着不是座位的东西；`SLEEPING`：睡着）不改姿态，身体站住，`state`仍是`seated`、`returning:true`，下一拍再试，仍受上面的 15 秒总时限约束（`Posture.RETRY_CODES`）。实现补定；
 - `posture follow`会让身体站起来去跟。
 
 **观察**：有姿态时`observe`多一个`posture`，没有姿态时不带这个字段：
@@ -598,6 +598,7 @@ R4增量：容器多步骤任务要求Body同时提供acquireTask/releaseTask。
 - 被暂停的操作仍是`running`，`operation`查询照常；任务不 tick，身体停下。姿态照旧让开（仍有操作在跑）。
 - 会话只放行打断用的几步，一次一步：`select-slot`、`swap-inventory`、`eat-item`、`defend-entity`、`retreat-from-entity`（`TaskInterrupt.STEPS`，就是运行端吃东西和自卫时实际发的）；别的操作报`BUSY`，`send-chat`照常。
 - 常驻保护不在窗口里开打，等窗口关了再说（和它等吃完饭一样）。
+- 被暂停的是`pickup-item`时，身体停在掉落物旁，原版自动拾取可能把东西捡走：原生拾取回报也送给窗口里被暂停的那个拾取任务（`TaskInterrupt.pickupOf`），窗口关了接着做时按实际结果报成功；被别人捡走报`PICKUP_TAKEN`，不报`PICKUP_UNKNOWN`。
 - `stop`（任何一次）、租约结束连同窗口和被暂停的任务一起取消。
 - 超过`ControlSession.TTL_MS`（10 秒，和租约“控制者失联”同一个时长）没有任何打断步骤在跑时（运行端出了问题），服务端自己关窗口，让任务接着做。
 

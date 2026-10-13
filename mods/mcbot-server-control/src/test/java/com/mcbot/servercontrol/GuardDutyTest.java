@@ -37,6 +37,7 @@ final class GuardDutyTest {
         interruptedTick();
         taskPause();
         wouldFight();
+        fightEnd();
         System.out.println("GuardDutyTest: "+checks+" checks passed");
     }
     /** A running task: the duty waits while it cannot stand aside, fights when it can, never walks back, and the fight time is what extends the task. */
@@ -61,13 +62,57 @@ final class GuardDutyTest {
     /** What gets a seated body up: the duty's own rules, so sitting has no range of its own. */
     private static void wouldFight() {
         FakeView view=new FakeView();FakeCombat combat=new FakeCombat(view);GuardDuty duty=duty(view,combat);
-        check(!duty.wouldFight(),"no foe around the player: stay seated");
-        combat.foe=true;check(duty.wouldFight(),"a foe the guard would fight: get up");
-        view.companion=new Vec3(GuardDuty.ENGAGE_RANGE+1,64,0);check(!duty.wouldFight(),"the player is beyond the guard's reach: the guard would not fight, so stay");
-        view.companion=new Vec3(3,64,0);view.mayDrive=false;check(!duty.wouldFight(),"no control: stay");
-        view.mayDrive=true;view.companion=null;check(!duty.wouldFight(),"player away: stay");
-        view.companion=new Vec3(3,64,0);duty.stop();check(!duty.wouldFight(),"duty off: stay");
+        check(!duty.wouldFight(true),"no foe around the player: stay seated");
+        combat.foe=true;check(duty.wouldFight(true),"a foe the guard would fight: get up");
+        view.companion=new Vec3(GuardDuty.ENGAGE_RANGE+1,64,0);check(!duty.wouldFight(true),"the player is beyond the guard's reach: the guard would not fight, so stay");
+        view.companion=new Vec3(3,64,0);view.mayDrive=false;check(!duty.wouldFight(true),"no control: stay");
+        view.mayDrive=true;view.companion=null;check(!duty.wouldFight(true),"player away: stay");
+        view.companion=new Vec3(3,64,0);duty.stop();check(!duty.wouldFight(true),"duty off: stay");
         check(combat.ticks==0,"asking never fights");
+        // Something holds the body (an open menu, a meal, a window): tick() would refuse with BUSY, so a seated body must not get up for it.
+        FakeView held=new FakeView();FakeCombat foe=new FakeCombat(held);foe.foe=true;GuardDuty waiting=duty(held,foe);
+        check(!waiting.wouldFight(false),"a foe near but the body is held: the guard would not fight this tick, so stay seated");
+        check(!waiting.tick(false,false)&&"BUSY".equals(waiting.json().get("reason").getAsString())&&foe.ticks==0,"and tick() agrees: BUSY, no fight");
+        check(waiting.wouldFight(true)&&waiting.tick(true,false)&&foe.ticks==1,"the body free again: it would fight, and tick() does");
+    }
+    /** The one way a fight ends (DutyFight): shared by the duty finishing it and by the duty being turned off or replaced in the middle of it. */
+    private static void fightEnd() {
+        final class Back implements DutyFight.Handback {
+            final List<String> calls=new ArrayList<>();
+            public void resumeTask(long extendMs){calls.add("task:"+extendMs);}
+            public void resumeBody(){calls.add("body");}
+        }
+        ControlSession.Operation gather=new ControlSession.Operation("a","s",1,"pickup-item",obj()),other=new ControlSession.Operation("b","s",1,"move-to-position",obj());
+        // A task was running when the fight began: it resumes and gets exactly the fight's length (the path clearDuty took without this: nothing).
+        DutyFight fight=new DutyFight();Back back=new Back();
+        check(!fight.driving()&&!fight.end(5000,gather,back)&&back.calls.isEmpty(),"no fight on: ending hands nothing back");
+        fight.drove(1000,gather);fight.drove(1300,gather);
+        check(fight.driving(),"the duty drives");
+        check(fight.end(1700,gather,back)&&back.calls.equals(List.of("task:700"))&&!fight.driving(),"fight over with the paused task still running: it resumes with the whole fight added");
+        check(!fight.end(1800,gather,back)&&back.calls.size()==1,"a second end (clearDuty after tickDuty) hands nothing back twice");
+        // The operation in the slot is not the one that was paused (it started later, or the paused one ended): resumes, no extra time.
+        fight.drove(2000,gather);back.calls.clear();
+        check(fight.end(2500,other,back)&&back.calls.equals(List.of("task:0")),"another operation runs now: it resumes with no time added");
+        // Idle when the fight began, then an operation began in the middle: it waits for the fight like a paused one, from when it began.
+        fight.drove(3000,null);fight.began(other,3200);back.calls.clear();
+        check(fight.end(3500,other,back)&&back.calls.equals(List.of("task:300")),"an operation begun mid-fight gets the time since it began");
+        // Idle all through: the body is handed back to the posture.
+        fight.drove(4000,null);back.calls.clear();
+        check(fight.end(4600,null,back)&&back.calls.equals(List.of("body")),"nothing runs: the body and the posture get it back");
+        // Not fighting: began() records nothing, and a later fight starts fresh.
+        fight.began(other,4700);fight.drove(5000,gather);back.calls.clear();
+        check(fight.end(5100,gather,back)&&back.calls.equals(List.of("task:100")),"began() outside a fight is ignored; the next fight is its own");
+        // Everything stopped: no fight, nothing resumes.
+        fight.drove(6000,gather);fight.reset();back.calls.clear();
+        check(!fight.driving()&&!fight.end(6100,gather,back)&&back.calls.isEmpty(),"a stop forgets the fight");
+        // A task that throws while resuming leaves no fight behind.
+        fight.drove(7000,gather);
+        try{fight.end(7100,gather,new DutyFight.Handback(){public void resumeTask(long extendMs){throw new IllegalStateException();}public void resumeBody(){}});check(false,"the fault goes up");}
+        catch(IllegalStateException expected){check(!fight.driving(),"but the fight is already over");}
+        // The extension is what the task's Grace grants: the paused task's limit moves by the fight, once.
+        GuardDuty.Grace grace=new GuardDuty.Grace(1000);long[] deadline={10_000};
+        fight.drove(8000,gather);fight.end(8400,gather,new DutyFight.Handback(){public void resumeTask(long extendMs){deadline[0]+=grace.grant(extendMs);}public void resumeBody(){}});
+        check(deadline[0]==10_400,"the paused task's deadline moves by the fight's length");
     }
     private static void idleFight() {
         FakeView view=new FakeView();FakeCombat combat=new FakeCombat(view);GuardDuty duty=duty(view,combat);

@@ -18,8 +18,8 @@ final class PostureTest {
         final JsonObject auth;
         Posture posture;
         boolean immediate=true,fighting,wasFighting,seated,standUps,animating;
-        int seatSteps,seatWalkStops;
-        String seatFailure;
+        int seatSteps,seatWalkStops,seatBusy;
+        String seatFailure,busyCode="BUSY";
         ControlSession.Operation active;
         long revision;
         Fixture() {
@@ -53,6 +53,7 @@ final class PostureTest {
                 public void standUp() {seated=false;standUps=true;}
                 public boolean returnToSeat(BlockPos seat) {
                     if(seatFailure!=null)throw error(seatFailure,"Scripted seat failure");
+                    if(seatBusy-->0)throw error(busyCode,"Scripted passing refusal");
                     if(seatSteps-->0)return false;
                     seated=true;return true;
                 }
@@ -239,8 +240,44 @@ final class PostureTest {
         Fixture far=new Fixture();far.posture=Posture.seated(chair,0,far.view());far.seatSteps=Integer.MAX_VALUE;far.tick(50);
         for(long waited=0;waited<=GuardDuty.BACK_LIMIT_MS&&far.posture.kind()==Posture.Kind.SEATED;waited+=1000)far.tick(1000); // heartbeats keep the lease
         check(far.posture.kind()==Posture.Kind.WAIT&&far.posture.json().get("reason").getAsString().equals("NO_PATH"),"not back on the seat within the guard's walk-back limit: waiting, NO_PATH");
+        passing();
         // Following from a seat stands up first.
         Fixture up=new Fixture();up.seated=true;up.follow();up.tick(50);
         check(up.standUps&&!up.seated&&up.state().equals("following"),"follow while sitting: stands up and follows");
     }
-}
+    /**
+     * The way back to the seat refuses for a reason that passes (an open menu: BUSY from NativeSeat.requireCanSit): the posture stays
+     * seated-and-returning and tries again next tick, under the same BACK_LIMIT_MS clock; every other code still means waiting.
+     */
+    private static void passing() {
+        BlockPos chair=new BlockPos(3,1,3);
+        Fixture busy=new Fixture();busy.posture=Posture.seated(chair,0,busy.view());busy.seatBusy=4;busy.seatSteps=1;
+        int stops=busy.seatWalkStops;
+        for(int i=0;i<4;i++) {
+            check(!busy.tick(50),"BUSY: the body stands still, nothing is driven");
+            check(busy.posture.kind()==Posture.Kind.SEATED&&busy.state().equals("seated")&&!busy.posture.json().has("reason")&&busy.posture.json().get("returning").getAsBoolean(),"BUSY: still the seated posture, no reason, still returning");
+        }
+        check(busy.seatWalkStops==stops+4,"each refusal stops the walk so the body does not keep walking blind");
+        check(busy.tick(50)&&busy.posture.kind()==Posture.Kind.SEATED,"the menu closed: the walk goes on (one more step)");
+        busy.tick(50);
+        check(busy.seated&&busy.posture.kind()==Posture.Kind.SEATED&&busy.state().equals("seated")&&!busy.posture.json().has("returning"),"and it sits back down");
+        // SLEEPING passes as well.
+        Fixture asleep=new Fixture();asleep.posture=Posture.seated(chair,0,asleep.view());asleep.seatBusy=2;asleep.busyCode="SLEEPING";
+        asleep.tick(50);asleep.tick(50);
+        check(asleep.posture.kind()==Posture.Kind.SEATED&&!asleep.posture.json().has("reason"),"SLEEPING: tried again, not given up");
+        asleep.tick(50);
+        check(asleep.seated,"asleep no more: back on the seat");
+        // A refusal that never passes ends at the guard's walk-back limit, as a walk that never arrives does.
+        Fixture stuck=new Fixture();stuck.posture=Posture.seated(chair,0,stuck.view());stuck.seatBusy=Integer.MAX_VALUE;stuck.tick(50);
+        for(long waited=0;waited<=GuardDuty.BACK_LIMIT_MS&&stuck.posture.kind()==Posture.Kind.SEATED;waited+=1000) {
+            stuck.tick(1000);
+            if(waited<GuardDuty.BACK_LIMIT_MS-1000)check(stuck.posture.kind()==Posture.Kind.SEATED,"BUSY inside the time limit: still trying");
+        }
+        check(stuck.posture.kind()==Posture.Kind.WAIT&&stuck.posture.json().get("reason").getAsString().equals("NO_PATH"),"BUSY for longer than the limit: waiting, NO_PATH");
+        // The permanent codes still end it at once (SEAT_OCCUPIED and STALE_TARGET are checked above); the same for the ones from the walk and the click.
+        for(String code:new String[]{"NO_SEAT","NO_PATH","BLOCKED","OUT_OF_REACH","NO_LINE_OF_SIGHT","EMPTY_HAND_REQUIRED","SIT_REFUSED","WRONG_SEAT","UNKNOWN"}) {
+            Fixture gone=new Fixture();gone.posture=Posture.seated(chair,0,gone.view());gone.seatFailure=code;gone.tick(50);
+            check(gone.posture.kind()==Posture.Kind.WAIT&&gone.posture.json().get("reason").getAsString().equals(code),code+": the seat or the way is gone: waiting with that reason");
+        }
+        check(!Posture.RETRY_CODES.contains("SEAT_OCCUPIED")&&!Posture.RETRY_CODES.contains("STALE_TARGET")&&Posture.RETRY_CODES.equals(Set.of("BUSY","SLEEPING")),"only BUSY and SLEEPING are passing refusals");
+    }}

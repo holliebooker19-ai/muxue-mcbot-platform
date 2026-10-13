@@ -22,6 +22,16 @@ final class TaskInterrupt {
         this.reason=reason;this.paused=paused;this.task=task;openedAt=lastStep=now;
     }
     /**
+     * The pickup task a native pickup event is for: the one in the slot, else the one paused in the open window. The body
+     * stands still in a window while vanilla collects the drop it was walking to, so the pickup task there must hear about
+     * it (else it resumes to a gone drop and reports PICKUP_UNKNOWN instead of the pickup or PICKUP_TAKEN). The slot is free
+     * in a window, so at most one of the two is a pickup and nothing is counted twice. Null when neither is a pickup.
+     */
+    static PickupItem pickupOf(BodyTask slot,TaskInterrupt window) {
+        if(slot instanceof PickupItem pickup)return pickup;
+        return window!=null&&window.task instanceof PickupItem pickup?pickup:null;
+    }
+    /**
      * Why a window cannot open now, or null: the same rule as the guard's (ServerController.dutyMayInterrupt), and never
      * while the guard drives the body (it hands the body back first, then the next try opens).
      */

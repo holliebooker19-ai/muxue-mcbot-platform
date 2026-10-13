@@ -107,11 +107,12 @@ final class GuardDuty {
         return false;
     }
     /**
-     * Whether the duty would fight now, by its own rules (control, the player in range, a foe within the guard radius
-     * around the player). A seated body stands up on this, so sitting never has a range of its own.
+     * Whether the duty would fight in this very tick, by the rules {@link #tick} applies (control, the player in range, what
+     * runs may stand aside, a foe within the guard radius around the player). A seated body stands up on this, so sitting
+     * never has a range of its own, and never gets up for a fight that something holding the body (an open menu) would refuse.
      */
-    boolean wouldFight() {
-        if(stopped||!view.mayDrive())return false;
+    boolean wouldFight(boolean interruptible) {
+        if(stopped||!view.mayDrive()||!interruptible)return false;
         Vec3 companion=view.companion();
         return companion!=null&&view.position().distanceTo(companion)<=ENGAGE_RANGE&&combat.foesNear(companion);
     }

@@ -134,6 +134,14 @@ final class Posture {
             }
         };
     }
+    /**
+     * Codes the way back to the seat can throw for a reason that passes by itself: BUSY (a menu is open, the cursor holds an
+     * item, the body rides something that is not a seat: NativeSeat.requireCanSit, NativeNavigation.conditions, NativeSeat.sitDown)
+     * and SLEEPING (requireCanSit). The walk back tries again next tick; GuardDuty.BACK_LIMIT_MS still bounds the whole way back.
+     * Everything else means the seat or the way to it is gone (STALE_TARGET, NO_SEAT, SEAT_OCCUPIED, NO_PATH, BLOCKED,
+     * OUT_OF_REACH, NO_LINE_OF_SIGHT, EMPTY_HAND_REQUIRED, SIT_REFUSED, WRONG_SEAT, UNKNOWN) and turns the posture into waiting.
+     */
+    static final Set<String> RETRY_CODES=Set.of("BUSY","SLEEPING");
     /** Back to the seat after the guard stood the body up; a seat that is gone, taken or out of reach turns the posture into waiting. */
     private boolean seat(long now) {
         if(view.seated()){if(returning)view.stopSeatWalk();returning=false;state="seated";reason=null;return false;}
@@ -143,9 +151,12 @@ final class Posture {
             if(view.returnToSeat(seat)){view.stopSeatWalk();returning=false;state="seated";reason=null;return false;}
             state="seated";return true;
         } catch(RuntimeException failure) {
-            view.stopSeatWalk();returning=false;
-            // A block that is no longer a seat reads as STALE_TARGET from the seat check; to the runtime the seat is simply gone.
+            view.stopSeatWalk();
             String code=failure instanceof Protocol.Error known?known.code:"INTERNAL";
+            // Something passing (an open menu, a nap): stand still, keep returning with the same clock, try again next tick.
+            if(RETRY_CODES.contains(code)){state="seated";return false;}
+            returning=false;
+            // A block that is no longer a seat reads as STALE_TARGET from the seat check; to the runtime the seat is simply gone.
             kind=Kind.WAIT;state="waiting";reason=code.equals("STALE_TARGET")?"NO_SEAT":code;
             return false;
         }
