@@ -90,7 +90,7 @@ RuntimeMonitor后台更新持续状态；显式模式变化记录 `companion_sta
 
 状态增加`activity:following|picking-up|switching`及`pickup:{items,radius,countStatus,pickedUpCount?,lastConfirmedPickedUpCount?,lastItem?,code?,lastCode?,totals}`。totals按实际完整组件／有效上限分变体，模型只见简要分组。外层按唯一原生游标累计活动期间收到的白名单物品，包含普通碰撞拾取；子任务只确认自己的UUID，不能再加一次数量。items仅限制主动追逐，不阻止原版顺带拾取其他物品；未知／收据缺口只报告最后确认量。拾取收据只认同一身体会话和维度（停止不再带来新的"代次"）；独立观察revision屏蔽跨切换的旧观察；迟到子任务不能释放新锁或重设姿态。
 
-死后恢复（`death-recovery.ts`，托管下）：重生后运行端先读上次留下的姿态记录（`runtime/posture-<名>.json`，超过一小时、或早于玩家最近一次叫停的不用），再看 `hello.lastDeath.drops`：掉落还在（`remaining` 不是 0）、没过 `despawnAt`、同一维度、在 `travel-to` 的距离上限内、剩余时间够最短的行走、身边没有敌对且可防卫的怪（survival-state 的 `threats`）时，先用任务锁走到死亡地点、按 `deathDrop` 标记逐个捡起（路上有叫停就取消，且不再设姿态；怪出现就停），然后把死前的跟随／等待／保护设回去；坐姿只报告不恢复。全程结果以一条 `companion` 事件（【死后恢复】）告诉模型。2026-10-12 起：路上被打断（自卫等普通停止，不是玩家叫停）或开始时身边有怪，会等到没有怪、身体空下来再去，最多再去 `MAX_RESUMES`（2）次，和任务被进食、自卫暂停后接着做的次数一样；之后在掉落消失前由 `DropWatch` 盯着：身体看到带 `deathDrop` 标记的掉落（比如玩家把它传送过去）、又没有别的事占着身体时，用任务锁一口气全捡完，跟随这期间让开、不会捡一件被拉回去一次，捡到了发一条【死后掉落】事件。
+死后恢复（`death-recovery.ts`，托管下）：重生后运行端先读上次留下的姿态记录（`runtime/posture-<名>.json`，超过一小时、或早于玩家最近一次叫停的不用），再看 `hello.lastDeath.drops`：掉落还在（`remaining` 不是 0）、没过 `despawnAt`、同一维度、在 `travel-to` 的距离上限内、剩余时间够最短的行走、身边没有敌对且可防卫的怪（survival-state 的 `threats`）时，先用任务锁走到死亡地点、按 `deathDrop` 标记逐个捡起（路上有叫停就取消，且不再设姿态；怪出现就停），然后把死前的跟随／等待／保护设回去；坐姿只报告不恢复。全程结果以一条 `companion` 事件（【死后恢复】）告诉模型。2026-10-12 起：路上被打断（自卫等普通停止，不是玩家叫停）或开始时身边有怪，会等到没有怪、身体空下来再去，最多再去 `MAX_RESUMES`（2）次，和任务被进食、自卫暂停后接着做的次数一样；之后在掉落消失前由 `DropWatch` 盯着：身体看到带 `deathDrop` 标记的掉落（比如玩家把它传送过去）、又没有别的事占着身体时，用任务锁一口气全捡完，跟随这期间让开、不会捡一件被拉回去一次，捡到了发一条【死后掉落】事件。玩家明确结束（说“停”、stop-action 不带 keepCompanion、companion-mode stop，即 `explicitStopCount` 变了）之后，这次死亡的待捡清单作废，`DropWatch` 不再自己捡；说“等一下”（暂停）不变，之后还会捡。
 
 有限采集／拾取通过三个能力门控入口提供：
 

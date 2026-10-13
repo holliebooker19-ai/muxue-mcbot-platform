@@ -58,7 +58,7 @@
 
 - 现状：驱动器的 `lastStopAt` 由会话持有（`createSession`，`driver/session.mjs:75`），写进 `session-<名字>.json`（`save`，`driver/session.mjs:79`），运行端读它判断姿态记录能不能接（`posture.ts:44`）。驱动器拿它写【停止记录】提示（`stopRecord`，`driver/prompts.mjs:161`，`driver/inbox.mjs:119`）和交接单的“已取消”（`buildHandoff`）。
 - 原来的问题：驱动器只在**撤销控制**的叫停（`stopServerAgent`，`driver/stop.mjs:136`；WebUI 急停、运行端 10 秒没确认）和独立试玩身份叫停（`driver/stop.mjs:184`）时更新它；游戏里原地取消后换会话，交接单不会把被取消的任务标成“已取消”。
-- **10-13 已做**：运行端写 `player_stop` 时带上结构化字段 `stop`（`pause`／`cancel`）和 `player`（叫停的玩家）（`player-stop.ts:78`，`EventJournal.add` 的第三个参数，`events.ts:84`），驱动器不解析中文。驱动器收到 `player_stop` 时（`driver/events.mjs:178` → `playerStopConfirmed`，`driver/stop.mjs:228`）先清兜底计时器（有才清），再看 `stop`：`cancel` 才用**事件里的时间**（运行端停好身体的时候；叫停词之后运行端不再受理动作和任务，`mcp.ts:134` `holding()`，所以叫停前开始的任务都早于它）`markStop` 并存会话文件，同时把 `lastStopBy` 记成这位玩家；不比已记的晚就不记（同一句不重复记，也不把更晚的撤销叫停改回去）；`pause` 不记（说继续还要接着做）。计时器开没开不影响记不记。随之【停止记录】改成同一次叫停在同一个 Agent 进程里只附一次（`driver/inbox.mjs:119`，Agent 启动时 `agentStarted`、上下文压缩后 `compacted` 重置，额度／登录报错重送那一轮时也再附），原地取消后对话还在接着，不再每轮都附。
+- **10-13 已做**：运行端写 `player_stop` 时带上结构化字段 `stop`（`pause`／`cancel`）和 `player`（叫停的玩家）（`player-stop.ts:87`，`EventJournal.add` 的第三个参数，`events.ts:84`），驱动器不解析中文。驱动器收到 `player_stop` 时（`driver/events.mjs:178` → `playerStopConfirmed`，`driver/stop.mjs:228`）先清兜底计时器（有才清），再看 `stop`：`cancel` 才用**事件里的时间**（运行端停好身体的时候；叫停词之后运行端不再受理动作和任务，`mcp.ts:134` `holding()`，所以叫停前开始的任务都早于它）`markStop` 并存会话文件，同时把 `lastStopBy` 记成这位玩家；不比已记的晚就不记（同一句不重复记，也不把更晚的撤销叫停改回去）；`pause` 不记（说继续还要接着做）。计时器开没开不影响记不记。随之【停止记录】改成同一次叫停在同一个 Agent 进程里只附一次（`driver/inbox.mjs:119`，Agent 启动时 `agentStarted`、上下文压缩后 `compacted` 重置，额度／登录报错重送那一轮时也再附），原地取消后对话还在接着，不再每轮都附。
 - 应归：叫停的事实归**运行端**（它真正停了身体）；驱动器只读来写提示。会话文件里的 `lastStopAt` 是驱动器写给运行端看的跨层接口，现在先保留。
 
 ### 3. 叫停词识别有两份
@@ -68,7 +68,7 @@
 
 ### 4. 叫停流程分在两层
 
-- 游戏里叫停：运行端 `PlayerStop.hear`（`player-stop.ts:54`）原地停，发 `player_stop` 事件；同时不再受理动作和任务（`mcp.ts:134` `holding()`）。驱动器 `armPlayerStop`（`driver/stop.mjs:113`）只开一个 `STOP_CONFIRM_MS`（10 秒，值在 `client-runtime/host-timing.json` 的 `stopConfirmMs`，`driver/stop.mjs:14` 读入）的计时器，收到 `player_stop` 就清掉（`driver/events.mjs:177` → `driver/stop.mjs:223`）；到时没收到才走 `stopServerAgent` 撤销。
+- 游戏里叫停：运行端 `PlayerStop.hear`（`player-stop.ts:55`）原地停，发 `player_stop` 事件（暂停时跟随／等待先停在原地这一步失败只降级，事件文字里说明，照常发；身体没停下才不发）；同时不再受理动作和任务（`mcp.ts:134` `holding()`）。驱动器 `armPlayerStop`（`driver/stop.mjs:113`）只开一个 `STOP_CONFIRM_MS`（10 秒，值在 `client-runtime/host-timing.json` 的 `stopConfirmMs`，`driver/stop.mjs:14` 读入）的计时器，收到 `player_stop` 就清掉（`driver/events.mjs:177` → `driver/stop.mjs:223`）；到时没收到才走 `stopServerAgent` 撤销。
 - 同一句叫停可能从两条路到驱动器：事件文件（`driver/events.mjs:174`）和控制通道 `watch`（`server-body-control.mjs:169` → `onStop` → `armPlayerStop`，`driver/stop.mjs:258`），靠计时器去重。
 - WebUI「叫停」是急停：驱动器直接 `stopServerAgent`（`halt`，`driver/stop.mjs:234`），撤销控制、结束这一轮 Agent，进入“等新任务”（`waiting`、排着的新任务）。
 - `STOP_CONFIRM_MS`（`driver/stop.mjs:14`）和 Codex 连接的 `cancelTimeoutMs`（默认值，`scripts/agents/codex-app-server.mjs:60`）是同一个 10 秒。**已做**：两处都从 `client-runtime/host-timing.json` 的 `stopConfirmMs` 来（`scripts/host-timing.mjs` 读文件）；`cancelTimeoutMs` 仍可传参数，测试可以传小值。
